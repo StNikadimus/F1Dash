@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1 Timing Wall</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/tv.css">
+<link rel="stylesheet" href="/static/components/voyo_player.css">
+</head>
+<body>
+<div id="stage" class="view-overview">
+
+  <header id="topbar">
+    <div class="tb-event">
+      <div id="meeting" class="tb-meeting">—</div>
+      <div id="session-name" class="tb-session">WAITING FOR DATA</div>
+    </div>
+    <div class="tb-block tb-lap">
+      <div class="tb-label" id="lap-label">LAP</div>
+      <div class="tb-value" id="lap">— / —</div>
+    </div>
+    <div class="tb-block tb-clock">
+      <div class="tb-label">REMAINING</div>
+      <div class="tb-value" id="clock">N/A</div>
+    </div>
+    <div id="track-status" class="ts-pill ts-UNKNOWN">
+      <div id="ts-main">TRACK STATUS N/A</div>
+      <div id="ts-sub"></div>
+    </div>
+    <div class="tb-weather" id="weather-mini"></div>
+    <div class="tb-right">
+      <div id="mode-badge" class="mode-badge">—</div>
+      <div class="tb-chips"><div id="sync-chip"></div><div id="rule-chip" class="rule-chip"></div></div>
+      <div id="wallclock">--:--</div>
+    </div>
+  </header>
+
+  <div id="feed-banner" hidden></div>
+
+  <!-- TV modes (RACE_VIEW / VIDEO_FOCUS): separate video layer + compact panels -->
+  <div id="video-slot"></div>
+  <div id="race-info" class="panel"></div>
+  <div id="focus-bar"></div>
+  <div id="toast" hidden></div>
+  <div id="sync-banner" hidden></div>
+  <div id="sync-menu" class="sync-menu" hidden></div>
+
+  <main id="grid">
+    <section id="left">
+      <div id="map-panel" class="panel">
+        <canvas id="map"></canvas>
+        <div id="map-title" class="map-title"></div>
+        <div id="map-legend" class="map-legend"></div>
+        <div id="map-notice" class="map-notice" hidden></div>
+        <div id="pit-box" class="pit-box" hidden></div>
+        <div id="test-watermark" class="test-watermark" hidden>TEST MODE · SIMULATED DATA</div>
+      </div>
+
+      <div id="detail-panel" class="panel"></div>
+
+      <div id="view-panel" class="panel" hidden></div>
+    </section>
+
+    <section id="right">
+      <div id="board" class="panel">
+        <div class="lb-title" id="lb-title" hidden></div>
+        <div class="lb-head" id="lb-head"></div>
+        <div id="lb-rows"></div>
+        <div id="lb-empty" class="map-notice" hidden>WAITING FOR TIMING DATA</div>
+      </div>
+      <div id="rc-panel" class="panel">
+        <div class="panel-title">RACE CONTROL <span class="panel-hint">INFO / 4</span></div>
+        <ul id="rc-list"></ul>
+      </div>
+    </section>
+  </main>
+
+  <div id="help" class="overlay" hidden>
+    <div class="overlay-box">
+      <h2>REMOTE / KEYBOARD</h2>
+      <div id="help-body"></div>
+      <p class="help-foot">H / HELP closes this panel</p>
+    </div>
+  </div>
+
+  <div id="conn-overlay" class="overlay conn" hidden>
+    <div class="overlay-box">
+      <h2>DASHBOARD SERVER DISCONNECTED</h2>
+      <p id="conn-detail">RECONNECTING…</p>
+    </div>
+  </div>
+</div>
+<script src="/static/components/voyo_player.js"></script>
+<script src="/static/components/f1time.js"></script>
+<script src="/static/components/pitlane.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

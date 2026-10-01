@@ -1,0 +1,6 @@
+.git
+**/__pycache__
+*.pyc
+data/archive_cache
+data/recordings/*.jsonl.gz
+.env

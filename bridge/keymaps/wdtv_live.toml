@@ -1,0 +1,24 @@
+# ir-keytable keymap for the Western Digital WD TV Live remote (NEC extended).
+#
+# Load it (on the Linux machine that has the IR receiver):
+#   sudo ir-keytable -c -p nec -w bridge/keymaps/wdtv_live.toml
+#   sudo ir-keytable -t          # press buttons, EV_KEY lines must appear
+#
+# The six scancodes below are published by LibreELEC users for this remote.
+# Every other button differs between remote revisions - learn them yourself:
+#   sudo ir-keytable -c -p nec -t
+# press the button, copy the "scancode = 0x......" value and add a line
+#   0x...... = "KEY_INFO"
+# Use official Linux key names (KEY_INFO, KEY_PLAYPAUSE, KEY_1 ... KEY_5, ...).
+
+[[protocols]]
+name = "wdtv_live"
+protocol = "nec"
+
+[protocols.scancodes]
+0x847905 = "KEY_UP"
+0x847900 = "KEY_DOWN"
+0x847907 = "KEY_LEFT"
+0x847909 = "KEY_RIGHT"
+0x847908 = "KEY_OK"
+0x84791b = "KEY_BACK"

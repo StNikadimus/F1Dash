@@ -1,0 +1,384 @@
+{
+ "_source": "api.openf1.org/v1 (fetched 2026-09-29): sessions/meetings 2026 (subset), laps session 11253 driver 12 laps 1-8, race_control session 11253 (subset); Azerbaijan 2025 (sessions/meetings year=2025, fetched 2026-09-29) and 2026 sessions",
+ "sessions": [
+  {
+   "session_key": 11246,
+   "meeting_key": 1281,
+   "session_name": "Practice 1",
+   "session_type": "Practice",
+   "date_start": "2026-03-27T02:30:00+00:00",
+   "date_end": "2026-03-27T03:30:00+00:00",
+   "country_name": "Japan",
+   "location": "Suzuka",
+   "circuit_short_name": "Suzuka",
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11249,
+   "meeting_key": 1281,
+   "session_name": "Qualifying",
+   "session_type": "Qualifying",
+   "date_start": "2026-03-28T06:00:00+00:00",
+   "date_end": "2026-03-28T07:00:00+00:00",
+   "country_name": "Japan",
+   "location": "Suzuka",
+   "circuit_short_name": "Suzuka",
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11253,
+   "meeting_key": 1281,
+   "session_name": "Race",
+   "session_type": "Race",
+   "date_start": "2026-03-29T05:00:00+00:00",
+   "date_end": "2026-03-29T07:00:00+00:00",
+   "country_name": "Japan",
+   "location": "Suzuka",
+   "circuit_short_name": "Suzuka",
+   "gmt_offset": "09:00:00",
+   "year": 2026,
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11236,
+   "meeting_key": 1280,
+   "session_name": "Sprint Qualifying",
+   "session_type": "Qualifying",
+   "date_start": "2026-03-13T07:30:00+00:00",
+   "date_end": "2026-03-13T08:14:00+00:00",
+   "country_name": "China",
+   "location": "Shanghai",
+   "circuit_short_name": "Shanghai",
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11240,
+   "meeting_key": 1280,
+   "session_name": "Sprint",
+   "session_type": "Race",
+   "date_start": "2026-03-14T03:00:00+00:00",
+   "date_end": "2026-03-14T04:00:00+00:00",
+   "country_name": "China",
+   "location": "Shanghai",
+   "circuit_short_name": "Shanghai",
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11362,
+   "meeting_key": 1294,
+   "session_name": "Practice 1",
+   "session_type": "Practice",
+   "date_start": "2026-09-11T11:30:00+00:00",
+   "date_end": "2026-09-11T12:30:00+00:00",
+   "country_name": "Spain",
+   "location": "Madrid",
+   "circuit_short_name": "Madring",
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11307,
+   "meeting_key": 1287,
+   "session_name": "Race",
+   "session_type": "Race",
+   "date_start": "2026-06-14T13:00:00+00:00",
+   "date_end": "2026-06-14T15:00:00+00:00",
+   "country_name": "Spain",
+   "location": "Barcelona",
+   "circuit_short_name": "Catalunya",
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11731,
+   "meeting_key": 1308,
+   "session_name": "Race",
+   "session_type": "Race",
+   "date_start": "2026-10-04T07:00:00+00:00",
+   "date_end": "2026-10-04T09:00:00+00:00",
+   "country_name": "Bahrain",
+   "location": "Kuala Lumpur",
+   "circuit_short_name": "Kuala Lumpur",
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11370,
+   "meeting_key": 1295,
+   "session_name": "Practice 1",
+   "session_type": "Practice",
+   "date_start": "2026-09-24T08:30:00+00:00",
+   "date_end": "2026-09-24T09:30:00+00:00",
+   "country_name": "Azerbaijan",
+   "country_code": "AZE",
+   "location": "Baku",
+   "circuit_short_name": "Baku",
+   "gmt_offset": "04:00:00",
+   "year": 2026,
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11371,
+   "meeting_key": 1295,
+   "session_name": "Practice 2",
+   "session_type": "Practice",
+   "date_start": "2026-09-24T12:00:00+00:00",
+   "date_end": "2026-09-24T13:00:00+00:00",
+   "country_name": "Azerbaijan",
+   "country_code": "AZE",
+   "location": "Baku",
+   "circuit_short_name": "Baku",
+   "gmt_offset": "04:00:00",
+   "year": 2026,
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11372,
+   "meeting_key": 1295,
+   "session_name": "Practice 3",
+   "session_type": "Practice",
+   "date_start": "2026-09-25T08:30:00+00:00",
+   "date_end": "2026-09-25T09:30:00+00:00",
+   "country_name": "Azerbaijan",
+   "country_code": "AZE",
+   "location": "Baku",
+   "circuit_short_name": "Baku",
+   "gmt_offset": "04:00:00",
+   "year": 2026,
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11373,
+   "meeting_key": 1295,
+   "session_name": "Qualifying",
+   "session_type": "Qualifying",
+   "date_start": "2026-09-25T12:00:00+00:00",
+   "date_end": "2026-09-25T13:00:00+00:00",
+   "country_name": "Azerbaijan",
+   "country_code": "AZE",
+   "location": "Baku",
+   "circuit_short_name": "Baku",
+   "gmt_offset": "04:00:00",
+   "year": 2026,
+   "is_cancelled": false
+  },
+  {
+   "session_key": 11377,
+   "meeting_key": 1295,
+   "session_name": "Race",
+   "session_type": "Race",
+   "date_start": "2026-09-26T11:00:00+00:00",
+   "date_end": "2026-09-26T13:00:00+00:00",
+   "country_name": "Azerbaijan",
+   "country_code": "AZE",
+   "location": "Baku",
+   "circuit_short_name": "Baku",
+   "gmt_offset": "04:00:00",
+   "year": 2026,
+   "is_cancelled": false
+  },
+  {
+   "session_key": 9897,
+   "meeting_key": 1269,
+   "session_name": "Practice 1",
+   "session_type": "Practice",
+   "date_start": "2025-09-19T08:30:00+00:00",
+   "date_end": "2025-09-19T09:30:00+00:00",
+   "country_name": "Azerbaijan",
+   "country_code": "AZE",
+   "location": "Baku",
+   "circuit_short_name": "Baku",
+   "gmt_offset": "04:00:00",
+   "year": 2025,
+   "is_cancelled": false
+  },
+  {
+   "session_key": 9898,
+   "meeting_key": 1269,
+   "session_name": "Practice 2",
+   "session_type": "Practice",
+   "date_start": "2025-09-19T12:00:00+00:00",
+   "date_end": "2025-09-19T13:00:00+00:00",
+   "country_name": "Azerbaijan",
+   "country_code": "AZE",
+   "location": "Baku",
+   "circuit_short_name": "Baku",
+   "gmt_offset": "04:00:00",
+   "year": 2025,
+   "is_cancelled": false
+  },
+  {
+   "session_key": 9899,
+   "meeting_key": 1269,
+   "session_name": "Practice 3",
+   "session_type": "Practice",
+   "date_start": "2025-09-20T08:30:00+00:00",
+   "date_end": "2025-09-20T09:30:00+00:00",
+   "country_name": "Azerbaijan",
+   "country_code": "AZE",
+   "location": "Baku",
+   "circuit_short_name": "Baku",
+   "gmt_offset": "04:00:00",
+   "year": 2025,
+   "is_cancelled": false
+  },
+  {
+   "session_key": 9900,
+   "meeting_key": 1269,
+   "session_name": "Qualifying",
+   "session_type": "Qualifying",
+   "date_start": "2025-09-20T12:00:00+00:00",
+   "date_end": "2025-09-20T13:00:00+00:00",
+   "country_name": "Azerbaijan",
+   "country_code": "AZE",
+   "location": "Baku",
+   "circuit_short_name": "Baku",
+   "gmt_offset": "04:00:00",
+   "year": 2025,
+   "is_cancelled": false
+  },
+  {
+   "session_key": 9904,
+   "meeting_key": 1269,
+   "session_name": "Race",
+   "session_type": "Race",
+   "date_start": "2025-09-21T11:00:00+00:00",
+   "date_end": "2025-09-21T13:00:00+00:00",
+   "country_name": "Azerbaijan",
+   "country_code": "AZE",
+   "location": "Baku",
+   "circuit_short_name": "Baku",
+   "gmt_offset": "04:00:00",
+   "year": 2025,
+   "is_cancelled": false
+  }
+ ],
+ "meetings": [
+  {
+   "meeting_key": 1280,
+   "meeting_name": "Chinese Grand Prix",
+   "location": "Shanghai"
+  },
+  {
+   "meeting_key": 1281,
+   "meeting_name": "Japanese Grand Prix",
+   "location": "Suzuka"
+  },
+  {
+   "meeting_key": 1287,
+   "meeting_name": "Barcelona Grand Prix",
+   "location": "Barcelona"
+  },
+  {
+   "meeting_key": 1294,
+   "meeting_name": "Spanish Grand Prix",
+   "location": "Madrid"
+  },
+  {
+   "meeting_key": 1308,
+   "meeting_name": "Bahrain Grand Prix",
+   "location": "Kuala Lumpur"
+  },
+  {
+   "meeting_key": 1295,
+   "meeting_name": "Azerbaijan Grand Prix",
+   "location": "Baku",
+   "year": 2026
+  },
+  {
+   "meeting_key": 1269,
+   "meeting_name": "Azerbaijan Grand Prix",
+   "location": "Baku",
+   "year": 2025
+  }
+ ],
+ "laps": [
+  {
+   "driver_number": 12,
+   "lap_number": 1,
+   "date_start": "2026-03-29T05:14:02.078000+00:00",
+   "lap_duration": 99.215,
+   "is_pit_out_lap": false
+  },
+  {
+   "driver_number": 12,
+   "lap_number": 2,
+   "date_start": "2026-03-29T05:15:41.292000+00:00",
+   "lap_duration": 94.475,
+   "is_pit_out_lap": false
+  },
+  {
+   "driver_number": 12,
+   "lap_number": 3,
+   "date_start": "2026-03-29T05:17:15.625000+00:00",
+   "lap_duration": 95.536,
+   "is_pit_out_lap": false
+  },
+  {
+   "driver_number": 12,
+   "lap_number": 4,
+   "date_start": "2026-03-29T05:18:51.404000+00:00",
+   "lap_duration": 95.523,
+   "is_pit_out_lap": false
+  },
+  {
+   "driver_number": 12,
+   "lap_number": 5,
+   "date_start": "2026-03-29T05:20:26.878000+00:00",
+   "lap_duration": 95.24,
+   "is_pit_out_lap": false
+  },
+  {
+   "driver_number": 12,
+   "lap_number": 6,
+   "date_start": "2026-03-29T05:22:02.092000+00:00",
+   "lap_duration": 94.962,
+   "is_pit_out_lap": false
+  },
+  {
+   "driver_number": 12,
+   "lap_number": 7,
+   "date_start": "2026-03-29T05:23:36.975000+00:00",
+   "lap_duration": 95.076,
+   "is_pit_out_lap": false
+  },
+  {
+   "driver_number": 12,
+   "lap_number": 8,
+   "date_start": "2026-03-29T05:25:12.157000+00:00",
+   "lap_duration": 95.203,
+   "is_pit_out_lap": false
+  }
+ ],
+ "race_control": [
+  {
+   "date": "2026-03-29T04:18:28+00:00",
+   "category": "Other",
+   "message": "FORMATION LAP WILL START AT 14:10"
+  },
+  {
+   "date": "2026-03-29T04:30:01+00:00",
+   "category": "Flag",
+   "flag": "GREEN",
+   "message": "GREEN LIGHT - PIT EXIT OPEN"
+  },
+  {
+   "date": "2026-03-29T05:14:02.078000+00:00",
+   "category": "SessionStatus",
+   "message": "SESSION STARTED"
+  },
+  {
+   "date": "2026-03-29T05:48:11+00:00",
+   "category": "SafetyCar",
+   "message": "SAFETY CAR DEPLOYED"
+  },
+  {
+   "date": "2026-03-29T06:42:05+00:00",
+   "category": "Flag",
+   "flag": "CHEQUERED",
+   "message": "CHEQUERED FLAG"
+  },
+  {
+   "date": "2026-03-29T06:42:05.699000+00:00",
+   "category": "SessionStatus",
+   "message": "SESSION FINISHED"
+  }
+ ]
+}

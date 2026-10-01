@@ -1,0 +1,33 @@
+/* VOYO video slot component */
+#video-slot {
+  position: absolute; background: #000; overflow: hidden; display: none;
+  border: 2px solid transparent;
+}
+#video-slot.focused { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(61,139,255,.45) inset; }
+.vp-video, .vp-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
+.vp-placeholder {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; text-align: center; color: var(--text-3);
+  background: repeating-linear-gradient(135deg, #07090c 0 22px, #0a0d11 22px 44px);
+}
+.vp-logo { font-size: 64px; font-weight: 900; letter-spacing: .2em; color: #2a3440; }
+.vp-line { font-size: 26px; font-weight: 800; letter-spacing: .06em; color: var(--text-2); }
+.vp-small { font-size: 18px; font-weight: 600; max-width: 80%; line-height: 1.5; }
+.vp-small b { color: var(--text); font-family: var(--mono); }
+.vp-status {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  background: rgba(0,0,0,.75); border: 1px solid var(--line-2); border-radius: 8px;
+  padding: 12px 22px; font-size: 24px; font-weight: 900; letter-spacing: .08em;
+}
+.vp-status.vp-error { border-color: var(--red); color: #ffb3ba; }
+.vp-status.vp-info { font-size: 20px; }
+.vp-focus-hint {
+  display: none; position: absolute; left: 12px; bottom: 12px; background: rgba(0,0,0,.72);
+  border: 1px solid var(--blue); color: #cfe1ff; font-size: 17px; font-weight: 800; padding: 6px 12px; border-radius: 6px;
+}
+#video-slot.focused .vp-focus-hint { display: block; }
+#toast {
+  position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 60;
+  background: rgba(13,18,24,.95); border: 1px solid var(--line-2); border-radius: 8px;
+  padding: 10px 22px; font-size: 22px; font-weight: 800; letter-spacing: .04em;
+}

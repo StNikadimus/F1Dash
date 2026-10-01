@@ -1,0 +1,22 @@
+# systemd unit - runs the dashboard permanently (e.g. the whole race weekend).
+#   sudo cp deploy/f1-dashboard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now f1-dashboard
+# Adjust User and paths below.
+[Unit]
+Description=F1 TV live timing dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=f1
+WorkingDirectory=/opt/f1-dashboard
+Environment=F1TV_TOKEN=
+ExecStart=/opt/f1-dashboard/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

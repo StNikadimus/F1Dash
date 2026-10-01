@@ -1,0 +1,297 @@
+# ---------------------------------------------------------------------------
+# F1 TV Dashboard configuration
+#
+# Every value can also be overridden by an environment variable named
+#   F1DASH_<SECTION>_<KEY>   e.g. F1DASH_SOURCE_MODE=test
+# and some by command-line flags (python main.py --help).
+# ---------------------------------------------------------------------------
+
+[server]
+host = "0.0.0.0"
+port = 8080
+log_level = "INFO"          # DEBUG, INFO, WARNING, ERROR
+
+[source]
+# "live"   - official F1 live timing feed (livetiming.formula1.com)
+# "test"   - built-in simulator (clearly marked TEST MODE on screen)
+# "replay" - replay a recorded session (see [replay])
+# "vod"    - follow a VOYO recording: the session shown in VOYO, at the video's time (see [vod])
+mode = "live"
+
+# Classic fixed delay (seconds) used when the VOYO video layer is off and
+# [sync] mode = "AUTO". The delay is applied on F1's event-time axis (see [sync]).
+delay_seconds = 0.0
+
+[live]
+# "auto"   - SignalR Core first, falls back to legacy SignalR 1.5 on failure
+# "core"   - wss://livetiming.formula1.com/signalrcore only
+# "legacy" - wss://livetiming.formula1.com/signalr only
+transport = "auto"
+
+# OPTIONAL F1 TV subscription token. The dashboard works without it.
+# Findings (see README "Car positions without F1 TV"): F1 accepts a subscribe
+# for Position.z / CarData.z from anonymous connections but does not send
+# them; with a token they are sent. Without a token the server additionally
+# tries the public archive stream of the running session (archive_follow).
+# Paste the bare JWT ("eyJ...") or the complete "login-session" cookie value
+# from formula1.com - or better, set env F1TV_TOKEN.
+f1tv_token = ""
+
+# Topics to subscribe to. Unknown/unavailable topics are simply ignored.
+topics = [
+  "Heartbeat", "SessionInfo", "SessionStatus", "SessionData", "ExtrapolatedClock",
+  "LapCount", "TrackStatus", "DriverList", "TimingData", "TimingDataF1",
+  "TimingAppData", "TimingStats", "RaceControlMessages", "WeatherData",
+  "TeamRadio", "TopThree", "PitLaneTimeCollection", "CurrentTyres",
+  "Position.z", "CarData.z",
+]
+
+# Reconnect back-off (seconds)
+reconnect_min = 2.0
+reconnect_max = 60.0
+# Reconnect if nothing at all is received for this many seconds
+silence_timeout = 120.0
+
+# While a session runs and the socket sends no Position.z/CarData.z, poll the
+# public archive (livetiming.formula1.com/static/<session>/Position.z.jsonStream)
+# for real position/telemetry data. Harmless if not available.
+archive_follow = true
+archive_poll_seconds = 3.0
+
+# Save every received raw message to data/recordings/<session>.jsonl.gz so the
+# session can later be replayed with:  python main.py --replay <file>
+record = true
+
+[replay]
+# A recording file (.jsonl, .jsonl.gz, .json, .json.gz) or an F1 archive
+# session path such as "2026/2026-03-29_Japanese_Grand_Prix/2026-03-29_Race/"
+# or "latest" (most recent finished session of the current season).
+source = "data/recordings/sample-2026-japan-race.json.gz"
+speed = 1.0               # 1.0 = real time, 4.0 = four times faster
+start_offset = "auto"     # "auto" = start 10 s before lights out / session start; or seconds to skip (0 = from the very beginning)
+loop = true
+
+[test]
+# Real circuit outline used by the simulator (file in data/test_tracks/).
+circuit = "jp-1962"
+# Simulated race length and speed-up factor of the simulated timeline.
+laps = 50
+time_scale = 1.0
+
+[tracks]
+# Circuit geometry API (the same data FastF1 uses). Cached in data/tracks/.
+api_url = "https://api.multiviewer.app/api/v1/circuits/{circuit_key}/{year}"
+# Learn pit-lane geometry from real car positions while a car is in the pit
+# lane (only possible when Position.z is available).
+learn_pitlane = true
+# If no geometry can be downloaded, learn the outline from one clean lap of
+# real position data.
+learn_outline = true
+
+[dashboard]
+# Frontend interpolation buffer for car movement (milliseconds). Position
+# data arrives in batches, so the map is drawn slightly in the past.
+interp_delay_ms = 1200
+# Canvas redraw rate for the map (frames per second).
+map_fps = 30
+# "full", "reduced" (no pulsing, only static colours) or "off"
+animations = "full"
+# Duration of one flag pulse cycle in milliseconds (VSC / SC / RED)
+pulse_period_ms = 2400
+# Leaderboard row re-order animation in ms (0 = off)
+reorder_ms = 450
+# Auto-rotate views (PLAY/PAUSE toggles it) every N seconds
+auto_cycle_seconds = 20
+# Number of race-control messages kept on screen
+race_control_max = 60
+
+[remote]
+enabled = true
+# Optional shared secret. If set, HTTP remote requests must send it as
+# header "X-Remote-Token" or query parameter "token".
+token = ""
+# Allow GET /api/remote/key?key=KEY_UP (useful for busybox wget on a WD TV)
+allow_get = true
+
+# Remote/keyboard key  ->  dashboard command.  Only commands from the
+# whitelist in server/remote.py are accepted. Command arguments follow ":".
+[remote.keymap]
+KEY_UP = "MOVE_UP"
+KEY_DOWN = "MOVE_DOWN"
+KEY_LEFT = "CHANGE_VIEW:prev"
+KEY_RIGHT = "CHANGE_VIEW:next"
+KEY_OK = "OPEN_TELEMETRY"
+KEY_ENTER = "OPEN_TELEMETRY"
+KEY_SELECT = "OPEN_TELEMETRY"
+KEY_BACK = "CLOSE_PANEL"
+KEY_ESC = "CLOSE_PANEL"
+KEY_EXIT = "CLOSE_PANEL"
+KEY_INFO = "OPEN_RACE_CONTROL"
+KEY_I = "OPEN_RACE_CONTROL"
+KEY_PLAYPAUSE = "VIDEO_PLAY_PAUSE"
+KEY_PLAY = "VIDEO_PLAY_PAUSE"
+KEY_PAUSE = "VIDEO_PLAY_PAUSE"
+KEY_P = "VIDEO_PLAY_PAUSE"
+KEY_SPACE = "CYCLE_TV_MODE"
+KEY_A = "TOGGLE_AUTO_CYCLE"
+KEY_V = "VIDEO_FOCUS"
+KEY_M = "VIDEO_MUTE"
+KEY_F = "VIDEO_FULLSCREEN"
+KEY_T = "CYCLE_TV_MODE"
+KEY_1 = "CHANGE_VIEW:overview"
+KEY_2 = "CHANGE_VIEW:telemetry"
+KEY_3 = "CHANGE_VIEW:strategy"
+KEY_4 = "CHANGE_VIEW:racecontrol"
+KEY_5 = "CHANGE_VIEW:weather"
+KEY_H = "TOGGLE_HELP"
+KEY_HELP = "TOGGLE_HELP"
+KEY_PAGEUP = "PREVIOUS_DRIVER"
+KEY_PAGEDOWN = "NEXT_DRIVER"
+KEY_NEXT = "NEXT_DRIVER"
+KEY_PREVIOUS = "PREVIOUS_DRIVER"
+# VOYO <-> F1 sync (see [sync])
+KEY_S = "SYNC_MARK"               # press when the selected car / leader crosses the line on the video
+KEY_L = "SYNC_START"              # press at lights out / when the session clock starts on the video
+KEY_C = "SYNC_CONFIRM"            # the dashboard's lap / clock matches the TV graphics
+KEY_X = "SYNC_CLEAR"              # forget all anchors
+KEY_K = "SYNC_PIN"                # manual anchor: "the dashboard time is right now"
+KEY_O = "SYNC_KEEP_OLD"           # after "possible sync drift": keep the current sync
+KEY_N = "SYNC_USE_NEW"            # ... or use the new anchor (the old one stays in the history)
+KEY_R = "SYNC_RESYNC"
+KEY_D = "SYNC_DEBUG"              # = SYNC menu
+KEY_Y = "SYNC_MENU"               # SYNC menu (countdown / exact time / automatic / estimate)
+KEY_EQUAL = "SYNC_PLUS"           # + : more delay (dashboard shows older data)
+KEY_KPPLUS = "SYNC_PLUS"
+KEY_MINUS = "SYNC_MINUS"          # - : less delay
+KEY_KPMINUS = "SYNC_MINUS"
+KEY_CHANNELUP = "SYNC_PLUS"       # IR remote (learn the scancodes, see wdtv/README.md)
+KEY_CHANNELDOWN = "SYNC_MINUS"
+KEY_RED = "SYNC_MARK"
+KEY_GREEN = "SYNC_RESYNC"
+KEY_YELLOW = "SYNC_DEBUG"
+KEY_BLUE = "SYNC_START"
+
+# Overrides while a TV mode with video is shown (RACE_VIEW / VIDEO_FOCUS).
+# Keys not listed here keep their normal meaning (Up/Down still select drivers).
+[remote.keymap_video]
+KEY_OK = "VIDEO_FOCUS"            # remote OK focuses the video (keyboard Enter keeps OPEN_TELEMETRY)
+KEY_SELECT = "VIDEO_FOCUS"
+KEY_BACK = "VIDEO_UNFOCUS"        # unfocus video -> leave VIDEO_FOCUS -> back to overview
+KEY_ESC = "VIDEO_UNFOCUS"
+KEY_EXIT = "VIDEO_UNFOCUS"
+
+# Overrides while the video player has the focus (after OK / V).
+[remote.keymap_video_focus]
+KEY_LEFT = "VIDEO_SEEK:-10"       # only executed when the stream is seekable
+KEY_RIGHT = "VIDEO_SEEK:+10"
+KEY_UP = "VIDEO_VOLUME:up"
+KEY_DOWN = "VIDEO_VOLUME:down"
+KEY_OK = "VIDEO_PLAY_PAUSE"
+KEY_ENTER = "VIDEO_PLAY_PAUSE"
+
+# ---------------------------------------------------------------------------
+# VOYO video layer (optional). The F1 data pipeline does not depend on it.
+# See README section "VOYO video (TV modes)" for what VOYO allows.
+# ---------------------------------------------------------------------------
+[voyo]
+enabled = true
+# "window" - VOYO's official website/player in its own browser window, placed
+#            over the video slot by tools/tv_launcher.py   (recommended, works)
+# "embed"  - iframe; only used if VOYO's headers allow framing (checked automatically)
+# "hls"    - <video> for a stream URL the provider OFFICIALLY offers for external
+#            players (VOYO offers none). Never use an extracted/copied stream URL.
+mode = "window"
+url = "https://voyo.si/"
+hls_url = ""
+# TV mode at start: FULL_DASHBOARD, RACE_VIEW or VIDEO_FOCUS
+default_tv_mode = "RACE_VIEW"
+# periodically check that VOYO is reachable; if not, fall back to FULL_DASHBOARD
+check_reachability = true
+check_interval_seconds = 60
+fallback_when_unreachable = true
+
+# ---------------------------------------------------------------------------
+# VOYO video <-> F1 data synchronisation. See README "VOYO sync".
+#
+# Clocks: A = F1 event time (canonical, from the feed's own timestamps),
+#         B = receive time (diagnostics only), C = VOYO video currentTime.
+# The dashboard shows the complete F1 state at   A = C + offset
+# (the offset comes from MARK calibration; before that it is an ESTIMATE).
+# ---------------------------------------------------------------------------
+[sync]
+enabled = true
+# "AUTO"  - VOYO playback clock when tools/tv_launcher.py delivers it, otherwise a
+#           fixed delay (broadcast_delay_seconds with VOYO enabled, else [source] delay_seconds)
+# "VOYO"  - same as AUTO (name kept for clarity)
+# "DELAY" - always a fixed delay of broadcast_delay_seconds (ignores the video clock)
+# "LIVE"  - no delay at all
+mode = "AUTO"
+
+# Seconds of F1 history kept behind the shown state (seek back / rebuild). While the
+# video is paused newer data is kept as well (up to max_hold_seconds).
+buffer_seconds = 120
+max_hold_seconds = 1800
+
+# ONLY a fallback / first estimate: "what I see on VOYO at the live edge is this many
+# seconds behind F1". The real mapping comes from the video clock + MARK calibration.
+broadcast_delay_seconds = 5.0
+
+# SYNC + / SYNC - step (seconds)
+adjustment_step = 0.25
+
+# After calibration: move slowly (drift_slew_seconds_per_second) to a new median
+# instead of jumping. FORCE RESYNC always jumps.
+auto_drift_correction = true
+drift_slew_seconds_per_second = 0.05
+
+# Use the VOYO player's HTMLVideoElement.currentTime as the clock (read by the launcher)
+voyo_playback_clock = true
+# Local Chrome DevTools port of the dedicated VOYO browser profile (127.0.0.1 only)
+cdp_port = 9223
+clock_poll_hz = 5.0
+
+# MARK calibration: human reaction time subtracted from the key press (0 when the
+# video is paused at the crossing), search window around the current estimate and
+# the number of most recent marks used for the median.
+mark_reaction_seconds = 0.2
+mark_window_seconds = 40
+marks_used = 5
+
+# Car positions are streamed this far ahead of the video so the map is drawn at
+# exactly the video's time (they are only displayed when the video gets there).
+position_lookahead_ms = 2500
+
+# Accept the playback clock (POST /api/sync/voyo) only from this computer.
+allow_remote_clock = false
+
+# --- recordings (VOD) --------------------------------------------------------
+# Seconds of VOYO video BEFORE the scheduled session start (sessions.date_start).
+# Only used for a first ESTIMATE (confidence LOW) until you set an anchor.
+# Empty = not configured: the system learns it from your first real anchor per
+# session type and never assumes a value. Real starts differ from the schedule
+# by minutes (2026 Japan race: lights out 14 min after date_start).
+broadcast_lead_seconds = ""
+lead_uncertainty_seconds = 1200    # how wrong that estimate may be (search window for anchors)
+# anchor quality: nominal error of one anchor, "agree" (HIGH) and "disagree" (LOW) limits
+anchor_error_seconds = 0.25
+# SYNC HEALTH / drift: a new anchor within anchors_agree_seconds of the current sync is
+# consistent (health HIGH); up to drift_warning_seconds it is a minor deviation (used, the
+# display moves slowly); beyond it is NOT used until you choose Keep old / Use new.
+anchors_agree_seconds = 0.5
+drift_warning_seconds = 2.0
+outlier_seconds = 1.0              # with >= 3 anchors: further than this from the median = outlier
+
+[vod]
+# "auto" = detect the session from the VOYO page title (via OpenF1), or an
+# OpenF1 session_key (e.g. 11253 = 2026 Japanese GP race). Also: python main.py --vod 11253
+session_key = "auto"
+openf1_url = "https://api.openf1.org/v1"
+# AUTO MEDIA SYNC: VOYO names race recordings after the Grand Prix only ("VN Azerbajdžana");
+# such a bare title counts as the Race only if the video is at least this long (a race
+# broadcast). Shorter, or false -> the session is NOT guessed: choose it with SELECT SESSION.
+bare_gp_title_is_race = true
+race_min_video_seconds = 8100
+# No year in the title and the session exists in several seasons: take the latest one only
+# if it was at most this many days ago (shown as "season ASSUMED"); otherwise choose it.
+# 0 = never assume.
+assume_recent_season_days = 21

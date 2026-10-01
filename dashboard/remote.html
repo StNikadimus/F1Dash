@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>F1 Remote</title>
+<style>
+  :root { color-scheme: dark; --bg: #05070a; --btn: #151c25; --line: #273342; --text: #eef2f6; --acc: #3d8bff; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 600 16px system-ui, sans-serif; padding: 14px; }
+  h1 { font-size: 15px; letter-spacing: .14em; color: #8795a3; margin: 4px 0 12px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 420px; margin: 0 auto 14px; }
+  button { background: var(--btn); color: var(--text); border: 1px solid var(--line); border-radius: 12px;
+    font: 800 18px system-ui, sans-serif; padding: 18px 6px; touch-action: manipulation; }
+  button:active { background: var(--acc); }
+  .ok { background: #1d3557; }
+  .wide { grid-column: span 3; }
+  #st { text-align: center; color: #8795a3; font-size: 13px; min-height: 18px; }
+  .sync { max-width: 420px; margin: 18px auto 0; border-top: 1px solid var(--line); padding-top: 12px; }
+  .sync h2 { font-size: 15px; letter-spacing: .14em; color: #8795a3; margin: 0 0 8px; }
+  .sync .row { display: flex; gap: 8px; margin-bottom: 8px; }
+  .sync input, .sync select { flex: 1; min-width: 0; background: #0b1017; color: var(--text); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px; font: 800 18px ui-monospace, monospace; }
+  .sync select { flex: 0 0 auto; font: 700 15px system-ui; }
+  .sync button { padding: 12px 10px; font-size: 15px; }
+  .sync label { display: block; font-size: 13px; color: #8795a3; margin: 10px 0 4px; }
+  #sy { font-size: 14px; line-height: 1.4; background: #0b1017; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  #sy b { font-size: 16px; }
+  #sr { font-size: 14px; color: #bfe3ff; min-height: 18px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>F1 TIMING WALL · REMOTE</h1>
+<div class="grid">
+  <button data-k="KEY_H">HELP</button><button data-k="KEY_UP">▲</button><button data-k="KEY_I">RC</button>
+  <button data-k="KEY_LEFT">◀</button><button class="ok" data-k="KEY_OK">OK</button><button data-k="KEY_RIGHT">▶</button>
+  <button data-k="KEY_BACK">BACK</button><button data-k="KEY_DOWN">▼</button><button data-k="KEY_PLAYPAUSE">⏯</button>
+</div>
+<div class="grid">
+  <button data-k="KEY_1">1 OVR</button><button data-k="KEY_2">2 TEL</button><button data-k="KEY_3">3 STR</button>
+  <button data-k="KEY_4">4 RC</button><button data-k="KEY_5">5 WX</button><button data-k="KEY_ENTER">TELEM.</button>
+  <button class="wide" data-k="KEY_SPACE">TV MODE: DASHBOARD / RACE VIEW / VIDEO FOCUS</button>
+  <button data-k="KEY_A">AUTO</button><button data-k="KEY_V">VIDEO FOCUS</button><button data-k="KEY_M">MUTE</button>
+  <button data-k="KEY_MINUS">SYNC −</button><button data-k="KEY_S">MARK</button><button data-k="KEY_EQUAL">SYNC +</button>
+  <button data-k="KEY_R">RESYNC</button><button data-k="KEY_D">SYNC INFO</button><button data-k="KEY_T">TV MODE</button>
+</div>
+<div id="st"></div>
+<script src="/static/components/f1time.js"></script>
+<div class="sync">
+  <h2>SYNC VIDEO</h2>
+  <div id="md" style="margin-bottom:8px"></div>
+  <label>Select session (if AUTO MEDIA SYNC failed or picked the wrong one)</label>
+  <div class="row"><select id="yr"></select><select id="gp"><option value="">Grand Prix…</option></select></div>
+  <div class="row"><select id="ss"><option value="">Session…</option></select><button id="usess">Use</button></div>
+  <div id="sy">…</div>
+  <div id="timedbox" hidden>
+    <label>Session clock (pause VOYO on it, or tap Capture when you read it)</label>
+    <div class="row"><select id="qph"></select><select id="qmode"><option value="remaining">remaining</option><option value="elapsed">elapsed</option></select>
+      <input id="qclk" placeholder="07:32" inputmode="text"><button data-a="clock">Apply</button></div>
+    <label>Phase marker: pause VOYO exactly on the moment, then SYNC HERE</label>
+    <div class="row"><select id="qmk"></select><button data-a="marker">SYNC HERE</button></div>
+  </div>
+  <div id="racebox">
+  <label>VOYO countdown to the session start (pause VOYO on it, or tap Capture when you read it)</label>
+  <div class="row"><input id="cd" placeholder="23:47" inputmode="text"><button data-cap>Capture</button><button data-a="countdown">Apply</button></div>
+  </div>
+  <label>Manual exact time the video shows</label>
+  <div class="row"><input id="ex" placeholder="14:48:32"><select id="tz"><option value="slo">Slovenia</option><option value="track">Track</option></select></div>
+  <div class="row"><select id="fmt"><option value="24">24-hour</option><option value="12">12-hour</option></select><select id="ap" hidden><option value="am">AM</option><option value="pm">PM</option></select><button data-a="exact">Apply</button></div>
+  <div id="exprev" style="font-size:13px;color:#8795a3;margin:-4px 0 8px"></div>
+  <div id="estbox">
+  <label>Session start estimate: video runs this long before the start (marked Estimated)</label>
+  <div class="row"><input id="es" placeholder="28:50"><button data-a="estimate">Apply</button></div>
+  </div>
+  <div class="row"><button data-a="auto">Automatic</button><button data-a="resync">Re-sync</button><button data-a="clear">Clear</button><button data-k="KEY_Y">Menu on TV</button></div>
+  <div class="row" id="driftrow" hidden><button data-a="keep_old">Keep old</button><button data-a="use_new">Use new</button></div>
+  <div id="sr"></div>
+</div>
+<script>
+  const token = new URLSearchParams(location.search).get("token");
+  const st = document.getElementById("st");
+  document.querySelectorAll("button[data-k]").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      const r = await fetch("/api/remote/key", {
+        method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, token ? { "X-Remote-Token": token } : {}),
+        body: JSON.stringify({ key: b.dataset.k }),
+      });
+      st.textContent = r.ok ? b.dataset.k : `${b.dataset.k}: HTTP ${r.status}`;
+    } catch (e) { st.textContent = "server unreachable"; }
+  }));
+
+  // ---- SYNC (same API as the TV's SYNC menu)
+  const $ = (id) => document.getElementById(id);
+  let sync = null;
+  const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  async function api(action, body) {
+    const r = await fetch("/api/sync/" + action, { method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, token ? { "X-Remote-Token": token } : {}),
+      body: JSON.stringify(body || {}) });
+    const j = await r.json().catch(() => ({ ok: false, error: "HTTP " + r.status }));
+    if (j.state) { sync = j.state; show(); }
+    return j;
+  }
+  function vid(s) { if (s == null) return "N/A"; s = Math.max(0, Math.floor(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0"); }
+  function show() {
+    const y = sync || {};
+    const md = y.media;
+    if (md) {
+      const ok = ["HIGH", "MEDIUM", "MANUAL"].includes(y.confidence) && y.synced;
+      $("md").innerHTML = `MEDIA <b>${esc(md.label || "Unknown F1 session")}</b> · ` +
+        `<b>${esc({ detected: "detected", manual: "selected", ambiguous: "AUTO MEDIA SYNC FAILED", failed: "AUTO MEDIA SYNC FAILED", detecting: "detecting…", waiting: "waiting for VOYO" }[md.state] || md.state)}</b>` +
+        `${md.data === "loaded" ? " · OpenF1 session loaded" : md.data === "loading" ? " · loading…" : ""}<br>` +
+        `SYNC <b>${md.data !== "loaded" ? "—" : ok ? "SYNCED — " + esc(y.confidence) : y.confidence === "LOW" ? "ESTIMATED" : "SYNC REQUIRED"}</b>` +
+        (md.state === "ambiguous" || md.state === "failed" ? `<br><span style="color:#ffb000">${esc(md.reason || "")}</span>` : "");
+    }
+    const ok = ["HIGH", "MEDIUM", "MANUAL"].includes(y.confidence) && y.synced;
+    const f1 = ok ? new Date(y.absoluteTime).toLocaleTimeString([], { hour12: false }) : y.confidence === "LOW" && y.approxTime ? "≈ " + y.approxTime : "N/A";
+    $("sy").innerHTML = `<b>${esc(y.sessionName ? (y.meetingName || "") + " — " + y.sessionName : "session not identified")}</b><br>` +
+      `video ${vid(y.voyo && y.voyo.playback)} · F1 time <b>${esc(f1)}</b><br>` +
+      `SYNC HEALTH <b>${esc(y.health || "")}</b>${y.healthError ? " · " + (y.errorMeasured ? "error " : "estimated error ") + esc(y.healthError) : ""}<br>` +
+      `confidence <b>${esc(y.confidence || "")}</b> · ${esc(y.method || "")}` +
+      (y.anchorsValid ? ` · ${y.anchorsValid} valid${y.anchorsOutliers ? ", " + y.anchorsOutliers + " outlier" : ""}` : "") + "<br>" +
+      (y.drift ? `<b style="color:#ffb000">POSSIBLE SYNC DRIFT: new anchor differs by ${Math.abs(y.drift.shift).toFixed(2)} s - not applied</b><br>` : "") +
+      (y.deviationNote ? `<span style="color:#ffb000">${esc(y.deviationNote)}</span><br>` : "") +
+      `<span style="color:#8795a3">${esc(y.reason || "")}</span>`;
+    $("driftrow").hidden = !y.drift;
+    // session-aware: qualifying / practice sync with the session clock / phase markers
+    const timed = ["qualifying", "practice"].includes(y.sessionKind);
+    const tl = y.sessionTimeline || {};
+    $("timedbox").hidden = !(timed || (tl.phases || []).length);
+    $("racebox").hidden = timed; $("estbox").hidden = timed;
+    const ph = (tl.phases || []).filter((p) => p.clock).map((p) => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join("");
+    if ($("qph").dataset.h !== ph) { $("qph").dataset.h = ph; $("qph").innerHTML = ph;
+      if (tl.current && tl.current.phase) $("qph").value = tl.current.phase; }
+    const mk = (tl.markers || []).filter((m) => m.sync).map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join("");
+    if ($("qmk").dataset.h !== mk) { $("qmk").dataset.h = mk; $("qmk").innerHTML = mk; }
+  }
+  async function poll() { try { const r = await fetch("/api/sync"); sync = await r.json(); show(); } catch (e) { /* offline */ } }
+  function parseDur(t) { t = (t || "").trim().toLowerCase(); let m = t.match(/^(?:(\d{1,2}):)?(\d{1,3}):(\d{1,2})$/);
+    if (m) return (+(m[1] || 0)) * 3600 + (+m[2]) * 60 + (+m[3]);
+    m = t.match(/^(?:(\d{1,2})\s*h)?\s*(?:(\d{1,3})\s*m(?:in)?)?\s*(?:(\d{1,2})\s*s)?$/);
+    return m && (m[1] || m[2] || m[3]) ? (+(m[1] || 0)) * 3600 + (+(m[2] || 0)) * 60 + (+(m[3] || 0)) : null; }
+  function exactRes() {
+    const y = sync || {};
+    if (!y.sessionStart) return { error: "session not known yet - select it first" };
+    return F1Time.exactTime($("ex").value, $("tz").value, $("fmt").value, $("ap").value, y.sessionStart, y.gmtOffset);
+  }
+  function exPreview() {
+    $("ap").hidden = $("fmt").value !== "12";
+    if (!$("ex").value.trim()) { $("exprev").textContent = ""; return; }
+    const r = exactRes();
+    $("exprev").textContent = r.error || (r.preview + (r.warn ? " · " + r.warn : ""));
+    $("exprev").style.color = r.error || r.warn ? "#ff7a1a" : "#8795a3";
+  }
+  $("ex").addEventListener("input", exPreview);
+  for (const id of ["tz", "fmt", "ap"]) $(id).addEventListener("change", exPreview);
+  document.querySelector("[data-cap]").addEventListener("click", async () => {
+    const j = await api("capture"); $("sr").textContent = j.ok ? "Captured video position " + vid(j.video_time) : (j.error || j.result);
+  });
+  $("cd").addEventListener("focus", () => api("capture").then((j) => { if (j.ok) $("sr").textContent = "Captured video position " + vid(j.video_time); }));
+  $("qclk").addEventListener("focus", () => api("capture").then((j) => { if (j.ok) $("sr").textContent = "Captured video position " + vid(j.video_time); }));
+  $("ex").addEventListener("focus", () => api("capture").then((j) => { if (j.ok) $("sr").textContent = "Captured video position " + vid(j.video_time); }));
+  document.querySelectorAll(".sync [data-a]").forEach((b) => b.addEventListener("click", async () => {
+    const a = b.dataset.a; let j;
+    if (a === "countdown") j = await api("countdown", { countdown: $("cd").value.trim() });
+    else if (a === "exact") {
+      const r = exactRes(); if (r.error) { $("sr").textContent = r.error; return; }
+      j = await api("exact", { f1_time: r.iso });
+    }
+    else if (a === "clock") {
+      if (parseDur($("qclk").value) === null) { $("sr").textContent = "Enter the clock as MM:SS"; return; }
+      j = await api("clock", { clock: `${$("qph").value}|${$("qmode").value}|${$("qclk").value.trim()}` });
+    }
+    else if (a === "marker") j = await api("marker", { marker: $("qmk").value });
+    else if (a === "estimate") { const v = parseDur($("es").value); if (v === null) { $("sr").textContent = "Enter MM:SS"; return; } j = await api("estimate", { lead_seconds: v }); }
+    else j = await api(a);
+    $("sr").textContent = j.result || j.error || "";
+  }));
+  // ---- SELECT SESSION (manual fallback)
+  let cat = null;
+  const yr = $("yr"), now = new Date().getUTCFullYear();
+  for (let y = now; y >= 2023; y--) yr.insertAdjacentHTML("beforeend", `<option>${y}</option>`);
+  async function loadCat() {
+    try { cat = await (await fetch("/api/media/catalog?year=" + yr.value)).json(); } catch (e) { cat = { meetings: [] }; }
+    $("gp").innerHTML = `<option value="">Grand Prix…</option>` + (cat.meetings || []).map((m, i) => `<option value="${i}">${esc(m.name)}</option>`).join("");
+    $("ss").innerHTML = `<option value="">Session…</option>`;
+    if (cat.error) $("sr").textContent = "Season list not available: " + cat.error;
+  }
+  yr.addEventListener("change", loadCat);
+  $("gp").addEventListener("change", () => {
+    const m = (cat && cat.meetings || [])[+$("gp").value];
+    $("ss").innerHTML = `<option value="">Session…</option>` + (m ? m.sessions.map((x) => `<option value="${esc(x.session_key)}">${esc(x.session_name)}</option>`).join("") : "");
+  });
+  $("usess").addEventListener("click", async () => {
+    const k = $("ss").value; if (!k) { $("sr").textContent = "Choose a Grand Prix and a session"; return; }
+    const r = await fetch("/api/sync/session", { method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, token ? { "X-Remote-Token": token } : {}),
+      body: JSON.stringify({ session_key: +k }) });
+    $("sr").textContent = r.ok ? "Manual session selected - SYNC REQUIRED" : "HTTP " + r.status;
+  });
+  loadCat();
+  poll(); setInterval(poll, 2000);
+</script>
+</body>
+</html>

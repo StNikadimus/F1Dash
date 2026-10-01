@@ -1,0 +1,837 @@
+# F1 Timing Wall – self-hosted F1 live timing dashboard for a 1920×1080 TV
+
+A Python server that consumes the official F1 live-timing feed, normalizes it
+and pushes it over one WebSocket to a single-page TV dashboard: live track map
+with real circuit geometry, leaderboard with tyres and FIA penalties, race
+control messages, driver telemetry, weather, flags – plus a simulator (TEST
+MODE), session replay and an optional remote-control bridge.
+
+> Unofficial personal project. Not associated with Formula 1. The live-timing
+> feed is undocumented; use it for private, non-commercial viewing only.
+
+```
+ F1 SignalR feed ─┐                    ┌──────────────┐    ┌─ normalizer ─┐                ┌─ TV browser (1920×1080)
+ Simulator ───────┼─► raw topics ─►    │   Timeline   │ ─► │              ├─► Hub ─ WS ────┼─ tablet / desktop
+ Replay file ─────┘  (F1 event time)   │ state at  X  │    └─ race control┘                │
+                                       └──────▲───────┘                                    │
+ VOYO <video>.currentTime ─► SyncEngine ─ X ──┘ (video clock · fixed delay · live)         │
+ Remote (IR bridge / HTTP / keyboard / WS) ─► RemoteController ─► UI state ─────────────────┘
+```
+
+## 1. Project structure
+
+```
+f1-dashboard/
+├── main.py                    # entry point:  python main.py [--test|--replay|--live]
+├── requirements.txt
+├── Dockerfile, docker-compose.yml, .env.example
+├── config/config.toml         # all settings (every key also as env var F1DASH_<SECTION>_<KEY>)
+├── server/
+│   ├── app.py                 # Starlette HTTP + WebSocket app, remote API
+│   ├── engine.py              # source -> timeline -> state at the sync target -> hub, learning
+│   ├── timeline.py            # timestamped F1 event buffer: complete state at any time X (§9b)
+│   ├── sync.py                # sync manager: VOYO clock <-> F1 time, anchors, confidence (§9b)
+│   ├── openf1.py              # OpenF1 client (cached), reference events, session detection
+│   ├── feedstate.py           # applies F1 differential updates (_kf, _deleted, indexed lists)
+│   ├── normalizer.py          # raw topics -> normalized model (the only raw-format-aware module)
+│   ├── models.py              # SessionState, TrackStatusState, DriverState, TelemetryState, ...
+│   ├── race_control.py        # sector flags, investigations, penalties, DSQ from FIA messages
+│   ├── telemetry.py           # Position.z / CarData.z decoding, channel mapping
+│   ├── track.py               # circuit geometry (MultiViewer API + cache), pit-lane learning
+│   ├── remote.py              # key -> keymap layer -> whitelisted command -> UI state (TV modes)
+│   ├── video.py               # VOYO video layer monitor (reachability, framing check)
+│   ├── hub.py                 # WebSocket fan-out, per-client queues, state diffs
+│   ├── recorder.py            # records live sessions for replay
+│   └── sources/
+│       ├── base.py            # data-source interface
+│       ├── f1_live.py         # SignalR Core + legacy SignalR client, reconnect/back-off
+│       ├── archive_follow.py  # public archive stream follower (positions without token)
+│       ├── replay.py          # recordings and the official F1 archive
+│       ├── vod.py             # one archived session, served at the VOYO video's time
+│       └── simulator.py       # TEST MODE
+├── dashboard/                 # index.html, style.css, app.js, tv.css, remote.html (phone remote)
+│   └── components/            # voyo_player.js / .css – separate video layer component
+├── data/
+│   ├── tracks/                # geometry cache (auto)            – see data/tracks/README.md
+│   ├── test_tracks/           # real circuit outlines for TEST MODE (bacinger/f1-circuits, MIT)
+│   └── recordings/            # live recordings + a real 2026 Japanese GP sample (MIT)
+├── tools/fetch_tracks.py      # pre-download geometry / learn pit lanes for a season
+├── tools/probe_feed.py        # measure which topics your connection really receives
+├── tools/tv_launcher.py       # dashboard + official VOYO window on one TV screen
+├── tools/voyo_clock.py        # VOYO playback clock bridge (reads <video>.currentTime, §9b)
+├── tools/voyo_clock_probe.js  # the read-only snippet it evaluates in the VOYO page
+├── bridge/                    # evdev IR bridge, WD TV Live keymap, send_key.sh
+├── wdtv/                      # WD TV Live probe + experimental on-box bridge + README
+├── deploy/                    # systemd units
+└── tests/                     # test_core.py (parsers, remote, launcher), test_sync.py (timeline, sync)
+```
+
+## 2. Install
+
+Requires **Python 3.11+** (uses `tomllib`) on any Linux server.
+
+```bash
+cd f1-dashboard
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+python -m unittest discover tests        # optional self-test
+```
+
+**Windows (cmd):**
+
+```bat
+python -m venv .venv
+.venv\Scripts\activate.bat
+pip install -r requirements.txt
+python main.py --test
+```
+
+or simply double-click / run `start-windows.bat --test` (creates the venv on first run).
+
+## 3. Start
+
+```bash
+python main.py                 # live mode (config default)
+python main.py --test          # TEST MODE simulator
+python main.py --replay        # replay the bundled real 2026 Japanese GP sample
+python main.py --vod           # follow a VOYO recording (session from the VOYO title, §9b)
+```
+
+or with Docker:
+
+```bash
+cp .env.example .env           # put F1TV_TOKEN=... in .env (optional)
+sudo chown -R 1000:1000 data   # container runs as uid 1000 and writes caches/recordings
+docker compose up -d --build
+F1DASH_SOURCE_MODE=test docker compose up -d     # test mode in Docker
+```
+
+For a permanent install see `deploy/f1-dashboard.service`.
+Useful flags: `--port 8080`, `--delay 45` (fixed delay instead of the VOYO video clock, §9b),
+`--speed 4` (replay/test speed-up).
+
+## 4. Open the dashboard
+
+`http://<server-ip>:8080/` in the TV's browser (full screen / kiosk mode), e.g.
+Chromium kiosk on a Raspberry Pi or mini PC connected to the TV:
+
+```bash
+chromium --kiosk --noerrdialogs --disable-infobars http://<server-ip>:8080/
+```
+
+The layout is designed for exactly 1920×1080 and scaled to any screen; 1280×720,
+desktop and landscape tablets get the same layout scaled, portrait tablets get a
+stacked layout. (The WD TV Live itself has no suitable browser.)
+
+## 5. TEST MODE and replay
+
+* `python main.py --test` – a simulated race on a real circuit outline with 22
+  **fictional** drivers: cars moving (smoothly interpolated), overtakes, laps,
+  sector times, pit stops with tyre changes, a local yellow (one marshal
+  sector), VSC, Safety Car, red flag, investigations, time penalties, a drive
+  through (+ served), black-and-white flag, deleted lap time, DSQ, post-race
+  investigation, rain, telemetry. The script repeats every ~10 simulated minutes.
+  An orange **TEST MODE** badge and map watermark are always visible.
+  Options in `[test]`: `circuit` (any file in `data/test_tracks/`, e.g. `it-1922`
+  = Monza, `at-1969` = Red Bull Ring), `laps`, `time_scale` (`--speed 4`).
+  The test pit lane and the 20 test marshal sectors are synthetic test
+  geometry and are labelled as such.
+* `python main.py --replay` – replays the bundled **real** 2026 Japanese GP race
+  recording (timing, tyres, race control, SC period, weather). That third-party
+  recording contains no Position/CarData, so the map shows no cars – exactly
+  what you see live when F1 withholds positions. By default the replay
+  starts 10 s before the session actually starts (`[replay] start_offset =
+  "auto"`; recordings usually begin 20+ minutes before lights out – use
+  `start_offset = 0` to see the pre-race phase). Speed up with `--speed 4`;
+  jump to a later point with e.g. `F1DASH_REPLAY_START_OFFSET=3300`.
+* `python main.py --replay data/recordings/<file>.jsonl.gz` – your own live recordings.
+* `python main.py --replay latest` or `--replay 2026/2026-03-29_Japanese_Grand_Prix/2026-03-29_Race/`
+  – downloads a finished session from the official F1 archive (free, includes
+  car positions and telemetry after the session) into `data/archive_cache/`.
+
+## 6. Configure the F1 data source
+
+`config/config.toml`, section `[live]`:
+
+* Endpoint: `wss://livetiming.formula1.com/signalrcore` (SignalR Core, JSON
+  protocol, `Subscribe` invocation, messages arrive as `feed` invocations); the
+  legacy `wss://livetiming.formula1.com/signalr` (SignalR 1.5) is used as
+  automatic fallback (`transport = "auto" | "core" | "legacy"`).
+* Topics subscribed: Heartbeat, SessionInfo, SessionStatus, SessionData,
+  ExtrapolatedClock, LapCount, TrackStatus, DriverList, TimingData,
+  TimingDataF1, TimingAppData, TimingStats, RaceControlMessages, WeatherData,
+  TeamRadio, TopThree, PitLaneTimeCollection, CurrentTyres, Position.z, CarData.z.
+* **F1 TV token – optional.** The connection is anonymous by default (the same
+  handshake boxbox uses) and still subscribes to `Position.z`/`CarData.z`, so
+  if F1 sends them anonymously they are used immediately. Observed behaviour
+  (see §7a): F1 streams them only to entitled connections. Without a token the
+  server therefore also tries the public archive stream of the running session
+  (`archive_follow = true`, §7a). If you have F1 TV, adding the token gives the
+  lowest-latency positions: log in at <https://f1tv.formula1.com> → DevTools →
+  Application → Cookies → copy the value of **`login-session`** → put it into
+  `F1TV_TOKEN` (env / `.env`) or `live.f1tv_token`. The server logs the token
+  expiry at start-up.
+* Session detection is automatic: `SessionInfo` decides meeting, session type
+  (Practice / Qualifying / Sprint Qualifying / Sprint / Race), circuit and
+  track map; a new session resets the state without a restart. When nothing is
+  live, the last session stays on screen and the next scheduled session
+  (from the season `Index.json`) is shown on the map.
+* `record = true` stores every live session in `data/recordings/` for replay.
+* Synchronising with the TV picture: with the VOYO window the dashboard follows
+  the video player's own clock (§9b). Without it, `[source] delay_seconds`
+  (or `[sync] mode = "DELAY"`) shows the F1 state of N seconds ago – measured
+  on F1's event timestamps, not on when the packets arrived.
+* Reconnects: exponential back-off 2 s → 60 s with jitter, silence watchdog
+  (`silence_timeout`), fresh snapshot after every reconnect. The TV shows
+  **LIVE DATA DISCONNECTED · RECONNECTING…** with attempt and countdown and
+  keeps the last data visible (dimmed).
+
+## 7. Which values the feed really provides
+
+| Dashboard field | Source | Availability |
+|---|---|---|
+| Session, lap X/Y, clock | SessionInfo, SessionStatus, LapCount, ExtrapolatedClock | free |
+| Track status GREEN/YELLOW/SC/VSC/RED | TrackStatus | free |
+| Yellow **per marshal sector** | RaceControlMessages (`Scope=Sector`, `Sector=n`) mapped on MultiViewer marshal sectors | free |
+| Positions, gaps, intervals, last/best lap, sectors (purple/green), speed trap, in pit / pit out, retired, Q knock-out | TimingData / TimingDataF1 | free |
+| Tyre compound, new/used, age, stint history | TimingAppData (+ CurrentTyres) | free |
+| Investigations, penalties, served, DSQ, black/white flag, deleted laps | RaceControlMessages text | free |
+| Overtake ENABLED/DISABLED (2026, session-wide), DRS ENABLED/DISABLED (≤2025) | RaceControlMessages | free |
+| Weather (air, track, humidity, pressure, wind, rain) | WeatherData | free |
+| Car positions on the map | Position.z (~4 Hz) | live socket: entitled connections only (§7a); otherwise public archive stream if readable; else N/A |
+| Speed, RPM, gear, throttle % | CarData.z channels 2, 0, 3, 4 | same as Position.z |
+| Brake | CarData.z channel 5 | same as Position.z; **ON/OFF only** – no brake pressure % exists in the feed |
+| DRS state | CarData.z channel 45 | seasons ≤ 2025 only; DRS was abolished for 2026 → **N/A** |
+| ERS / battery %, deployment / harvesting | – | **not in any public topic → always N/A** |
+| Per-driver Overtake mode | – | **not in the feed → always N/A** |
+| Safety-car position | – | the SC is not in Position.z → **N/A** (SC status is shown) |
+| DNF / IN PIT next to the driver | `Retired`, or `Stopped` with no sector/lap data for 60 s → **DNF**; `InPit` for > 75 s (or DNF in the pit) → **IN PIT** (garage) and the car is not drawn on the map. An `InPit` flag that stays set while the car keeps setting sectors (lost "left the pit" message, seen in real 2026 data) is ignored | derived from TimingData / TimingDataF1, kept with the checkpoints (correct after seeking) |
+| Pit lane geometry | reconstructed from real positions of complete pit-lane passes (`InPit` / `PitOut` / `PitLaneTimeCollection`) | cached per circuit; else after the first complete passes (VOD: at once from the loaded session) |
+
+## 7a. Car positions without F1 TV – what the code of other projects shows
+
+Checked against the actual source (September 2026) of the two projects that
+advertise live maps, and the libraries they use:
+
+| Project | How it gets Position.z / CarData.z live | Auth | Evidence it works live without F1 TV |
+|---|---|---|---|
+| [hung-ng/boxbox](https://github.com/hung-ng/boxbox) (Rust) | `src/source/live.rs`: POST `/signalrcore/negotiate?negotiateVersion=1` → `connectionToken` → `wss://…/signalrcore?id=…`, JSON handshake, `Subscribe` incl. `Position.z`, decode base64 + raw-deflate (`src/state/mod.rs`). No proxy, no cache. | none (no Authorization header anywhere) | **No.** Its own `docs/architecture.md` (§"Key patterns & gotchas", commit 5f5dbb0, 2026-07-24): *"`Position.z` can go silent on the live feed (observed Hungary FP1, session green and running). The server accepts a Subscribe containing `Position.z` and returns no error, then never sends the topic … Probed `Position.z` alone, `Position` (uncompressed) and `CarData.z`: all silent … Net effect: tower updates live, map has no cars. Suspected entitlement gating."* The commit added a "waiting for car positions…" hint to the map for exactly this case. Its map with cars works in **replay** (static archive). |
+| [mricero/F1-Telemetry-Dashboard](https://github.com/mricero/F1-Telemetry-Dashboard) (Streamlit) | `data/live_adapter.py`: `livef1.adapters.RealF1Client` (default) or `fastf1.livetiming.SignalRClient(…, no_auth=False)` | LiveF1: none. FastF1 path: **F1 TV login** | **No.** LiveF1's client connects to the *legacy* endpoint (`livef1/utils/constants.py:4` `SIGNALR_ENDPOINT = "/signalr/"`, headers only `User-agent: BestHTTP`), which boxbox reports now answers 401. The FastF1 path uses `access_token_factory=get_auth_token` (`fastf1/livetiming/client.py:170`), which prints *"This feature requires an active F1TV Access/Pro/Premium subscription"* (`fastf1/internals/f1auth.py:146`; FastF1 docs `livetiming.rst:12`). The project's live test `scripts/live_smoke.py` is marked "only meaningful during a race weekend" and no live result is recorded; its map/telemetry demos use FastF1 historical data. |
+
+Conclusion: neither project has a method to receive live GPS positions without
+an F1 TV entitlement. boxbox uses the identical anonymous SignalR Core
+connection as this dashboard and documents that `Position.z`/`CarData.z` stay
+silent. FastF1 states that data *after* the session needs no authentication –
+which is what replay mode uses.
+
+What this dashboard does about it (all real data, nothing simulated):
+
+1. Always subscribes to `Position.z`/`CarData.z` on the anonymous socket – if F1
+   ever sends them anonymously, they are used at once (primary source).
+2. `archive_follow`: while a session runs and the socket sends no positions for
+   30 s, it polls `https://livetiming.formula1.com/static/<SessionInfo.Path>Position.z.jsonStream`
+   (and `CarData.z`) with HTTP Range requests and feeds each new real sample.
+   Whether F1 publishes these files *during* a session (`ArchiveStatus:
+   "Generating"`) and with what delay is not documented and could not be
+   tested from the development environment – the log says either
+   *"Archive stream Position.z is readable during the session … using it"* or
+   *"not (yet) published (HTTP 403/404)"*. When used, the map legend shows
+   "Positions: public F1 archive stream · N s behind".
+3. Optional F1 TV token as fallback for real-time positions.
+4. Otherwise: map with real geometry, no cars, clear N/A message; telemetry N/A.
+
+Verify it on your own connection during any session:
+
+```bash
+python tools/probe_feed.py --seconds 120            # anonymous: counts per topic + archive check
+F1TV_TOKEN=... python tools/probe_feed.py --token    # comparison with a token
+```
+
+## 8. Track geometry
+
+Real circuit geometry comes from the MultiViewer circuit API (the dataset
+FastF1 uses), in the same coordinate system as `Position.z`, including rotation,
+corner numbers and marshal sectors. It is chosen by `SessionInfo.Meeting.Circuit.Key`
+(every circuit on the calendar, no hard-coding), downloaded on first use and
+cached in `data/tracks/`. Pre-download a season (recommended before a weekend):
+
+```bash
+python tools/fetch_tracks.py --year 2026 --pitlane
+```
+
+The pit lane is not part of that dataset. It is **reconstructed automatically**
+(`server/pitlane.py`) and cached per circuit – cache-first:
+
+1. session opened → circuit (`circuit_key`, never the GP name, the media id or the session)
+   → `data/tracks/pitlane_geometry_<circuit_key>.json`;
+2. a **verified** pit lane seen in this season → drawn at once, nothing is recomputed
+   (Baku race today → Baku qualifying / another recording of Baku tomorrow: already there);
+3. otherwise: **complete pit-lane passes** are collected – pit entry line (`InPit` rising) →
+   pit lane → pit exit line (`InPit` falling / `PitOut`), cross-checked with the official
+   pit-lane time (`PitLaneTimeCollection`; in the 2026 feed the `InPit` edge is often
+   missing, then entry = exit − official time). A stop alone, a few points at the entry,
+   a garage visit (> 120 s or a path that turns back), a red flag, holes in the position
+   data or positions that stay on the main track are **rejected** (reason in the debug view).
+   The pass is extended back/forward to where the car leaves/rejoins the racing line, so the
+   map shows where the lane branches off.
+4. geometry: F1 positions are already local metric X/Y (decimetres, the same system as the
+   track outline – not GPS lat/lon), so no projection is needed. Filter spikes → resample (5 m) →
+   align all passes on a reference (normals) → **trimmed median** centerline → drop outlier
+   passes → Gaussian smoothing (σ 10 m, ends fixed) → Catmull-Rom (2.5 m).
+5. confidence: **HIGH** (≥ 3 passes that agree within 2.5 m, entry and exit on the track) →
+   stored as *verified*; **MEDIUM** (1–2 good passes) → drawn and stored as *provisional*,
+   improved by later passes; **LOW** → not drawn, not stored, learning continues.
+6. seasons: a new season's passes are compared with the cache. Same lane → the season is
+   added. A different lane (layout change) → stored as a new variant; the old one is not
+   overwritten and stays valid for its own seasons. `algo_version` in the file invalidates
+   caches of an older reconstruction.
+
+VOD: the whole session is searched once when its data is loaded (in the background).
+Live / replay: passes are collected as they happen; learning stops once it is verified.
+
+Map: the pit lane is drawn as a smaller road that branches off and rejoins the track, with
+the entry/exit lines. Where it runs so close to the main straight that the two roads would
+merge on the small map, it is moved a few pixels **to its own side** (capped, fading out
+towards entry/exit – the shape and position stay the real ones). Cars in the pit lane are
+drawn on it (not on the main straight). Legend: `Pit lane: cached (HIGH · 5 passes)`,
+`learning… 2 passes`, `reconstructed (MEDIUM · 1 pass · provisional)`.
+**G** = show pit lane reconstruction debug: circuit + season, cache status (verified /
+provisional, variant, seasons, passes), what happened now, confidence and spread, entry / exit
+coordinates, the pit entry / exit lines, the cars drawn in the pit lane vs the timing `InPit`
+flag, rejected passes with the reason, notes (position jumps bridged, glitches dropped), and on
+the map the raw positions of every pass (cyan used, red rejected), the new (yellow) and the
+cached (magenta) centerline and the entry / exit rings.
+
+Real data (2025 Azerbaijan GP, `tests/fixtures/openf1_baku2025_pit.txt`, tested): the pit
+lane runs 11-12 m beside the racing line (≈ 4 px on the map, so it is drawn apart); F1's
+map-matched positions jump 24 m sideways at the pit entry within 0.22 s and once replay 23 m
+backwards - both are handled; every in-pit position of a real pass is drawn on the pit lane
+(≤ 1 px), cars on the main straight never are.
+`python tools/fetch_tracks.py --year 2026 --pitlane` fills the cache for a whole season.
+
+## 9. Remote control and keyboard
+
+Everything goes through one abstraction: *input → key name → whitelisted
+command → shared UI state*, so keyboard, IR bridges, HTTP and WebSocket clients
+all behave the same and all screens stay in sync. Mapping: `[remote.keymap]`.
+
+| Key (keyboard / remote) | Command |
+|---|---|
+| ↑ / ↓ | MOVE_UP / MOVE_DOWN (select driver in the leaderboard) |
+| ← / → | CHANGE_VIEW prev / next |
+| Enter / OK | OPEN_TELEMETRY |
+| Esc / Backspace / BACK | CLOSE_PANEL |
+| I / INFO | OPEN_RACE_CONTROL |
+| Space / `T` | CYCLE_TV_MODE (§9a) |
+| PLAY-PAUSE / `P` | VIDEO_PLAY_PAUSE (§9a) |
+| `A` | TOGGLE_AUTO_CYCLE (rotate views every `auto_cycle_seconds`) |
+| `Y` / SYNC button | SYNC menu: countdown, exact time, automatic, estimate; qualifying / practice: session clock, phase markers (§9b) |
+| `L` / BLUE | SYNC_START – lights out / session clock starts on the video (§9b) |
+| `S` / RED | SYNC_MARK – the selected car (or the leader) crosses the line on the video (§9b) |
+| `C` · `K` · `X` | lap on TV matches (confirm) · pin the shown time · clear the sync |
+| `O` · `N` | after a *possible sync drift* warning: keep the old sync · use the new anchor |
+| `+` (`=`) / CH+ · `−` / CH− | SYNC_PLUS / SYNC_MINUS – ±0.25 s (`adjustment_step`) |
+| `R` / GREEN | SYNC_RESYNC – force resync |
+| `D` / YELLOW | SYNC menu (same as `Y`) |
+| 1 2 3 4 5 | Overview / Telemetry / Strategy / Race Control / Weather |
+| H | help overlay |
+| mouse click on a row | SELECT_DRIVER |
+
+HTTP API (for any other remote):
+
+```bash
+curl "http://server:8080/api/remote/key?key=KEY_UP"
+curl -X POST http://server:8080/api/remote/key -d '{"key":"KEY_OK"}'
+curl -X POST http://server:8080/api/remote/command -d '{"command":"CHANGE_VIEW","arg":"strategy"}'
+```
+
+Set `[remote] token` to require `X-Remote-Token` / `?token=`.
+
+**WD TV Live remote:** see `wdtv/README.md`. Short version: WDLXTV only offers
+key *injection* (`/tmp/ir_injection`); reading the WD TV's own IR receiver is
+not documented, so `wdtv/probe_ir.sh` tests your box and the bridge is only
+used if the probe finds a readable key source. The remote itself is a standard
+NEC remote and works reliably with any Linux IR receiver + `ir-keytable` +
+`bridge/evdev_bridge.py` (keymap in `bridge/keymaps/wdtv_live.toml`).
+
+Exact test whether the remote generates Linux input events (on a Linux box with an IR receiver):
+
+```bash
+sudo ir-keytable                         # receiver present?  -> /sys/class/rc/rc0 (/dev/input/eventN)
+sudo ir-keytable -c -p nec -t            # press buttons      -> "scancode = 0x8479.." lines
+sudo ir-keytable -c -p nec -w bridge/keymaps/wdtv_live.toml
+sudo evtest /dev/input/eventN            # press UP           -> "EV_KEY ... (KEY_UP), value 1"
+```
+
+and on the WD TV itself: `sh /tmp/probe_ir.sh` (see `wdtv/README.md`).
+
+## 9a. VOYO video on the same screen (TV modes)
+
+Three TV modes (Space / `T` / remote TV-mode key cycles them):
+
+| Mode | Screen |
+|---|---|
+| `FULL_DASHBOARD` | the normal dashboard, no video |
+| `RACE_VIEW` (default when video is available) | video 1280×720 top-left · compact leaderboard right · map, telemetry, race control and session/flag/weather panel along the bottom |
+| `VIDEO_FOCUS` | video 1920×990 · 90 px bar with lap, flag status, leader, selected driver, clock |
+
+Views 1–5 keep working (in RACE_VIEW strategy / race control / weather replace
+map + telemetry). Without a configured or reachable video source every mode
+falls back to `FULL_DASHBOARD` automatically; the F1 data pipeline never
+depends on the video layer.
+
+### What VOYO allows – what was checked (September 2026)
+
+* **Terms of use** ("Splošni pogoji uporabe storitve VOYO", valid from 1. 9. 2026):
+  personal, non-commercial use within one household (III.5); up to 5 devices,
+  **2 simultaneous streams** (III.5/III.6); watching "v izbranem brskalniku na
+  Voyo.si", in the VOYO apps and on supported smart TVs (III.6); content must not
+  be copied, reproduced, publicly communicated (III.1), stored or passed on
+  (III.18).
+* **No official embed / iframe player, no player API, no public HLS/DASH URL**:
+  none is documented on voyo.si, in the FAQ or the terms, and no public
+  integration exists. A stream URL extracted from the web player would be
+  neither documented nor allowed (III.1, III.18) and is not used.
+* **Framing headers** could not be read from the development environment
+  (voyo.si blocked there). The server therefore checks them on your network:
+  in `mode = "embed"` it reads `X-Frame-Options` / `CSP frame-ancestors` and only
+  embeds if framing is permitted – it never bypasses them. Even if framing were
+  permitted, logging in inside an iframe needs third-party cookies, so `embed`
+  is not expected to work for VOYO.
+
+**Result: direct embedding is not possible in an official way.** What works
+and is fully allowed is VOYO's *own* website player in its own browser window –
+placed exactly over the dashboard's video slot:
+
+### How to use it (window mode – recommended)
+
+**Windows, one click:** double-click **`launch.bat`** (or `launch.bat test` /
+`launch.bat replay`). It starts the dashboard server in the background, the
+dashboard, the VOYO window and the TV agent. **Closing that console window –
+or the dashboard window, or the VOYO window – closes everything together**
+(both browser windows and the server it started) and the taskbar comes back.
+The server log is in `data\server.log`. Details of the individual parts:
+
+
+1. On the PC connected to the TV, install Microsoft Edge or Google Chrome
+   (Widevine DRM; Chromium on Linux/Raspberry Pi normally cannot play VOYO).
+2. In `config/config.toml`: `[voyo] enabled = true` (mode `window` is the default).
+3. Start the dashboard server, then on the TV PC:
+
+   ```bash
+   python tools/tv_launcher.py --server http://<server-ip>:8080            # RACE_VIEW geometry
+   python tools/tv_launcher.py --server http://<server-ip>:8080 --layout focus
+   ```
+
+   It opens the dashboard full screen and VOYO (`--app` window, own browser
+   profile in `data/browser-profiles/voyo`), then **keeps running as the TV
+   agent** (leave the console window open, Ctrl+C stops it):
+   * the VOYO window is kept **always on top** of the dashboard while a video TV
+     mode is shown – you can click the dashboard to give it the keyboard
+     without hiding the video;
+   * it **follows the TV mode**: RACE_VIEW → 1280×720 slot, VIDEO_FOCUS →
+     1920×990, FULL_DASHBOARD → VOYO minimized (sound keeps playing), back
+     again on the next mode change. Positions are computed for your screen
+     resolution and Windows scaling; the window's title bar is pushed just above
+     the slot (`--titlebar 32`, use a different value if a strip of it remains
+     visible or the video is cut, `0` to keep it);
+   * while the **VOYO window has the keyboard focus**, the keys
+     `T, H, I, A, 1–5, ↑, ↓, S, R, D, =, −` are forwarded to the dashboard (e.g.
+     T switches the TV mode, S sets a sync mark). ←/→, Space, F, M etc. stay with VOYO's player. The keys are only
+     captured while VOYO is in the foreground – every other program keeps them.
+     Change the list with `--hotkeys`.
+   * the **Windows taskbar is hidden** while the agent runs (Windows would show
+     it whenever the VOYO window is active) and shown again when the agent
+     stops (Ctrl+C or closing its console). `--keep-taskbar` disables this;
+     `python tools/tv_launcher.py --restore-taskbar` brings it back if the agent
+     was killed.
+   * it reads VOYO's **playback clock** for the sync (§9b); `--no-clock` disables it.
+   The first time, log in to VOYO in its window and open the F1 live stream; the
+   login is kept. If the windows are already open, run `python tools/tv_launcher.py --attach`.
+4. Play/pause, volume and seeking are done in VOYO's player itself.
+5. You can also control everything with the IR remote, or from your phone:
+   **`http://<server-ip>:8080/remote`**.
+
+Windows: full support. Linux/X11: placement and always-on-top via `wmctrl`
+(+ `xdotool` for minimizing), no key forwarding. macOS: launcher only.
+
+Alternative: in the VOYO page use the browser's **Picture-in-Picture** (Edge/
+Chrome media controls, if VOYO's player permits it) and drag the PiP window over
+the slot. The dashboard cannot start PiP for another site's player.
+
+Note: the VOYO window uses one of your 2 simultaneous VOYO streams.
+
+### Other video modes (only for officially permitted sources)
+
+* `mode = "embed"` – iframe of `voyo.url`, used only when the automatic header
+  check allows framing.
+* `mode = "hls"` + `hls_url` – `<video>` element (native HLS or hls.js from
+  jsDelivr) with play/pause, mute, volume, seek (only if the stream is seekable),
+  fullscreen, loading state and **VIDEO OFFLINE · reconnecting** with back-off.
+  Only for a stream URL a provider officially offers for external players –
+  VOYO offers none. Nothing is recorded or re-streamed.
+
+### Remote in the TV modes (`[remote.keymap_video]`, `[remote.keymap_video_focus]`)
+
+| Key | FULL_DASHBOARD | RACE_VIEW / VIDEO_FOCUS | video focused |
+|---|---|---|---|
+| ↑ / ↓ | select driver | select driver | volume (hls) |
+| ← / → | previous / next view | previous / next view | seek ±10 s (hls, if seekable) |
+| OK | telemetry | **focus video** | play/pause (hls) |
+| BACK | overview | leave VIDEO_FOCUS → overview | unfocus video |
+| PLAY/PAUSE, `P` | – | video play/pause (hls) | play/pause |
+| Space, `T` | cycle TV mode | cycle TV mode | cycle TV mode |
+| INFO, `I` | race control | race control | race control |
+| `A` | auto-rotate views | | |
+| `V` / `M` / `F` | focus video / mute / fullscreen | | |
+
+In window/embed mode the video keys show a hint that the control is inside
+VOYO's own player – the dashboard cannot and does not remote-control another
+site's player.
+
+## 9b. VOYO ↔ F1 sync (video clock, timeline, calibration)
+
+Goal: the dashboard shows exactly the F1 state of the moment that is on the
+VOYO picture – leaderboard, gaps, tyres, pit, penalties, investigations,
+flags / SC / VSC, race control, weather, session clock, car positions and
+telemetry all together, not "live data minus a guess".
+
+### Findings: which times exist (checked in this project's feed client and the bundled recording)
+
+| Clock | Where it comes from | Used for |
+|---|---|---|
+| **A · F1 event time** | `Position.z` → every sample's own `Timestamp`; `CarData.z` → every sample's `Utc`; every SignalR `feed` message → its 3rd argument (set by F1's server when the update was generated); archive/replay → `.jsonStream` line offset anchored on `Heartbeat.Utc`. `RaceControlMessages[].Utc` (1 s resolution), `ExtrapolatedClock.Utc`, `Heartbeat.Utc` are further event times *inside* the data. | **the canonical timeline** |
+| **B · receive time** | wall clock when the server got the message | diagnostics only (`F1 RECEIVE LATENCY` = median of B − A) |
+| **C · VOYO playback time** | `HTMLVideoElement.currentTime` of VOYO's player | where the video is |
+
+Not event-timed: the Subscribe **snapshot** (no timestamp – stamped
+"1.5 s before it arrived"), and the lap/sector *values* themselves (`TimingData`
+carries no per-field timestamp; the message timestamp is its event time).
+Session time is shown from `ExtrapolatedClock` (`Remaining` at `Utc`),
+evaluated at the target time.
+
+### Timeline: "the complete F1 state at time X" (`server/timeline.py`)
+
+Every message is split into events on clock A (a `Position.z` message becomes
+one event per sample) and kept with both A and B. The shown state is the
+state **at the target time X**: moving forward applies the next events, moving
+back (video seek, SYNC −, resync) restores a checkpoint (every ≤ 5 s) and
+replays up to X. `buffer_seconds = 120` of history stays available behind the
+shown state; while the video is paused newer data is kept as well (up to
+`max_hold_seconds`). Events that arrive after their time has already been
+shown (e.g. archive positions) are applied immediately, never dropped. Car
+positions are streamed 2.5 s ahead of X (`position_lookahead_ms`, only for
+interpolation) so the map is drawn at exactly X instead of lagging behind it.
+
+### Is `currentTime` F1 time? – no, and nothing on the page says which F1 time it is
+
+`currentTime` is the position in the VOYO video (live measured 2534.41 →
+2541.47 s, 1 s per second; it follows pause/seek). Checked and **not usable as
+a UTC clock**: the VOD HLS playlist has no `EXT-X-PROGRAM-DATE-TIME` /
+`EXT-X-DATERANGE`; `mediaId`, `title`, `length`, `startAt` (a restore position)
+and the GraphQL `videoUrlV2.info` field (empty, `infoCode 0`) carry no time;
+Chrome has no `getStartDate()` for MSE streams; the picture cannot be read
+(DRM – and reading it would be working around the protection). Therefore
+
+    absoluteF1Time = anchorF1Time + (currentTime − anchorVideoTime) = currentTime + offset
+
+and every offset comes from an **anchor**, i.e. one moment of the video whose
+F1 time is known. Verified with OpenF1 (2026 Japanese GP race): OpenF1
+`session_key` 11253 = the live-timing key; `laps.date_start` of #12 lap 6 =
+05:22:02.092 = the live-timing message that completed lap 5 (same clock, ms);
+`SESSION STARTED` 05:14:02.078 = lights out, **14 min after the scheduled
+`date_start` 05:00** – the schedule is not the start.
+
+### SYNC menu (button `SYNC` in the top bar, key `Y`, phone remote)
+
+Shows the session (detected from the VOYO title via OpenF1), the video
+position and four methods:
+
+| Method | What you do | Result |
+|---|---|---|
+| **VOYO Countdown** (recommended before a session) | pause VOYO on the countdown to the start (or press *Capture* when you read it) and enter `23:47`, `00:23:47` or `23m 47s` | F1 time = OpenF1 `date_start` − countdown at that video moment. **MEDIUM**, ±2 s (whole seconds, the countdown graphic may lag the world feed). Also gives the "VOYO broadcast start". |
+| **Manual Exact Time** | enter the time the video shows: **Slovenia** or **track** time, **24-hour** (`14:48:32`, `14.48.32`) or **12-hour** (`2:48:32` + AM/PM); a preview shows UTC / Slovenia / track before you apply | `anchorVideoTime = currentTime`, `anchorF1Time = your value` – **MANUAL** |
+| **Automatic** | nothing | uses only a sync saved for *this video and this session*. Otherwise it explains why it cannot sync (above) and changes nothing – never silently. It suggests a learned lead time for the estimate. |
+| **Session Start Estimate** | enter how long the video runs before the scheduled start (prefilled with a learned value, never assumed) | **LOW / ESTIMATED**, no exact time is shown anywhere |
+
+Precise **event anchors** without typing (any time, also to verify):
+`L` / BLUE = lights out / the session clock starts; `S` / RED = the selected
+car (or the leader) crosses the line. The press is matched automatically to
+that event's millisecond timestamp in OpenF1 (fallback: the F1 archive / live
+feed), 0.2 s reaction time is subtracted (0 if the video is paused on the
+event). A line crossing cannot know *which* lap by itself: without a
+countdown / exact time / `L` before it, it stays LOW until you press `C` (the
+dashboard's lap matches the TV). `K` pins the shown time (MANUAL), `X` clears.
+
+**Confidence** – descriptive, no invented score; the menu always shows method,
+anchor(s), offset (as "video 0:00 = … UTC · session start at video …"),
+confidence, the estimated error when it can be computed, and the reason:
+
+* **HIGH** – ≥ 2 independent anchors agree within their errors (e.g. countdown + `L`, or several `S`)
+* **MEDIUM** – one good anchor that cannot be verified independently
+* **LOW** – estimated from the session start, anchors that disagree, or an unconfirmed lap
+* **MANUAL** – time entered, pinned or adjusted (`+`/`−`) by you
+* **UNSYNCED** – nothing reliable: no timestamp; the clock shows N/A, the board is dimmed and a banner says why
+
+With several anchors the most precise class decides (median, MAD, outliers
+rejected), the others verify it. The sync is saved per video (`mediaId`) and
+session in `data/sync_calibration.json` and restored when you reopen the
+dashboard; another video, Grand Prix or session never reuses it.
+
+### SYNC HEALTH, drift detection, several anchors
+
+Besides *how* the time was obtained (confidence) the menu shows **SYNC HEALTH** –
+how good the shown time actually is:
+
+| Health | Meaning | Error shown |
+|---|---|---|
+| **HIGH** | error ≤ 0.5 s | `Error ±0.13 s` when ≥ 2 independent event anchors were **measured** against each other (never below 0.1 s, the resolution of a key press / feed timestamp); `Estimated error ±0.2–0.5 s` (±0.1–0.3 s if the video was paused on the event) for one event anchor |
+| **MEDIUM** | 0.5 – 2 s | e.g. `Estimated error ±1–2 s` for a countdown alone |
+| **LOW** | > 2 s or unknown | estimate from the session start, unconfirmed lap, anchors that disagree – no number is invented |
+| **MANUAL** | typed / pinned / adjusted by you | not measurable, not shown |
+| **UNSYNCED** | no time can be determined | – |
+
+**Drift detection** – every new anchor (L, S, countdown, exact time) is first
+compared with the current sync (`shift = how far the shown F1 time would move`):
+
+* ≤ `anchors_agree_seconds` (0.5 s): consistent → used at once, it strengthens confidence/health;
+* ≤ `drift_warning_seconds` (2 s): **minor deviation** → used, but the display moves
+  gradually (no jump of seconds) and the menu says the anchors do not match perfectly;
+* \> 2 s: **POSSIBLE SYNC DRIFT** – shows current / new offset and the difference,
+  the new anchor is **not used** until you choose *Keep old* (`O`) or *Use new* (`N`);
+  a banner and `SYNC DRIFT?` in the top bar make sure you see it. *Use new*
+  moves the old anchors to the history (kept for diagnostics).
+* Exception: a time you **type** (countdown, exact time) is an explicit correction – it
+  replaces a differing sync at once (old anchors go to the history, the menu says by how much).
+
+A typed time more than 3 h away from the session is refused with the reason (usually the
+wrong zone Slovenia/track or 12/24-hour) – there is no data at such a time. If the sync points
+outside the loaded session data, the banner says **NO SESSION DATA AT THIS TIME**.
+
+**Several anchors** – anchors from the same action / source are not
+independent: S pressed twice for the same crossing is one event, all countdown
+readings share the countdown graphic's bias, all typed times share your
+reading. The offset is the **median** of the independent event anchors (per
+event the median of its presses); with ≥ 3 of them anything further than
+`outlier_seconds` from the median is an **outlier** and ignored – a single wrong
+press cannot move the result (no averaging). Countdown / typed times only
+verify it within their stated range. *View anchors* lists every anchor with
+its offset (`OK`, `OUTLIER`, `UNCONFIRMED`, and the history `OLD` /
+`REJECTED`) and the calculated offset. *Re-sync* recomputes from the current
+anchors and drops manual adjustments. The offset is shown as the video
+position of the scheduled session start (e.g. `+1730.00 s` = 28:50 in the video).
+
+### Qualifying, Sprint Qualifying and practice (session-aware)
+
+The session type comes from the session metadata (Race / Sprint → race board;
+Qualifying / Sprint Qualifying → Q1–Q3 / SQ1–SQ3; Practice 1–3 → FP1–FP3). The
+session's structure is read from the official timing (`server/session_phases.py`),
+never from a schedule: `ExtrapolatedClock` (the session clock of the TV graphic:
+it is posted when it starts, e.g. 14:59 exactly one second after 15:00, and when
+it reaches 00:00:00), `SessionData` (QualifyingPart + status history) and race
+control. The phase lengths are the clock's own start values (Suzuka 2026: Q1 18:00,
+Q2 15:00, **Q3 13:00**). These small topics are downloaded as soon as the session is
+known (a few kB), the big data still only after SYNC.
+
+**Leaderboard** – `leaderboard = state(session data, current F1 time)`:
+
+* qualifying: ranked by the best **valid** lap of the *current* part only
+  (`BestLapTimes[part]` plus every completed lap of that part), gap to P1, `NO TIME`
+  for cars without a time, knocked-out cars below with `OUT Q1` / `OUT Q2`; when Q2
+  starts the ranking starts again; practice: best valid lap of the session so far
+* a lap time that race control deleted (`CAR 41 (LIN) TIME 1:31.537 DELETED …`) is
+  never a best lap – the next valid lap of that phase is used (the feed itself does
+  not correct `BestLapTimes`, seen in the real Suzuka 2026 data)
+* columns: BEST · GAP · LAST · NOW (`L19·S2` = lap being driven and the sector being
+  driven – never the last completed one); the title bar shows `QUALIFYING — Q2`,
+  the phase clock (left / elapsed of the official length) and a strip with Q1 / Q2 /
+  Q3 (START / END markers, red flags / chequered flag only once passed, small ticks =
+  completed laps of the selected car)
+* driver detail: NOW `LAP 19 · S2` + running lap time, BEST, LAST, S1–S3 with the
+  sector being driven (running time), the last completed one (`LAST`) and the personal
+  best of each sector; `--` whenever the timing data does not say it
+* lap / sector progress (`server/laps.py`, derived topic `_Laps`) comes only from
+  timing messages (line crossing: `NumberOfLaps`, `LastLapTime`, sector 3, `LapSeries`;
+  sectors: `Sectors[k].Value`, mini-sector `Segments`; pit exit = out lap). It is part
+  of the replay state (checkpoints), so seeking back / forward gives exactly the same
+  board – nothing from the future stays.
+
+**SYNC for qualifying / practice** (the countdown and the start estimate are only
+offered for races):
+
+| Method | What you do | Result |
+|---|---|---|
+| **Session Clock** | pause VOYO on the session clock, choose the phase (Q1/Q2/Q3, FP), *Time remaining* `07:32` or *Time elapsed* `05:28` | F1 time from the official timing clock of that phase – **MEDIUM**, stated `±0.5–1 s` (the TV clock shows whole seconds). A value the clock stood still at (15:00 before Q2 starts, a red flag) is refused. |
+| **Phase Marker – SYNC HERE** | pause exactly when the clock turns to 0:00 (Q2 END / SESSION END) or starts (Q2 START), press SYNC HERE | event anchor with the millisecond timestamp of the timing clock – `±0.1–0.3 s` when paused; with a second independent anchor (clock, another marker, `S`) **HIGH**, e.g. *Method: Q2 END Marker + Q3 Time Remaining* |
+| Manual Exact Time, Restore Saved Sync, `S` | as above | as above |
+
+API: `POST /api/sync/clock {"clock": "Q2|remaining|07:32"}`,
+`POST /api/sync/marker {"marker": "Q2_END"}`; `GET /api/sync` → `sessionKind`,
+`sessionTimeline` (phases with duration, SYNC HERE markers, current phase clock).
+
+### Replay clock, race control state and what a car is doing (qualifying)
+
+* **The video is the master clock.** The session clock (race / Q1–Q3 / practice) is computed
+  on the server for the shown F1 moment (`ExtrapolatedClock` at that moment); the TV only
+  interpolates between two states with the replay rate, which is **0 while VOYO is paused**
+  (`dashboard/components/f1time.js` `clockNow`). A seek rebuilds the complete state for the new
+  moment. The clock never goes below 0:00; when the session has officially ended (`Finished`)
+  it stays where it was then - also in a race, where the feed never stops the clock itself.
+* **Session flow** (`server/race_control.py` + `normalizer.session_flow`): RUNNING →
+  SUSPENDED (red flag) → RUNNING → FINISHED from the official session status, the track
+  status and race control - each only from the moment it was issued (seeking back before a
+  red flag shows the running session again). Without `TrackStatus` the flag / SC / VSC state
+  is derived from the race control messages (marked "from race control"); with no data it is
+  UNKNOWN, never an invented GREEN. `Race Control coverage: COMPLETE / PARTIAL / NONE` is shown
+  in the SYNC menu details and in view 5.
+* **FIA per driver**: the latest messages naming a car (only that car) are listed in its
+  detail panel; lap deletions invalidate a lap only when the message names its time
+  (`TIME 1:31.537 DELETED`) or its lap number (`LAP 11`); a "LAP DELETED - DOUBLE YELLOW"
+  without either is shown in race control but attached to no lap.
+* **Qualifying / practice lap state** (`server/lap_state.py`): `OUT` / `PREP` / `HOT` / `COOL`
+  next to `L12·S2` on the board and in the driver detail (`LAP 12 · S2 HOT LAP`). No field in
+  the feed says it, so it is classified per driver against the driver's OWN pace (personal best
+  sectors / lap / finish-line speed; the session's best only while the driver has none): lap
+  begun at the pit exit → OUT LAP; sectors within 3 % → HOT LAP; ≥ 10 % slower → PREP, or
+  COOLDOWN after a hot lap; nothing completed yet → the finish-line speed with which the lap
+  began, or the time already spent in the sector. Ambiguous → nothing shown (UNKNOWN), and
+  nothing before at least three cars have set a representative lap.
+
+### AUTO MEDIA SYNC – which session is this video? (recordings only)
+
+Two separate questions, never mixed:
+
+    VOYO video ─► AUTO / MANUAL SESSION DETECTION ─► load that OpenF1 / F1-archive session ─► SYNC ─► replay timeline
+                  "which F1 session is this video?"                                         "which F1 instant is currentTime?"
+
+Detection reads only what the page states – VOYO title, media title, `og:title`,
+the URL path (never its query) and a publish date if the page has one – and
+normalises Slovenian and English forms (`VN Azerbajdžana`, `Velika nagrada
+Azerbajdžana`, `Azerbaijan Grand Prix`, `Azerbaijan GP`, `vn-azerbajdzana-dirka`;
+`dirka`/`race`, `kvalifikacije`/`qualifying`, `1. prosti trening`/`trening 1`/`FP1`,
+`sprint`, `sprint kvalifikacije`/`Sprint Qualifying`). VOYO's page suffix
+*"Glej dirke online"* is boiler plate and is ignored. Then it picks the OpenF1
+session – and **never guesses**:
+
+* no Grand Prix / two Grands Prix / two session types in the title → **AUTO MEDIA SYNC FAILED**;
+* a title with only the Grand Prix (`VN Azerbajdžana - Glej dirke online`) is the
+  **Race** only by VOYO's naming convention *and* if the video is ≥ 2.25 h
+  (`race_min_video_seconds`) – otherwise you choose;
+* no year in the title and the session exists in several seasons → the latest is
+  taken only if it was ≤ 21 days ago (`assume_recent_season_days`), shown as
+  "season ASSUMED"; otherwise you choose. A year that does not match fails.
+
+The SYNC menu shows **MEDIA** (e.g. *Azerbaijan Grand Prix — Race*, detected /
+selected / failed, *OpenF1 session loaded*) and **SYNC** (*SYNC REQUIRED* until
+you sync, then *SYNCED — HIGH* with method, offset, health). **SELECT SESSION**
+(TV menu or phone remote) lists the season's Grands Prix and sessions from
+OpenF1 (fallback: the F1 archive index). A manual choice is remembered for that
+`mediaId`. Another video unloads the previous session at once; a saved **sync**
+is only restored for the same `mediaId` **and** session – another recording of
+the same Grand Prix is a new video.
+
+### Watching a recording (VOD)
+
+`launch.bat vod` (or `python main.py --vod` / `--vod 11253`): the server
+detects the session from the VOYO title (`Velika nagrada Japonske – dirka`,
+`VN Kitajske: sprint kvalifikacije`, `1. prosti trening`, …; it never guesses
+a missing session type), loads that session from the public F1 live-timing
+archive (tyres, pit, penalties, positions, telemetry, race control, weather)
+and shows it **at the video's time** – seeking in VOYO seeks the dashboard,
+pause freezes it. Choose a session manually with
+`curl -X POST http://127.0.0.1:8080/api/sync/session -d '{"session_key":11253}'`
+or `[vod] session_key`. OpenF1 and the archive are cached in `data/`; if they
+are unreachable the state says so and no time is invented.
+
+API: `GET /api/sync` (state: `synced, absoluteTime, sessionKey, sessionName,
+offsetSeconds, errorSeconds, confidence, method, anchor, source, reason`),
+`POST /api/sync/{capture|countdown|exact|auto|estimate|clear|clock|marker}`,
+`POST /api/sync/session`.
+
+### Drift, pause, seek, clock loss
+
+* **Pause** → the target stops; nothing advances (session clock, map, timing).
+* **Seek / DVR** → the target jumps with the video; the state is rebuilt from
+  the buffer; the map is refilled around the new time.
+* **Buffering** (`readyState < 3` or the position not moving while "playing")
+  → treated like a pause.
+* **Drift**: the offset is constant for one video; a new anchor applies at
+  once, `R` (force resync) re-applies the anchors and drops manual trims.
+* **Video change** (other `mediaId` / page) → the old sync is not used; the
+  saved sync of that video is restored if it belongs to the same session.
+* **VOYO clock lost** (window closed, no video) → recording: the shown time is
+  held and the menu says so; live stream: the last delay is held (no jump).
+* `SYNC +` / `SYNC −` (`+`/`−`, CH+/CH−, phone remote, menu) adjust ±0.25 s on
+  top → confidence **MANUAL**; the next anchor resets the adjustment.
+
+### How the clock gets from VOYO to the server
+
+`tools/tv_launcher.py` starts the VOYO window (dedicated profile) with
+`--remote-debugging-port=9223` and runs `tools/voyo_clock.py`, which evaluates
+the small, read-only `tools/voyo_clock_probe.js` in the VOYO page 5× per second
+(`currentTime, paused, playbackRate, readyState, seeking, ended, duration,
+buffered, seekable` + the standard media events) and posts
+`{playback_time, paused, playback_rate, timestamp_local, …}` to
+`POST /api/sync/voyo` (once per second while paused). No browser extension, no
+user script, no layout scraping. **No DRM/EME, licence, key, stream or network
+access; nothing is recorded or copied; the player is not controlled.**
+
+### On screen
+
+* Top bar / race-info / focus bar: the **SYNC** button – `SYNC ±0.1s ●`
+  (recording) or `SYNC 5.24s ●` (live: delay behind live); dot green HIGH,
+  light green MEDIUM, blue MANUAL, hollow amber LOW (`ESTIMATED`), orange
+  `NOT SYNCED`; `❚❚` paused, `…` buffering, `!` clock lost. Hidden on a plain
+  live dashboard without video.
+* LOW / UNSYNCED on a recording: a banner over the leaderboard, the session
+  clock only as `≈1:23` (LOW) or N/A (UNSYNCED), never an exact-looking time.
+* The menu's *Details* show mode, source, reference events, VOYO state,
+  TV delay, receive latency, buffer, VOYO metadata (display only) and flags.
+
+Recommended for a recording: before the start, pause on VOYO's countdown →
+**VOYO Countdown** (MEDIUM) → at lights out press `L` (→ HIGH). Joining
+later: **Manual Exact Time** or the countdown if it is still in the video,
+then `S` at a couple of line crossings of the selected car.
+
+## 10. Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| "LIVE DATA DISCONNECTED · RECONNECTING…" | `curl -I https://livetiming.formula1.com/signalrcore/negotiate` from the server; firewall/DNS; the log line after "F1 feed disconnected" gives the reason. Try `transport = "legacy"`. |
+| Timing works but map has no cars / telemetry N/A | Expected when F1 withholds Position.z from your connection and the archive stream is not readable (§7a). Run `tools/probe_feed.py` during the session. With token: log says "token EXPIRED" or `negotiate rejected (HTTP 401)` → copy a fresh `login-session` cookie. |
+| "TRACK MAP UNAVAILABLE" | Server cannot reach `api.multiviewer.app`: run `tools/fetch_tracks.py` from a machine that can and copy `data/tracks/`, or wait – the outline is learned from position data after one lap. |
+| Nothing between sessions | Normal: the feed is idle; the map shows NO LIVE SESSION and the next session. |
+| Dashboard not in sync with the VOYO picture | Open the SYNC menu (`Y`): it shows the session, the video position, method, anchors and the reason. No video position → see "VOYO clock" lines in the launcher console. Session "not identified" → choose it (`POST /api/sync/session`). Without the VOYO window: `--delay 30` / `SYNC +/−`. |
+| Sync panel says `VOYO CLOCK LOST` | The launcher is not reading the player: VOYO window closed, no `<video>` on the page yet, or the window was not started by the launcher (`--attach` needs a VOYO window started with `--remote-debugging-port=9223`). |
+| Recording on VOYO, time set, board stays empty; no `VOD` / `SYNC CHECK` lines in the launcher console | The server runs in **LIVE** mode (banner `RECORDING IN LIVE MODE`): live timing only keeps the last minutes. `launch.bat` without an argument now picks the mode itself (LIVE only from 90 min before a session until 60 min after it, otherwise VOD) and prints `Mode: …`; force it with `launch.bat vod` / `launch.bat live`. A server that is still running in the other mode is reported – close it first. |
+| Board empty before SYNC (VOD) | Intended: without a video time no session data is shown, and with `[vod] preload_data = false` (default) it is not even downloaded – only the session details (start, time zone, OpenF1 lap times for L/S). Banner `SYNC REQUIRED`; the download starts the moment a time is set. |
+| Time entered, but the board stays empty (VOD) | Look at the **DATA** line in the SYNC menu and the banner: `DOWNLOADING SESSION DATA` (a race is 200+ MB – the sync you entered is kept and the board fills when the download finishes), `SESSION DATA NOT LOADED` (reason shown, retried every 60 s) or `NO SESSION DATA AT THIS TIME` (the time is outside the recorded session). The launcher console mirrors the important server lines (`server … AUTO MEDIA SYNC / VOD / SYNC CHECK`) and every change of the VOYO player (`VOYO clock: playing at …, video length …`). |
+| Dashboard jerky on a weak TV browser | `[dashboard] map_fps = 20`, `animations = "reduced"`. |
+| Remote keys do nothing | Server log shows every remote event (`Remote key ...`). `Unmapped remote key` → add it to `[remote.keymap]`. |
+| Server log | Connections, reconnects, session changes, parser errors (rate-limited), WebSocket clients and remote events are logged; telemetry packets are not. `log_level = "DEBUG"` for more. |
+| Anything else | `http://server:8080/api/health` and `http://server:8080/api/state` show the normalized state. |
+
+## 11. Security
+
+* The browser can only send `{"type":"key"}` / `{"type":"command"}` messages
+  (max 1 KB, rate-limited); keys must match `[A-Z0-9_]` and a configured
+  mapping, commands must be in the whitelist, arguments are validated.
+  No shell commands exist anywhere in the server.
+* Remote HTTP API can be protected with a token. Intended for your LAN only –
+  do not expose port 8080 to the internet.
+* The F1 TV token (optional) stays on the server; it is never sent to the browser.
+* VOYO clock: `POST /api/sync/voyo` is accepted only from the same computer
+  (`[sync] allow_remote_clock = false`), size- and rate-limited, every field is
+  type/range checked. The VOYO window's DevTools port (`127.0.0.1:9223`) is only
+  reachable from this computer but gives local programs control of the
+  dedicated VOYO browser profile – use `tv_launcher.py --no-clock` if that is
+  not acceptable on your PC (sync then falls back to a fixed delay).
+
+## 12. Credits / licences
+
+* Feed protocol knowledge: FastF1, undercut-f1, f1-dash and other open-source projects.
+* Circuit geometry: MultiViewer circuit API (downloaded at runtime, not bundled).
+* Test circuits: [bacinger/f1-circuits](https://github.com/bacinger/f1-circuits) (MIT, `data/test_tracks/LICENSE-f1-circuits.md`).
+* Sample recording: [matteocelani/f1-telemetry](https://github.com/matteocelani/f1-telemetry) (MIT, `data/recordings/LICENSE-f1-telemetry-samples.txt`).
+* F1, FORMULA 1 and related marks are trademarks of Formula One Licensing B.V.

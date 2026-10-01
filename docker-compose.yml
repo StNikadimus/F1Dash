@@ -1,0 +1,17 @@
+services:
+  f1-dashboard:
+    build: .
+    container_name: f1-dashboard
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # live | test | replay   (overrides config/config.toml)
+      F1DASH_SOURCE_MODE: "${F1DASH_SOURCE_MODE:-live}"
+      # F1 TV token for live positions/telemetry - put it into a .env file next to this file
+      F1TV_TOKEN: "${F1TV_TOKEN:-}"
+      F1DASH_SOURCE_DELAY_SECONDS: "${F1DASH_SOURCE_DELAY_SECONDS:-0}"
+      TZ: "${TZ:-Europe/Ljubljana}"
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data            # track cache, recordings, replay files
