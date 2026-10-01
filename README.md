@@ -63,7 +63,7 @@ f1-dashboard/
 ├── bridge/                    # evdev IR bridge, WD TV Live keymap, send_key.sh
 ├── wdtv/                      # WD TV Live probe + experimental on-box bridge + README
 ├── deploy/                    # systemd units
-└── tests/                     # test_core.py (parsers, remote, launcher), test_sync.py (timeline, sync)
+└── tests/                     # test_core.py (parsers, remote, launcher), test_sync.py (timeline, sync), test_live.py (live == recording)
 ```
 
 ## 2. Install
@@ -183,9 +183,26 @@ stacked layout. (The WD TV Live itself has no suitable browser.)
   (or `[sync] mode = "DELAY"`) shows the F1 state of N seconds ago – measured
   on F1's event timestamps, not on when the packets arrived.
 * Reconnects: exponential back-off 2 s → 60 s with jitter, silence watchdog
-  (`silence_timeout`), fresh snapshot after every reconnect. The TV shows
+  (`silence_timeout`, 60 s), fresh snapshot after every reconnect. The TV shows
   **LIVE DATA DISCONNECTED · RECONNECTING…** with attempt and countdown and
-  keeps the last data visible (dimmed).
+  keeps the last data visible (dimmed). The snapshot replaces the feed topics
+  but keeps what was derived from the updates before the gap (lap history,
+  knocked-out part, since when a car is in the pit / stopped); it is dated on
+  F1's clock, so a delayed / video-synced board never shows it early.
+* Connection state in the mode badge: **LIVE**, **LIVE · CONNECTING**,
+  **LIVE · RECONNECTING**, **LIVE · DELAYED** (socket open, no message from F1
+  for 25 s – F1 sends a heartbeat every 15 s; banner + dimmed board and clock),
+  **LIVE · DISCONNECTED** (this screen lost the dashboard server),
+  **LIVE · FINISHED**. Connected without a SessionInfo: **SESSION UNKNOWN**.
+* Live F1 time = this computer's clock corrected by the measured offset of
+  the feed timestamps (latency + PC clock error), so a wrong PC clock moves
+  neither the session clock nor the pit / garage / DNF timers at the live edge.
+  Messages delivered late (the feed does that by up to ~2 s) are applied in F1
+  time order – an older clock / track status post never undoes a newer one.
+  A delayed board (`delay_seconds`, VOYO) still counts on the PC clock: keep
+  it synced (the log warns above 2 s).
+* `LapSeries` is subscribed as well (the lap tracker's second line-crossing
+  signal; added automatically if an older `config.toml` omits it).
 
 ## 7. Which values the feed really provides
 

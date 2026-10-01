@@ -123,12 +123,16 @@ class Timeline:
 
     def clear_state(self, keep: tuple[str, ...] = ()) -> None:
         """Clear the *current* state (session change) - called while applying events."""
+        self.feed_reset_keep(keep)
+        self.positions.reset()
+        self.cardata.reset()
+
+    def feed_reset_keep(self, keep: tuple[str, ...]) -> None:
+        """Clear the feed topics except ``keep`` (positions / telemetry stay)."""
         kept = {k: self.feed.get(k) for k in keep if self.feed.get(k) is not None}
         self.feed.reset()
         for k, v in kept.items():
             self.feed.apply(k, v, snapshot=True)
-        self.positions.reset()
-        self.cardata.reset()
 
     def mark_reset(self, event_ms: float, receive_ms: float) -> None:
         """Insert a 'state was reset here' marker (new subscription snapshot)."""
@@ -174,15 +178,41 @@ class Timeline:
             # Truly late: older than events already applied. Apply now so nothing
             # is lost (positions still reach the map), keep the list sorted.
             self.idx += 1
+            if ev.kind in ("topic", "reset"):
+                # checkpoints after this point no longer contain it
+                self.checkpoints = [c for c in self.checkpoints if c.last_key < key]
+                if self._reorder():
+                    self._late_state = True
+                    return
             emit: list = []
             sc, tc = self._apply(ev, emit, force_emit=True)
             self._late_emit.extend(emit)
             self._late_state |= sc
             self._late_tel |= tc
-            if ev.kind in ("topic", "reset"):
-                # checkpoints after this point no longer contain it
-                self.checkpoints = [c for c in self.checkpoints if c.last_key < key]
         # pos >= idx: applied by the next advance() once the target reaches it
+
+    def _reorder(self) -> bool:
+        """A feed message older than messages already applied (live: delivered late - real feeds
+        do that by up to ~2 s). Its effect must not depend on when it arrived: an older clock /
+        track status post applied on top would restart a stopped clock or end a red flag. The
+        feed topics are rebuilt from the last checkpoint before it, applying the messages in F1
+        time order (as a recording would). Positions / telemetry are timestamped samples and stay.
+        False: no checkpoint before it, or a session change in between - applied on top instead."""
+        if not self.checkpoints:
+            return False
+        ck = self.checkpoints[-1]                    # (those after the late message were dropped)
+        j = bisect.bisect_right(self._keys, ck.last_key)
+        span = [e for e in self.events[j:self.idx] if e.kind in ("topic", "reset")]
+        if any(e.topic == "SessionInfo" for e in span):
+            return False
+        self.feed.topics = pickle.loads(ck.topics)
+        self.replaying = True
+        try:
+            for e in span:
+                self._apply(e, None)
+        finally:
+            self.replaying = False
+        return True
 
     # ------------------------------------------------------------------ apply
     def _apply(self, ev: Event, emit: Optional[list], force_emit: bool = False) -> tuple[bool, bool]:
@@ -199,7 +229,13 @@ class Timeline:
                 self.cardata.ingest({"Entries": [ev.payload]})
                 return False, True
             if ev.kind == "reset":
-                self.clear_state()
+                # live reconnect: the subscribe snapshot replaces every feed topic, but it has
+                # nothing of what is derived from the update history ("_" topics: lap history,
+                # since when in the pit / stopped, knocked-out part) - that history is still true
+                # for this session (a new session clears it in Engine._check_session). Car
+                # positions / telemetry are timestamped samples: kept, so the map does not blank.
+                derived = tuple(k for k in self.feed.topics if k.startswith("_"))
+                self.feed_reset_keep(derived)
                 return True, True
             self.feed.apply(ev.topic, ev.payload, ev.snapshot, ev.event_ms)
             if self.on_topic:

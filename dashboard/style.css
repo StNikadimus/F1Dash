@@ -136,6 +136,11 @@ html, body {
 }
 #feed-banner small { display: block; font-size: 16px; font-weight: 700; color: #ffc7cc; letter-spacing: .04em; }
 #stage.stale #grid { opacity: .55; }
+#stage.stale #clock { opacity: .45; }
+.mode-badge[class*="live-"] { font-size: 14px; letter-spacing: .06em; white-space: nowrap; }
+.mode-live.live-connecting, .mode-live.live-reconnecting, .mode-live.live-delayed { background: #b5761a; }
+.mode-live.live-disconnected { background: #a3141f; }
+.mode-live.live-finished::before { color: #8a8f98; }
 
 /* ------------------------------------------------------------------ grid */
 #grid { display: grid; grid-template-columns: 790px 1fr; gap: 10px; min-height: 0; }
