@@ -48,6 +48,8 @@ RS = "\x1e"                         # SignalR Core record separator
 UA_CORE = "f1-tv-dashboard/1.0"
 UA_LEGACY = "BestHTTP"
 ORIGIN = "https://www.formula1.com"
+# second line-crossing signal of server/laps.py (the F1 archive / recordings carry it too)
+REQUIRED_TOPICS = ("LapSeries",)
 
 
 class FeedError(Exception):
@@ -90,6 +92,12 @@ class F1LiveSource(Source):
     def __init__(self, cfg: dict[str, Any], recorder=None) -> None:
         self.cfg = cfg
         self.topics: list[str] = list(cfg.get("topics") or [])
+        for t in REQUIRED_TOPICS:
+            if t not in self.topics:
+                # an older config.toml lists the topics without it: the live lap / sector state
+                # would then differ from the same moment of a recording (which has it)
+                log.info("Subscribing to %s as well (needed for the lap / sector tracking)", t)
+                self.topics.append(t)
         self.transport_pref: str = (cfg.get("transport") or "auto").lower()
         self.reconnect_min = float(cfg.get("reconnect_min", 2.0))
         self.reconnect_max = float(cfg.get("reconnect_max", 60.0))
@@ -177,11 +185,16 @@ class F1LiveSource(Source):
             return
         await sink.begin_snapshot()
         now = datetime.now(timezone.utc)
-        for topic, data in result.items():
+        # F1's own clock in the snapshot: the time of its last heartbeat (the content is newer)
+        hb = result.get("Heartbeat")
+        hb_utc = parse_utc(hb.get("Utc")) if isinstance(hb, dict) else None
+        # SessionInfo first: if the session changed while disconnected, the engine clears the
+        # state on it - which must not wipe topics of this snapshot applied before it
+        for topic, data in sorted(result.items(), key=lambda kv: kv[0] != "SessionInfo"):
             self._track(topic, data)
             if self.recorder:
                 self.recorder.write(topic, data, now, True)
-            await sink.feed(topic, data, now, snapshot=True)
+            await sink.feed(topic, data, hb_utc, snapshot=True)
         log.info("Received subscription snapshot with %d topics", len(result))
 
     async def _handle_feed(self, sink: Sink, args: list) -> None:

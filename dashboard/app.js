@@ -47,10 +47,11 @@
   function connect() {
     const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
     ws = new WebSocket(url);
-    ws.onopen = () => { S.wsOpen = true; retry = 0; $("conn-overlay").hidden = true; };
+    ws.onopen = () => { S.wsOpen = true; retry = 0; $("conn-overlay").hidden = true; renderMode(); };
     ws.onclose = () => {
       S.wsOpen = false;
       $("conn-overlay").hidden = false;
+      renderMode();
       const d = Math.min(15000, 1000 * 2 ** Math.min(retry++, 4));
       $("conn-detail").textContent = `RECONNECTING IN ${Math.round(d / 1000)} s…`;
       setTimeout(connect, d);
@@ -259,8 +260,12 @@
   // ------------------------------------------------------------------ top bar
   function renderTop() {
     const s = S.session || {};
+    if (S.mode === "live") renderMode();               // FINISHED comes with the session state
     $("meeting").textContent = s.meeting_name || (S.mode === "live" ? "F1 LIVE TIMING" : "—");
-    let sname = s.session_name || "WAITING FOR SESSION";
+    // live and connected, but the feed has not said which session: never guessed
+    const connected = S.mode === "live" && ["connected", "stale"].includes((S.status || {}).state);
+    let sname = s.session_name || (connected ? "SESSION UNKNOWN" : "WAITING FOR SESSION");
+    if (connected && s.session_name && s.session_kind === "unknown") sname = `${s.session_name} · SESSION TYPE UNKNOWN`;
     if (s.session_kind === "qualifying" && s.session_part) {
       sname = /sprint/i.test(s.session_name || "") ? `${s.session_name} · SQ${s.session_part}` : `${s.session_name} · Q${s.session_part}`;
     }
@@ -322,11 +327,24 @@
     $("clock").innerHTML = t === null ? NA : t;
     for (const id of ["ri-clock", "fb-clock"]) { const e = document.getElementById(id); if (e) e.innerHTML = t === null ? NA : t; }
   }
+  function liveState() {
+    // LIVE connection state: CONNECTING / LIVE / DELAYED / DISCONNECTED / RECONNECTING / FINISHED
+    if (S.mode && S.mode !== "live") return null;
+    if (!S.wsOpen) return "DISCONNECTED";                   // this screen lost the dashboard server
+    const st = S.status || {};
+    if (st.state === "reconnecting" || (st.state === "connecting" && st.attempt > 0)) return "RECONNECTING";
+    if (st.state === "connecting" || st.state === "starting" || !st.state) return "CONNECTING";
+    if (st.state === "stale") return "DELAYED";               // socket open, no data from F1
+    if (st.state === "error") return "DISCONNECTED";
+    if ((S.session || {}).state === "FINISHED") return "FINISHED";
+    return "LIVE";
+  }
   function renderMode() {
     const b = $("mode-badge");
     const m = S.mode;
-    b.className = "mode-badge mode-" + (m || "live");
-    b.textContent = m === "test" ? "TEST MODE" : m === "replay" ? "REPLAY" + (S.status.detail && /x[\d.]+/.test(S.status.detail) ? " " + S.status.detail.match(/x[\d.]+/)[0] : "") : m === "vod" ? "RECORDING" : "LIVE";
+    const live = liveState();
+    b.className = "mode-badge mode-" + (m || "live") + (live && live !== "LIVE" ? " live-" + live.toLowerCase() : "");
+    b.textContent = m === "test" ? "TEST MODE" : m === "replay" ? "REPLAY" + (S.status.detail && /x[\d.]+/.test(S.status.detail) ? " " + S.status.detail.match(/x[\d.]+/)[0] : "") : m === "vod" ? "RECORDING" : live === "LIVE" ? "LIVE" : "LIVE · " + live;
     $("test-watermark").hidden = m !== "test";
   }
 
@@ -339,6 +357,9 @@
     if (S.mode === "live" && (st.state === "reconnecting" || st.state === "connecting") && st.attempt > 0) {
       html = `LIVE DATA DISCONNECTED · RECONNECTING…<small>attempt ${st.attempt}` +
         (has(st.retry_in) ? ` · next try in ${st.retry_in} s` : "") + (st.detail ? ` · ${esc(st.detail)}` : "") + "</small>";
+    } else if (S.mode === "live" && st.state === "stale") {
+      html = `LIVE DATA DELAYED · NO DATA FROM F1 FOR ${has(st.feed_age_s) ? st.feed_age_s : "?"} s` +
+        "<small>connection still open · the board shows the last data received and may be outdated</small>";
     } else if (st.state === "error") {
       html = `DATA SOURCE ERROR<small>${esc(st.detail || "")}</small>`;
     }

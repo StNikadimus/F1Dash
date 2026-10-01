@@ -34,6 +34,8 @@ STATE_INTERVAL = 0.25       # s, max rate of state patches
 TEL_INTERVAL = 0.25         # s, max rate of telemetry messages
 SYNC_INTERVAL = 0.5         # s, sync status messages
 SNAPSHOT_BACKDATE_MS = 1500  # a subscribe snapshot is older than the updates that follow it
+CLOCK_WARN_MS = 2000.0       # PC clock vs F1 timestamps (incl. latency) beyond this: warn in the log
+FEED_STALE_S = 25.0          # live socket open but silent this long (F1 sends a Heartbeat every 15 s): DELAYED
 
 
 class Engine:
@@ -87,6 +89,9 @@ class Engine:
         self._laps: dict[str, Optional[int]] = {}
         self._order: list[str] = []
         self._status: dict[str, Any] = {"state": "starting", "mode": source.mode}
+        self._last_rx: Optional[float] = None       # monotonic time of the last live-socket message
+        self._stale_shown: Optional[int] = None
+        self._clock_warned = -1e9
         self._schedule: Optional[dict] = None
         self._parse_errors: dict[str, float] = {}
         self._last_full = 0.0
@@ -112,13 +117,42 @@ class Engine:
     def _src_now_ms(self) -> float:
         return self.source.now().timestamp() * 1000
 
+    def _feed_offset_ms(self) -> Optional[float]:
+        """LIVE: receive time (clock B) minus F1 event time (clock A) of the feed messages -
+        network latency plus the offset of this computer's clock. None until measured."""
+        lat = self.timeline.receive_latency_s() if self.source.mode == "live" else None
+        if lat is None or abs(lat) > 6 * 3600:
+            return None
+        return lat * 1000
+
+    def _live_f1_now_ms(self) -> float:
+        """F1 time of the live edge: wall clock corrected by the measured feed offset, so a
+        wrong PC clock moves neither the session clock nor the pit / DNF timers."""
+        off = self._feed_offset_ms()
+        return self._src_now_ms() - (off or 0.0)
+
+    def _snapshot_ms(self, receive_ms: float, heartbeat_ms: Optional[float] = None) -> float:
+        """The subscribe result carries no timestamp: it is F1's state when it was sent, i.e.
+        receive time minus the measured offset - never earlier, or it would be shown before
+        its content happened (a delayed / video-synced board would see the future). Before
+        anything is measured (first connect, nothing shown yet) a fixed backdate keeps it
+        ahead of the updates that follow it - and never before F1's own last heartbeat in the
+        snapshot (a PC clock that is behind)."""
+        off = self._feed_offset_ms()
+        if off is not None:
+            return receive_ms - off
+        est = receive_ms - SNAPSHOT_BACKDATE_MS
+        return max(est, heartbeat_ms) if heartbeat_ms is not None else est
+
     async def feed(self, topic: str, data: Any, ts: Optional[datetime], snapshot: bool = False,
                    origin: str = "feed") -> None:
         receive_ms = self._src_now_ms()                         # clock B
         event_ms = ts.timestamp() * 1000 if ts else None        # clock A (None: unknown)
+        if origin == "feed":
+            self._last_rx = time.monotonic()
         if snapshot and self.source.mode == "live":
-            # the subscribe result carries no timestamp: it is the state shortly before now
-            event_ms = receive_ms - SNAPSHOT_BACKDATE_MS
+            # (ts of a live snapshot: the Heartbeat Utc it contains, if any - see F1LiveSource)
+            event_ms = self._snapshot_ms(receive_ms, event_ms)
         self._ingest(topic, data, event_ms, snapshot, origin, receive_ms)
 
     def _ingest(self, topic: str, data: Any, event_ms: Optional[float], snapshot: bool,
@@ -154,7 +188,7 @@ class Engine:
         if self.source.mode == "live":
             # reconnect: keep the buffer (the video may still be behind), mark the reset point
             now = self._src_now_ms()
-            self.timeline.mark_reset(now - SNAPSHOT_BACKDATE_MS - 1, now)
+            self.timeline.mark_reset(self._snapshot_ms(now) - 1, now)
         else:
             # replay loop / new simulated race: time starts over
             self.timeline.reset()
@@ -164,7 +198,40 @@ class Engine:
 
     def set_status(self, **status: Any) -> None:
         self._status = {"mode": self.source.mode, **status}
+        if status.get("state") == "connected":
+            self._last_rx = time.monotonic()        # a fresh connection counts as fresh data
+        self._stale_shown = None
         self._push_status()
+
+    def _check_feed_age(self, mono: float) -> None:
+        """LIVE: socket open but no message from F1 for FEED_STALE_S -> state "stale" (DELAYED),
+        so the board never looks healthy without fresh data; back to "connected" when data flows."""
+        st = self._status.get("state")
+        if self.source.mode != "live" or st not in ("connected", "stale") or self._last_rx is None:
+            return
+        off = self._feed_offset_ms()
+        if off is not None and abs(off) > CLOCK_WARN_MS and mono - self._clock_warned > 600:
+            # the live edge is corrected for it; a delayed / video-synced board is not (its
+            # shown moment is this computer's clock minus the delay)
+            self._clock_warned = mono
+            log.warning("This computer's clock differs from F1's by about %+.1f s (feed latency included) - "
+                        "sync the Windows clock (Settings > Time > Sync now)", off / 1000)
+        age = mono - self._last_rx
+        if age > FEED_STALE_S:
+            shown = int(age // 5)                    # refresh the "no data for N s" every 5 s
+            if st != "stale" or shown != self._stale_shown:
+                if st != "stale":
+                    log.warning("No data from F1 live timing for %.0f s (connection still open)", age)
+                self._status = {**self._status, "state": "stale", "feed_age_s": round(age),
+                                "detail": f"no data from F1 for {age:.0f} s"}
+                self._stale_shown = shown
+                self._push_status()
+        elif st == "stale":
+            log.info("F1 live timing data flowing again")
+            self._status = {k: v for k, v in self._status.items() if k != "feed_age_s"}
+            self._status.update(state="connected", detail="Connected")
+            self._stale_shown = None
+            self._push_status()
 
     def set_schedule(self, schedule: Optional[dict]) -> None:
         self._schedule = schedule
@@ -757,6 +824,8 @@ class Engine:
     def _target_dt(self) -> datetime:
         if math.isfinite(self._target_ms):
             return datetime.fromtimestamp(self._target_ms / 1000, timezone.utc)
+        if self.source.mode == "live":
+            return datetime.fromtimestamp(self._live_f1_now_ms() / 1000, timezone.utc)
         return self.source.now()
 
     def _pres_ms(self) -> float:
@@ -845,12 +914,14 @@ class Engine:
             except Exception:  # noqa: BLE001
                 self._parse_error("timeline")
             now = time.monotonic()
+            self._check_feed_age(now)
             if (self._dirty and now - self._last_full >= STATE_INTERVAL) or now - self._last_full > 5:
                 self._dirty = False
                 self._last_full = now
                 if self.positions.latest:
                     newest = max(v[0] for v in self.positions.latest.values())
-                    ref = self._pres_ms() if math.isfinite(self._target_ms) else time.time() * 1000
+                    ref = self._pres_ms() if math.isfinite(self._target_ms) else (
+                        self._live_f1_now_ms() if self.source.mode == "live" else time.time() * 1000)
                     self.availability.positions_age_s = round(max(0.0, (ref - newest) / 1000), 1)
                 try:
                     # session structure (Q1/Q2/Q3, clock, markers) for the phase label and timeline
