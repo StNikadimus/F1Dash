@@ -10,13 +10,14 @@ from typing import Any
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from .config import DASHBOARD_DIR, DATA_DIR
+from .config import DASHBOARD_DIR, DATA_DIR, resolve_path
 from .engine import Engine
+from .f1tv_auth import AuthManager, AuthStore, login_page, result_page
 from .hub import Hub
 from .recorder import Recorder
 from .remote import RemoteController
@@ -49,8 +50,15 @@ def build_source(cfg: dict[str, Any], tracks: TrackProvider) -> tuple[Source, bo
         return VodSource(vod, client, DATA_DIR / "archive_cache"), False
     from .sources.f1_live import F1LiveSource
     recorder = Recorder(DATA_DIR / "recordings") if cfg["live"].get("record") else None
-    src = F1LiveSource(cfg["live"], recorder)
+    src = F1LiveSource(cfg["live"], recorder, auth=make_auth(cfg))
     return src, src.token_configured
+
+
+def make_auth(cfg: dict[str, Any]) -> AuthManager:
+    """F1 TV sign-in of the live source ([f1_tv]); the legacy live.f1tv_token / F1TV_TOKEN still wins."""
+    f1 = cfg.get("f1_tv") or {}
+    store = AuthStore(resolve_path(f1.get("auth_file") or "data/auth/f1tv_auth.json"))
+    return AuthManager(f1, store, override=(cfg.get("live") or {}).get("f1tv_token") or "")
 
 
 def create_app(cfg: dict[str, Any]) -> Starlette:
@@ -89,6 +97,14 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         "keymap_video_focus": remote.keymap_video_focus,
     }
 
+    auth: AuthManager | None = getattr(source, "auth", None)
+    port = int(cfg["server"]["port"])
+    callback_url = f"http://127.0.0.1:{port}/f1tv/callback"
+    if auth is not None and auth.subscription:
+        auth.login_url = f"http://127.0.0.1:{port}/f1tv/login"
+        if cfg.get("_force_login"):
+            auth.logout()
+
     tasks: list[asyncio.Task] = []
 
     @contextlib.asynccontextmanager
@@ -115,6 +131,51 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     async def health(request: Request) -> Response:
         return JSONResponse({"ok": True, "mode": source.mode, "status": engine._status,
                              "clients": len(hub.clients)})
+
+    # ---------------------------------------------------------------- F1 TV sign-in (this computer only)
+    def _local(request: Request) -> bool:
+        return (request.client.host if request.client else "") in LOOPBACK
+
+    async def f1tv_login(request: Request) -> Response:
+        if auth is None or not auth.subscription:
+            return HTMLResponse(result_page(False, "F1 TV sign-in is off ([f1_tv] subscription = false, or not in "
+                                                   "LIVE mode)."), status_code=409)
+        if not _local(request):
+            return HTMLResponse(result_page(False, "Open this page on the computer that runs the dashboard."),
+                                status_code=403)
+        return HTMLResponse(login_page(callback_url, auth.store.key(), auth.public_info()),
+                            headers={"Cache-Control": "no-store"})
+
+    async def f1tv_callback(request: Request) -> Response:
+        if auth is None or not auth.subscription:
+            return HTMLResponse(result_page(False, "F1 TV sign-in is off."), status_code=409)
+        if not _local(request):
+            return HTMLResponse(result_page(False, "Only accepted from this computer."), status_code=403)
+        body = await request.body()
+        if len(body) > 16384:
+            return HTMLResponse(result_page(False, "Too large."), status_code=413)
+        from urllib.parse import parse_qs
+        form = parse_qs(body.decode("utf-8", "replace"))
+        key = (form.get("key") or [""])[0]
+        import secrets as _secrets
+        if not _secrets.compare_digest(key, auth.store.key()):
+            log.warning("F1 TV sign-in with a wrong bookmark key refused (re-create the bookmark on /f1tv/login)")
+            return HTMLResponse(result_page(False, "This bookmark belongs to another installation - drag the "
+                                                   "button on the sign-in page to your bookmarks again."),
+                                status_code=403)
+        ok, msg = auth.complete((form.get("session") or [""])[0])
+        return HTMLResponse(result_page(ok, msg), status_code=200 if ok else 400,
+                            headers={"Cache-Control": "no-store"})
+
+    async def f1tv_status(request: Request) -> Response:
+        info = auth.public_info() if auth is not None else {"subscription": False, "state": "DISABLED"}
+        return JSONResponse(info, headers={"Cache-Control": "no-store"})
+
+    async def api_diagnostics(request: Request) -> Response:
+        if request.query_params.get("format") == "text":
+            from .diagnostics import format_report
+            return Response(format_report(engine.diagnostics()), media_type="text/plain; charset=utf-8")
+        return JSONResponse(engine.diagnostics(), headers={"Cache-Control": "no-store"})
 
     async def api_state(request: Request) -> Response:
         return JSONResponse(engine.snapshot())
@@ -312,6 +373,10 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/remote", remote_page),
         Route("/api/health", health),
         Route("/api/state", api_state),
+        Route("/api/diagnostics", api_diagnostics),
+        Route("/f1tv/login", f1tv_login),
+        Route("/f1tv/callback", f1tv_callback, methods=["POST"]),
+        Route("/f1tv/status", f1tv_status),
         Route("/api/ui", api_ui),
         Route("/api/remote/key", remote_key, methods=["GET", "POST"]),
         Route("/api/remote/command", remote_command, methods=["POST"]),
@@ -326,3 +391,25 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.engine = engine
     return app
+
+
+async def diagnose(cfg: dict[str, Any], seconds: float) -> None:
+    """``python main.py --diagnose``: live connection for ``seconds`` without the HTTP server,
+    then the report of what F1 actually delivered. Uses the stored F1 TV sign-in; when there is
+    none it reports ANONYMOUS (sign in with a normal start or --f1-login first)."""
+    from .diagnostics import format_report
+    cfg = dict(cfg)
+    cfg["live"] = {**cfg["live"], "record": False}
+    cfg["f1_tv"] = {**(cfg.get("f1_tv") or {}), "open_browser": False}
+    hub = Hub()
+    tracks = TrackProvider(DATA_DIR, cfg["tracks"])
+    source, token_ok = build_source(cfg, tracks)
+    engine = Engine(cfg, source, tracks, hub, token_configured=token_ok)
+    print(f"Connecting to F1 live timing for {seconds:.0f} s ...", flush=True)
+    tasks = [asyncio.create_task(source.run(engine)), asyncio.create_task(engine.publish_loop())]
+    try:
+        await asyncio.sleep(seconds)
+    finally:
+        print(format_report(engine.diagnostics()), flush=True)
+        for t in tasks:
+            t.cancel()

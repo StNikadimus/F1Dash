@@ -96,7 +96,7 @@ def arrivals(path: Path) -> list:
 
 def comparable(st: dict, clock: bool = True) -> dict:
     st = dict(st)
-    for k in ("availability", "timeline"):          # diagnostics / VOD sync structure
+    for k in ("availability", "timeline", "map"):   # diagnostics / VOD sync structure / map extras
         st.pop(k, None)
     s = dict(st["session"])
     s.pop("phase_duration_ms", None)

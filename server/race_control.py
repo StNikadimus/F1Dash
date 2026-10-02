@@ -60,6 +60,10 @@ class RaceControlResult:
     track_flag: Optional[str] = None     # GREEN / YELLOW / RED / CHEQUERED (last track-wide flag)
     safety_car: Optional[str] = None     # SC / SC_ENDING / VSC / VSC_ENDING while deployed
     session_rc: Optional[str] = None     # Started / Aborted / Finished (category SessionStatus)
+    pit_exit: Optional[str] = None       # OPEN / CLOSED (literal "PIT EXIT OPEN / CLOSED" messages)
+    pit_entry: Optional[str] = None      # OPEN / CLOSED
+    red_flag_seen: bool = False          # a red flag earlier in this session
+    track_flag_utc: Optional[str] = None  # Utc of the message that set track_flag / safety_car
     driver_messages: dict[str, list] = field(default_factory=dict)   # num -> latest messages naming it
 
 
@@ -146,6 +150,47 @@ def _severity(m: dict, text: str) -> str:
     return "info"
 
 
+_TAGS = [
+    ("UNDER INVESTIGATION", "investigation"), ("INVESTIGATED", "investigation"), ("NOTED", "investigation"),
+    ("NO FURTHER INVESTIGATION", "investigation"), ("NO FURTHER ACTION", "investigation"),
+    ("PENALTY", "penalty"), ("DISQUALIFIED", "penalty"), ("REPRIMAND", "penalty"),
+    ("DELETED", "deleted_lap"), ("REINSTATED", "deleted_lap"),
+    ("TRACK LIMITS", "track_limits"), ("UNSAFE RELEASE", "unsafe_release"),
+    ("PIT EXIT", "pit_lane"), ("PIT ENTRY", "pit_lane"), ("PIT LANE", "pit_lane"),
+    ("BLUE FLAG", "blue_flag"),
+]
+_HIGH = {"red_flag", "safety_car", "penalty", "session_status", "chequered"}
+_MEDIUM = {"investigation", "deleted_lap", "yellow_flag", "unsafe_release", "pit_lane"}
+
+
+def _tags(m: dict, up: str) -> list[str]:
+    """What a message literally is about - from F1's own fields and the words in it."""
+    cat = (m.get("Category") or "").upper()
+    flag = (m.get("Flag") or "").upper()
+    tags: list[str] = []
+    if cat == "FLAG":
+        tags.append({"RED": "red_flag", "YELLOW": "yellow_flag", "DOUBLE YELLOW": "yellow_flag",
+                     "CHEQUERED": "chequered", "BLUE": "blue_flag"}.get(flag, "flag"))
+    elif cat == "SAFETYCAR":
+        tags.append("safety_car")
+    elif cat == "SESSIONSTATUS":
+        tags.append("session_status")
+    elif cat == "DRS":
+        tags.append("drs")
+    for word, tag in _TAGS:
+        if word in up and tag not in tags and not (tag == "penalty" and "NO PENALTY" in up):
+            tags.append(tag)
+    return tags
+
+
+def _importance(tags: list[str]) -> str:
+    if _HIGH & set(tags):
+        return "high"
+    if _MEDIUM & set(tags):
+        return "medium"
+    return "low"
+
+
 def visible_messages(raw: Any, until_ms: Optional[float]) -> list[dict]:
     """Messages issued up to the shown moment. A message whose own Utc lies after it (e.g. held
     from a later state) is never shown - neither the message nor the penalty / flag it causes."""
@@ -187,10 +232,21 @@ def process_messages(raw: Any, until_ms: Optional[float] = None) -> RaceControlR
         except (TypeError, ValueError):
             lap = None
 
+        tags = _tags(m, up)
         res.messages.append(RaceControlMessage(
             id=str(idx), utc=m.get("Utc"), lap=lap, category=cat or None, flag=flag,
             scope=scope, sector=sector_i, driver=str(rn) if rn not in (None, "") else None,
-            text=text, severity=_severity(m, up)))
+            text=text, severity=_severity(m, up), tags=tags, importance=_importance(tags),
+            status=m.get("Status") or None, mode=m.get("Mode") or None))
+
+        # ---- pit lane (only the literal statements) -----------------------
+        for where, attr in (("PIT EXIT", "pit_exit"), ("PIT ENTRY", "pit_entry"), ("PIT LANE", None)):
+            for state in ("OPEN", "CLOSED"):
+                if f"{where} {state}" in up:
+                    if attr:
+                        setattr(res, attr, state)
+                    else:
+                        res.pit_exit = res.pit_entry = state
 
         # ---- flags --------------------------------------------------------
         if cat.upper() == "FLAG":
@@ -206,12 +262,14 @@ def process_messages(raw: Any, until_ms: Optional[float] = None) -> RaceControlR
                     res.track_flag, res.safety_car = "GREEN", None
                 elif flag == "RED":
                     res.red_flag_msg = True
+                    res.red_flag_seen = True
                     res.track_flag, res.safety_car = "RED", None
                 elif flag == "CHEQUERED":
                     res.chequered = True
                     res.track_flag = "CHEQUERED"
                 elif flag in ("YELLOW", "DOUBLE YELLOW"):
                     res.track_flag = "YELLOW"
+                res.track_flag_utc = m.get("Utc")
             elif scope == "Driver" and rn not in (None, ""):
                 if flag == "BLACK AND WHITE":
                     dflags(str(rn)).black_white = True
@@ -230,6 +288,7 @@ def process_messages(raw: Any, until_ms: Optional[float] = None) -> RaceControlR
             base = "VSC" if mode.startswith("VIRTUAL") else "SC" if mode else None
             if base:
                 res.safety_car = base + ("_ENDING" if status in ("ENDING", "IN THIS LAP") else "")
+                res.track_flag_utc = m.get("Utc")
 
         if cat.upper() == "SESSIONSTATUS":
             for key, st in (("STARTED", "Started"), ("RESUMED", "Started"), ("ABORTED", "Aborted"),

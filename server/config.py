@@ -18,6 +18,8 @@ DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 DEFAULTS: dict[str, Any] = {
     "server": {"host": "0.0.0.0", "port": 8080, "log_level": "INFO"},
     "source": {"mode": "live", "delay_seconds": 0.0},
+    "f1_tv": {"subscription": True, "open_browser": True, "safety_car_position_keys": [],
+              "auth_file": "data/auth/f1tv_auth.json"},
     "live": {
         "transport": "auto",
         "f1tv_token": "",
@@ -27,6 +29,9 @@ DEFAULTS: dict[str, Any] = {
             "TimingAppData", "TimingStats", "RaceControlMessages", "WeatherData",
             "TeamRadio", "TopThree", "PitLaneTimeCollection", "CurrentTyres",
             "LapSeries", "Position.z", "CarData.z",
+            "TyreStintSeries", "AudioStreams", "ContentStreams", "TlaRcm", "RcmSeries",
+            "PitStopSeries", "PitStop", "DriverRaceInfo", "OvertakeSeries",
+            "ChampionshipPrediction", "WeatherDataSeries",
         ],
         "reconnect_min": 2.0,
         "reconnect_max": 60.0,

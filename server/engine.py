@@ -15,13 +15,14 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .config import DATA_DIR
+from .diagnostics import FeedDiagnostics, format_report
 from .hub import Hub
 from .models import Availability
 from .normalizer import Normalizer
 from .sources.base import Source
 from .openf1 import OpenF1Client, OpenF1Error, RefEvents, match_session, parse_title
 from .sync import SyncManager, VoyoSample
-from .telemetry import parse_utc
+from .telemetry import POS_FRESH_MS, parse_utc
 from .timeline import INF, Timeline
 from .pitlane import (PitLaneCollector, Reconstruction, collect_from_events, needs_reconstruction, reconstruct,
                       traversals_from_samples)
@@ -92,6 +93,8 @@ class Engine:
         self._last_rx: Optional[float] = None       # monotonic time of the last live-socket message
         self._stale_shown: Optional[int] = None
         self._clock_warned = -1e9
+        self.diag = FeedDiagnostics()
+        self.sc_keys = [str(k) for k in ((cfg.get("f1_tv") or {}).get("safety_car_position_keys") or [])]
         self._schedule: Optional[dict] = None
         self._parse_errors: dict[str, float] = {}
         self._last_full = 0.0
@@ -150,6 +153,8 @@ class Engine:
         event_ms = ts.timestamp() * 1000 if ts else None        # clock A (None: unknown)
         if origin == "feed":
             self._last_rx = time.monotonic()
+        if self.source.mode in ("live", "replay"):
+            self.diag.observe(topic, data, snapshot, origin, time.monotonic())
         if snapshot and self.source.mode == "live":
             # (ts of a live snapshot: the Heartbeat Utc it contains, if any - see F1LiveSource)
             event_ms = self._snapshot_ms(receive_ms, event_ms)
@@ -200,6 +205,7 @@ class Engine:
         self._status = {"mode": self.source.mode, **status}
         if status.get("state") == "connected":
             self._last_rx = time.monotonic()        # a fresh connection counts as fresh data
+            self.diag.reset_connection(self._last_rx)
         self._stale_shown = None
         self._push_status()
 
@@ -585,7 +591,13 @@ class Engine:
 
     def _push_status(self) -> None:
         delay = self.sync.delay if self.sync.active == "DELAY" else 0
-        self.hub.set_status({**self._status, "delay": delay, "next_session": self._schedule})
+        extra = {}
+        auth = getattr(self.source, "auth", None)
+        if auth is not None:
+            # state / product only - never the token
+            info = auth.public_info()
+            extra["f1tv"] = {"subscription": info["subscription"], "state": info["state"], "product": info["product"]}
+        self.hub.set_status({**self._status, **extra, "delay": delay, "next_session": self._schedule})
 
     def _reset_side_state(self) -> None:
         log.info("Resetting session state")
@@ -935,6 +947,8 @@ class Engine:
                 for num, d in state["drivers"].items():
                     self._in_pit[num] = bool(d["in_pit"])
                     self._laps[num] = d["laps"]
+                state["map"] = self.map_info()
+                self.diag.session_running(bool(state["session"].get("live")), now)
                 self.hub.publish_state(state)
             if self._tel_dirty and now - last_tel >= TEL_INTERVAL:
                 self._tel_dirty = False
@@ -943,7 +957,18 @@ class Engine:
                 path = (self.feed_state.get("SessionInfo") or {}).get("Path") or ""
                 if path[:4].isdigit():
                     year = int(path[:4])
-                self.hub.broadcast({"type": "tel", "cars": self.cardata.compact(year)})
+                # one object per car: only what CarData.z carries, with its age (old data is
+                # flagged, then hidden - never shown as current); refreshed at least every second
+                self.hub.broadcast({"type": "tel", "cars": self.cardata.objects(year, self._now_pres_ms())})
+            elif self.cardata.latest and now - last_tel >= 1.0:
+                self._tel_dirty = True
+            if self.source.mode == "live" and self.diag.due(now):
+                self.diag.mark_reported(now)
+                try:
+                    for line in format_report(self.diagnostics()).splitlines():
+                        log.info("%s", line)
+                except Exception:  # noqa: BLE001
+                    self._parse_error("diagnostics")
             if self.pit_collector is not None and now - self._pit_last_poll >= 2.0:
                 self._pit_last_poll = now
                 try:
@@ -963,5 +988,96 @@ class Engine:
         return self._target_dt() if math.isfinite(self._target_ms) else None
 
     def snapshot(self) -> dict:
-        return self.normalizer.build(self.feed_state, self._target_dt(), self._rate, self.availability,
-                                     rc_until=self._rc_until())
+        st = self.normalizer.build(self.feed_state, self._target_dt(), self._rate, self.availability,
+                                   rc_until=self._rc_until())
+        st["map"] = self.map_info()
+        return st
+
+    # ------------------------------------------------------------------ positions / diagnostics
+    def _now_pres_ms(self) -> float:
+        """The shown F1 moment on the position / telemetry time base."""
+        if math.isfinite(self._target_ms):
+            return self._pres_ms()
+        return self._live_f1_now_ms() if self.source.mode == "live" else self.source.now().timestamp() * 1000
+
+    def _driver_numbers(self) -> set[str]:
+        dl = self.feed_state.get("DriverList") or {}
+        lines = (self.feed_state.get("TimingData") or {}).get("Lines") or {}
+        return {str(k) for k in list(dl) + list(lines) if str(k).isdigit()}
+
+    def map_info(self) -> dict:
+        """Map extras: objects in Position.z that are not cars, and the safety car position -
+        only when a key configured in [f1_tv] safety_car_position_keys is in the feed (never
+        estimated, never a normal driver)."""
+        drivers = self._driver_numbers()
+        latest = self.positions.latest
+        others = sorted(k for k in latest if k not in drivers) if drivers else []
+        now = self._now_pres_ms()
+        sc = {"available": False, "source": None}
+        key = next((k for k in self.sc_keys if k in latest), None)
+        if key is not None:
+            v = latest[key]
+            age = max(0, int(now - v[0]))
+            sc = {"available": True, "source": "Position.z", "key": key, "x": v[1], "y": v[2],
+                  "z": v[4] if len(v) > 4 else None, "status": v[3], "age_ms": age, "fresh": age <= POS_FRESH_MS}
+        elif not latest:
+            sc["reason"] = "no Position.z data received"
+        elif others:
+            sc["reason"] = (f"Position.z has {len(others)} non-driver object(s) ({', '.join(others)}) - none is "
+                            "configured as the safety car ([f1_tv] safety_car_position_keys)")
+        else:
+            sc["reason"] = "not provided by the feed (Position.z carries cars only)"
+        return {"safety_car": sc, "non_driver_objects": [k for k in others if k != key]}
+
+    def diagnostics(self) -> dict:
+        """What the feed delivers now - safe for logs / HTTP (no secrets)."""
+        mono = time.monotonic()
+        fs = self.feed_state
+        si = fs.get("SessionInfo") or {}
+        conn = {"mode": self.source.mode, "state": self._status.get("state"),
+                "transport": self._status.get("transport"), "auth_mode": self._status.get("auth", "ANONYMOUS")
+                if self.source.mode == "live" else None}
+        info = getattr(self.source, "connection_info", None)
+        extra = info() if callable(info) else {}
+        subscribed = extra.get("topics_subscribed") or []
+        drivers = self._driver_numbers()
+        now = self._now_pres_ms()
+        pos = self.positions.freshness(now)
+        car = self.cardata.freshness(now)
+        chans = sorted({k for c in self.cardata.latest.values() for k in c if k != "_t"}, key=lambda x: (not x.isdigit(), int(x) if x.isdigit() else 0, x))
+        app = (fs.get("TimingAppData") or {}).get("Lines") or {}
+        stints = sum(1 for v in app.values() if isinstance(v, dict) and v.get("Stints"))
+        tss = fs.get("TyreStintSeries") or {}
+        rc = fs.get("RaceControlMessages") or {}
+        msgs = rc.get("Messages") if isinstance(rc, dict) else None
+        n_rc = len(msgs) if isinstance(msgs, (list, dict)) else 0
+        w = fs.get("WeatherData")
+        ts = fs.get("TrackStatus") or {}
+        geo = self.geometry
+        rep = {
+            "auth": extra.get("f1_tv") or {"subscription": False, "state": "DISABLED"},
+            "connection": conn,
+            "session": {"meeting": (si.get("Meeting") or {}).get("Name"), "name": si.get("Name"),
+                        "type": si.get("Type"), "key": si.get("Key"),
+                        "status": (fs.get("SessionStatus") or {}).get("Status") or si.get("SessionStatus")},
+            "topics": self.diag.topics_table(subscribed, mono),
+            "positions": {"drivers": len(drivers), "with_data": sum(1 for k in pos if k in drivers),
+                          "fresh": sum(1 for k, v in pos.items() if k in drivers and v["fresh"]),
+                          "source": self.availability.positions_source,
+                          "non_driver_objects": self.map_info()["non_driver_objects"]},
+            "car_data": {"drivers": len(drivers), "with_data": sum(1 for k in car if k in drivers),
+                         "fresh": sum(1 for k, v in car.items() if k in drivers and v["fresh"]),
+                         "channels": chans, "source": self.availability.car_data_source},
+            "safety_car_position": self.map_info()["safety_car"],
+            "track_geometry": {"available": geo is not None,
+                               "detail": f"{geo.name} ({geo.source})" if geo is not None else "not loaded"},
+            "tyres": {"available": bool(stints or tss or fs.get("CurrentTyres")),
+                      "detail": f"TimingAppData stints for {stints} cars" + (", TyreStintSeries" if tss else "")
+                      + (", CurrentTyres" if fs.get("CurrentTyres") else "")},
+            "race_control": {"available": "RaceControlMessages" in fs.topics, "detail": f"{n_rc} messages"},
+            "weather": {"available": bool(w), "detail": f"air {w.get('AirTemp')} °C, track {w.get('TrackTemp')} °C"
+                        if isinstance(w, dict) and w else ""},
+            "track_status": {"available": bool(ts), "detail": f"code {ts.get('Status')} {ts.get('Message') or ''}".strip()
+                             if ts else "no TrackStatus (race control is the fallback)"},
+        }
+        return rep

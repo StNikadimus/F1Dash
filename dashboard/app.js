@@ -11,7 +11,7 @@
     cfg: { interp_delay_ms: 1200, map_fps: 30, animations: "full", pulse_period_ms: 2400, reorder_ms: 450 },
     keymap: {},
     session: {}, track_status: {}, weather: {}, drivers: {}, order: [],
-    race_control: [], radio: [], availability: {}, timeline: null,
+    race_control: [], radio: [], availability: {}, timeline: null, map: {},
     status: {}, ui: { view: "overview", selected: null, help: false },
     track: null,
     tel: {},
@@ -79,7 +79,7 @@
         break;
       case "state":
         if (m.full) { S.drivers = {}; }
-        for (const k of ["session", "track_status", "weather", "order", "race_control", "radio", "availability", "timeline"]) {
+        for (const k of ["session", "track_status", "weather", "order", "race_control", "radio", "availability", "timeline", "map"]) {
           if (k in m) S[k] = m[k];
         }
         if ("session" in m) S.clockAt = performance.now();
@@ -326,6 +326,13 @@
     }
     $("clock").innerHTML = t === null ? NA : t;
     for (const id of ["ri-clock", "fb-clock"]) { const e = document.getElementById(id); if (e) e.innerHTML = t === null ? NA : t; }
+  }
+  function feedAuthLabel() {
+    // AUTHENTICATED (F1 TV sign-in in use) / ANONYMOUS (public feed) - never anything secret
+    const st = S.status || {}, f = st.f1tv || {};
+    if (st.auth === "AUTHENTICATED") return "F1 TV AUTHENTICATED" + (f.product ? " (" + f.product + ")" : "");
+    if (f.subscription) return "ANONYMOUS - F1 TV sign-in " + (f.state || "?").toLowerCase().replace("_", " ");
+    return "ANONYMOUS";
   }
   function liveState() {
     // LIVE connection state: CONNECTING / LIVE / DELAYED / DISCONNECTED / RECONNECTING / FINISHED
@@ -638,30 +645,36 @@
     const col = document.getElementById("tel-col");
     if (!col) return;
     const num = selectedNum();
-    const a = S.tel[num];
+    const a = S.tel[num];                 // {speed, rpm, gear, throttle, brake, drs, drs_raw, ers, channels, age_ms, fresh}
     const avail = S.availability || {};
-    // [speed, rpm, gear, throttle, brake, drs, ch45]
-    const v = a || [];
+    const v = a || {};
     const year = (S.session || {}).year;
-    const thr = v[3], brk = v[4];
-    const drs = has(v[5]) ? v[5] : null;
+    const thr = v.throttle, brk = v.brake;
+    const drs = has(v.drs) ? v.drs : null;
     let drsNote = "";
     if (!has(drs)) drsNote = year >= 2026 ? "no DRS in 2026" : "";
     const meter = (val, cls) => has(val)
       ? `<div class="meter ${cls}"><i style="width:${val}%"></i><span>${val}%</span></div>` : NA;
-    const tile = (k, v, note) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div>${note ? `<div class="note">${note}</div>` : ""}</div>`;
+    const tile = (k, val, note) => `<div class="tile"><div class="k">${k}</div><div class="v">${val}</div>${note ? `<div class="note">${note}</div>` : ""}</div>`;
+    const extra = Object.entries(v.channels || {}).map(([k, x]) => `ch${esc(k)} ${esc(x)}`).join(" · ");
+    const stale = a && !a.fresh;
+    const age = a && has(a.age_ms) ? (a.age_ms >= 10000 ? Math.round(a.age_ms / 1000) + " s" : (a.age_ms / 1000).toFixed(1) + " s") : null;
     col.innerHTML = `
-      <div class="kv big"><div class="k">SPEED</div><div class="v">${na(v[0], (x) => x + "<small>km/h</small>")}</div></div>
+      <div class="${stale ? "tel-stale" : ""}">
+      <div class="kv big"><div class="k">SPEED</div><div class="v">${na(v.speed, (x) => x + "<small>km/h</small>")}</div></div>
       <div class="kv"><div class="k">THROTTLE</div><div>${meter(thr, "")}</div></div>
       <div class="tiles">
-        ${tile("GEAR", na(v[2], (x) => (x === 0 ? "N" : x)))}
-        ${tile("RPM", na(v[1], (x) => x.toLocaleString("en-US")))}
+        ${tile("GEAR", na(v.gear, (x) => (x === 0 ? "N" : x)))}
+        ${tile("RPM", na(v.rpm, (x) => x.toLocaleString("en-US")))}
         ${tile("BRAKE", has(brk) ? (brk ? '<span style="color:var(--red)">ON</span>' : "OFF") : NA, "on / off only")}
         ${tile("DRS", drs ? esc(drs) : NA, drsNote)}
-        ${tile("ERS", NA, "not in F1 feed")}
+        ${tile("ERS", has(v.ers) ? esc(JSON.stringify(v.ers)) : NA, has(v.ers) ? "" : "not in F1 feed")}
         ${tile("OVERTAKE", NA, "not in F1 feed")}
       </div>
-      ${!a ? `<div class="notes">${avail.car_data ? "No telemetry for this car" : S.mode === "live" && S.session && S.session.live ? "CarData.z not delivered: F1 withholds it from this connection and the public archive stream is not readable (yet)" : "No car telemetry received"}</div>` : ""}`;
+      ${extra ? `<div class="notes">other CarData channels: ${extra}</div>` : ""}
+      </div>
+      ${a && stale ? `<div class="notes">STALE · last telemetry ${esc(age || "?")} ago${has(v.speed) ? "" : " - not shown"}</div>` : ""}
+      ${!a ? `<div class="notes">${avail.car_data ? "No telemetry for this car" : S.mode === "live" && S.session && S.session.live ? "CarData.z not delivered to this connection (" + esc(feedAuthLabel()) + ") and the public archive stream is not readable (yet)" : "No car telemetry received"}</div>` : ""}`;
   }
 
   // ------------------------------------------------------------------ views
@@ -713,7 +726,7 @@
           <div><b>CIRCUIT</b><span>${na(s.circuit_name)}${s.country ? " · " + esc(s.country) : ""}</span></div>
           <div><b>SESSION</b><span>${na(s.session_name)} · ${na(s.status)} · ${esc(s.state || "UNKNOWN")}${s.red_flag ? " (red flag)" : ""}</span></div>
           <div><b>RACE CONTROL DATA</b><span>coverage ${esc(s.rc_coverage || "NONE")}${S.track_status && S.track_status.source ? " · track status from " + esc(S.track_status.source) : " · track status N/A"}</span></div>
-          <div><b>DATA SOURCE</b><span>${esc((S.mode || "").toUpperCase())} · ${esc(S.status.detail || S.status.state || "")}${S.status.delay ? ` · delayed ${S.status.delay} s` : ""}</span></div>
+          <div><b>DATA SOURCE</b><span>${esc((S.mode || "").toUpperCase())}${S.mode === "live" ? " · " + esc(feedAuthLabel()) : ""} · ${esc(S.status.detail || S.status.state || "")}${S.status.delay ? ` · delayed ${S.status.delay} s` : ""}</span></div>
           <div><b>CAR POSITIONS</b><span>${a.positions ? "receiving" : NA}</span></div>
           <div><b>CAR TELEMETRY</b><span>${a.car_data ? "receiving" : NA}</span></div>
           <div><b>TRACK GEOMETRY</b><span>${tr.source ? esc(tr.source) : NA}</span></div>
@@ -807,7 +820,11 @@
     }
     const ys = Object.entries(ts.sector_flags || {});
     if (ys.length) legend.push(`<span class="flag-y">${ys.map(([k, f]) => (f === "DOUBLE YELLOW" ? "DY" : "Y") + " MS" + k).join("  ")}</span>`);
-    if (["SC", "VSC", "VSC_ENDING"].includes(ts.status)) legend.push("Safety car position: N/A (not in F1 feed)");
+    if (["SC", "VSC", "VSC_ENDING"].includes(ts.status)) {
+      const sc = (S.map || {}).safety_car || {};
+      legend.push(sc.available ? `Safety car position: ${sc.fresh ? "live" : "STALE"} (Position.z ${esc(sc.key)})`
+        : `Safety car position: N/A (${esc(sc.reason || "not in F1 feed")})`);
+    }
     if (a.positions && a.positions_source === "archive") {
       legend.push(`Positions: public F1 archive stream${a.positions_age_s !== null && a.positions_age_s !== undefined ? ` · ${Math.round(a.positions_age_s)} s behind` : ""}`);
     }
@@ -1618,11 +1635,11 @@
       if (!b || !b.length) return null;
       if (rt <= b[0].t) return b[0];
       const last = b[b.length - 1];
-      if (rt >= last.t) return rt - last.t > 15000 ? null : last;     // hold, never extrapolate
+      if (rt >= last.t) return rt - last.t > 15000 ? null : { x: last.x, y: last.y, stale: rt - last.t > 5000 };  // hold, never extrapolate
       let lo = 0, hi = b.length - 1;
       while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (b[mid].t <= rt) lo = mid; else hi = mid; }
       const a = b[lo], c = b[hi];
-      if (c.t - a.t > 5000) return a;                                   // gap in data: no fake motion
+      if (c.t - a.t > 5000) return { x: a.x, y: a.y, stale: rt - a.t > 5000 };   // gap in data: no fake motion
       const k = (rt - a.t) / (c.t - a.t);
       return { x: a.x + (c.x - a.x) * k, y: a.y + (c.y - a.y) * k };
     }
@@ -1693,7 +1710,8 @@
         }
         const isSel = num === sel;
         const r = isSel ? 13 : 11;
-        ctx.globalAlpha = d.retired || d.stopped ? 0.4 : 1;
+        // no position for > 5 s: drawn faded where it was last seen (never moved on a guess)
+        ctx.globalAlpha = d.retired || d.stopped || p.stale ? 0.4 : 1;
         if (isSel) { ctx.beginPath(); ctx.arc(s[0], s[1], r + 6, 0, Math.PI * 2); ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3; ctx.stroke(); }
         ctx.beginPath(); ctx.arc(s[0], s[1], r, 0, Math.PI * 2);
         ctx.fillStyle = d.team_color || "#9aa4ae"; ctx.fill();
@@ -1712,8 +1730,24 @@
       if (S.ui.pit_debug) drawPitDebug();
       pitLast = pitNow; pitNow = [];
       for (const num of order) if (num !== sel) drawCar(num);
-      for (const num of buf.keys()) if (!drawn.has(num) && num !== sel && !S.drivers[num]) drawCar(num);
+      // objects in Position.z that are not on the driver list are never drawn as cars; the safety car
+      // only when the server identified it (a configured key that is actually in the feed)
+      const mi = S.map || {}, others = new Set(mi.non_driver_objects || []);
+      const scKey = mi.safety_car && mi.safety_car.available ? String(mi.safety_car.key) : null;
+      for (const num of buf.keys()) if (!drawn.has(num) && num !== sel && !S.drivers[num] && !others.has(num) && num !== scKey) drawCar(num);
       if (sel) drawCar(sel);
+      if (scKey) {
+        const p = interp(buf.get(scKey), rt);
+        if (p) {
+          const s = toScreen([p.x, p.y]);
+          ctx.globalAlpha = p.stale ? 0.4 : 1;
+          ctx.fillStyle = "#ffb000"; ctx.strokeStyle = "#05070a"; ctx.lineWidth = 2;
+          ctx.fillRect(s[0] - 13, s[1] - 9, 26, 18); ctx.strokeRect(s[0] - 13, s[1] - 9, 26, 18);
+          ctx.fillStyle = "#05070a"; ctx.font = `900 12px ${font}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText("SC", s[0], s[1] + 0.5);
+          ctx.globalAlpha = 1;
+        }
+      }
     }
     function lum(hex) {
       if (!hex || hex.length < 7) return 0.5;

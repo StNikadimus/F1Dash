@@ -64,6 +64,13 @@ class TrackStatusState:
     drs: Optional[str] = None              # "ENABLED"/"DISABLED" (pre-2026 seasons)
     chequered: bool = False
     source: Optional[str] = None           # TrackStatus (official topic) | RaceControl (derived from messages)
+    # canonical state for clients: GREEN / YELLOW / DOUBLE_YELLOW / SAFETY_CAR / VSC / VSC_ENDING /
+    # RED_FLAG / CHEQUERED / UNKNOWN, or TRACK_STATUS_<code> for a code this version does not know
+    state: str = "UNKNOWN"
+    timestamp: Optional[int] = None        # F1 ms of the message that set the status (None: unknown)
+    pit_exit: Optional[str] = None         # OPEN / CLOSED - only when race control said so
+    pit_entry: Optional[str] = None        # OPEN / CLOSED - only when race control said so
+    red_flag_restart: bool = False         # running again after a red flag in this session
 
 
 @dataclass(slots=True)
@@ -90,6 +97,8 @@ class StintState:
     new: Optional[bool] = None
     tyre_age: Optional[int] = None         # TotalLaps (age of the tyre set)
     laps: Optional[int] = None             # laps driven in this stint (TotalLaps - StartLaps)
+    stint: Optional[int] = None            # 1 = first set of the session
+    source: Optional[str] = None           # TimingAppData | TyreStintSeries | CurrentTyres
 
 
 @dataclass(slots=True)
@@ -184,6 +193,10 @@ class RaceControlMessage:
     driver: Optional[str]
     text: str
     severity: str                          # info / yellow / red / green / blue / sc / penalty / investigation / chequered
+    tags: list[str] = field(default_factory=list)  # what the message literally is about (see race_control._tags)
+    importance: str = "low"                # high / medium / low (for highlighting; from the tags)
+    status: Optional[str] = None           # F1's own Status field (safety car messages), if any
+    mode: Optional[str] = None             # F1's own Mode field (SAFETY CAR / VIRTUAL SAFETY CAR), if any
 
 
 @dataclass(slots=True)

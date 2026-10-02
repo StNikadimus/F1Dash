@@ -2,3 +2,9 @@
 
 __pycache__/
 *.pyc
+
+# F1 TV sign-in (subscription token) - never commit
+data/auth/
+**/f1tv_auth.json
+**/signin_key
+.env

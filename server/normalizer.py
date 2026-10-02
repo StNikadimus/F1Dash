@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .feedstate import IN_PIT_SINCE, STOPPED_SINCE, FeedState
+from .feedstate import IN_PIT_SINCE, STOPPED_SINCE, TIMES, FeedState
 from .lap_state import classify as lap_state_classify, driver_ref, pace_refs
 from .laps import LAPS
 from .models import (Availability, ClockState, DriverState, RaceControlFlags, SessionState,
@@ -260,7 +260,8 @@ class Normalizer:
         ts = feed.get("TrackStatus") or {}
         code = _s(ts.get("Status"))
         status = TRACK_STATUS.get(code or "", "UNKNOWN")
-        source = "TrackStatus" if code in TRACK_STATUS else None
+        # (a code this version does not know is still F1's official status: passed on, not replaced)
+        source = "TrackStatus" if code else None
         if source is None:
             # no official track status: what the race control messages up to now say - and still
             # UNKNOWN when they say nothing (never an invented GREEN)
@@ -278,9 +279,26 @@ class Normalizer:
         if rc.chequered and session.status in ("Finished", "Finalised", "Ends"):
             status = "CHEQUERED"
         sc_phase = rc.sc_phase if status in ("SC", "VSC", "VSC_ENDING") else None
+        sector_flags = dict(rc.sector_flags) if status not in ("RED",) else {}
+        state = {"GREEN": "GREEN", "YELLOW": "YELLOW", "SC": "SAFETY_CAR", "VSC": "VSC", "VSC_ENDING": "VSC_ENDING",
+                 "RED": "RED_FLAG", "CHEQUERED": "CHEQUERED"}.get(status, "UNKNOWN")
+        if state == "YELLOW" and "DOUBLE YELLOW" in sector_flags.values():
+            state = "DOUBLE_YELLOW"
+        if state == "UNKNOWN" and code:
+            state = f"TRACK_STATUS_{code}"      # an official code this version does not know: passed on
+        ts_ms = None
+        if source == "TrackStatus":
+            ts_ms = (feed.get(TIMES) or {}).get("TrackStatus")
+        elif source == "RaceControl" and rc.track_flag_utc:
+            u = parse_utc(rc.track_flag_utc)
+            ts_ms = u.timestamp() * 1000 if u else None
+        running = (session.status or rc.session_rc) == "Started"
         return TrackStatusState(code=code, status=status, message=_s(ts.get("Message")), sc_phase=sc_phase,
-                                sector_flags=dict(rc.sector_flags) if status not in ("RED",) else {},
-                                overtake=rc.overtake, drs=rc.drs, chequered=rc.chequered, source=source)
+                                sector_flags=sector_flags,
+                                overtake=rc.overtake, drs=rc.drs, chequered=rc.chequered, source=source,
+                                state=state, timestamp=round(ts_ms) if ts_ms is not None else None,
+                                pit_exit=rc.pit_exit, pit_entry=rc.pit_entry,
+                                red_flag_restart=bool(rc.red_flag_seen and running and status != "RED"))
 
     def session_flow(self, feed: FeedState, rc: RaceControlResult, session: SessionState,
                      track: TrackStatusState) -> None:
@@ -325,6 +343,7 @@ class Normalizer:
         app = (feed.get("TimingAppData") or {}).get("Lines") or {}
         stats = (feed.get("TimingStats") or {}).get("Lines") or {}
         cur_tyres = (feed.get("CurrentTyres") or {}).get("Tyres") or {}
+        tss = (feed.get("TyreStintSeries") or {}).get("Stints") or {}
         part = session.session_part
         kind = session.session_kind
 
@@ -419,8 +438,12 @@ class Normalizer:
             # ---- tyres ---------------------------------------------------
             a = app.get(num) if isinstance(app.get(num), dict) else {}
             d.grid_position = _i(a.get("GridPos"))
+            raw_stints, src = _items(a.get("Stints")), "TimingAppData"
+            if not raw_stints:
+                # the same stint records in their own topic (when TimingAppData has none for the car)
+                raw_stints, src = _items(tss.get(num) if isinstance(tss, dict) else None), "TyreStintSeries"
             stints = []
-            for st in _items(a.get("Stints")):
+            for k, st in enumerate(raw_stints):
                 if not isinstance(st, dict):
                     continue
                 comp = _s(st.get("Compound"))
@@ -428,7 +451,8 @@ class Normalizer:
                     comp = None
                 total, start = _i(st.get("TotalLaps")), _i(st.get("StartLaps"))
                 stints.append(StintState(compound=comp, new=_b(st.get("New")), tyre_age=total,
-                                         laps=(total - start) if total is not None and start is not None else None))
+                                         laps=(total - start) if total is not None and start is not None else None,
+                                         stint=k + 1, source=src))
             d.stints = stints
             if stints:
                 d.tyre = stints[-1]
@@ -439,7 +463,7 @@ class Normalizer:
                 comp = _s(ct.get("Compound"))
                 if comp and comp != "UNKNOWN":
                     d.tyre = StintState(compound=comp, new=_b(ct.get("New")), tyre_age=d.tyre.tyre_age,
-                                        laps=d.tyre.laps)
+                                        laps=d.tyre.laps, stint=d.tyre.stint, source="CurrentTyres")
 
             d.rc = replace(rc.driver_flags.get(str(num), RaceControlFlags()),
                            messages=list(rc.driver_messages.get(str(num), [])))
