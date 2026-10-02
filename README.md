@@ -158,20 +158,86 @@ stacked layout. (The WD TV Live itself has no suitable browser.)
   protocol, `Subscribe` invocation, messages arrive as `feed` invocations); the
   legacy `wss://livetiming.formula1.com/signalr` (SignalR 1.5) is used as
   automatic fallback (`transport = "auto" | "core" | "legacy"`).
-* Topics subscribed: Heartbeat, SessionInfo, SessionStatus, SessionData,
-  ExtrapolatedClock, LapCount, TrackStatus, DriverList, TimingData,
-  TimingDataF1, TimingAppData, TimingStats, RaceControlMessages, WeatherData,
-  TeamRadio, TopThree, PitLaneTimeCollection, CurrentTyres, Position.z, CarData.z.
-* **F1 TV token – optional.** The connection is anonymous by default (the same
-  handshake boxbox uses) and still subscribes to `Position.z`/`CarData.z`, so
-  if F1 sends them anonymously they are used immediately. Observed behaviour
-  (see §7a): F1 streams them only to entitled connections. Without a token the
-  server therefore also tries the public archive stream of the running session
-  (`archive_follow = true`, §7a). If you have F1 TV, adding the token gives the
-  lowest-latency positions: log in at <https://f1tv.formula1.com> → DevTools →
-  Application → Cookies → copy the value of **`login-session`** → put it into
-  `F1TV_TOKEN` (env / `.env`) or `live.f1tv_token`. The server logs the token
-  expiry at start-up.
+* Topics subscribed (`[live] topics`): the core set (Heartbeat, SessionInfo,
+  SessionStatus, SessionData, ExtrapolatedClock, LapCount, TrackStatus,
+  DriverList, TimingData, TimingDataF1, TimingAppData, TimingStats,
+  RaceControlMessages, WeatherData, TeamRadio, TopThree, PitLaneTimeCollection,
+  CurrentTyres, LapSeries, Position.z, CarData.z) plus TyreStintSeries,
+  AudioStreams, ContentStreams, TlaRcm, RcmSeries, PitStopSeries, PitStop,
+  DriverRaceInfo, OvertakeSeries, ChampionshipPrediction, WeatherDataSeries.
+  Every topic that arrives – also one not asked for – is used where the
+  dashboard knows it, recorded and listed in the diagnostics. If F1 refuses the
+  subscription, the next attempt uses the core set.
+
+### 6a. F1 TV sign-in (`[f1_tv]`, default on)
+
+```toml
+[f1_tv]
+subscription = true     # false = never sign in, anonymous public feed only
+open_browser = true
+safety_car_position_keys = []
+```
+
+* **First start** (no stored sign-in): the server opens
+  `http://127.0.0.1:8080/f1tv/login` in the default browser – a page served by
+  the dashboard itself (no third-party site). (1) It opens the official
+  `account.formula1.com` sign-in, where you sign in as usual. (2) Drag its
+  **F1 Dashboard sign-in** button to the bookmarks bar once. (3) Click that
+  bookmark on the signed-in formula1.com tab: it posts the session's
+  *subscription token* (from the `login-session` cookie) to 127.0.0.1 – no
+  password, cookie or token is typed into the terminal. Browsers that block
+  bookmarklets: the page also takes the `login-session` value pasted from
+  DevTools. Meanwhile the dashboard runs on the anonymous feed and reconnects
+  authenticated as soon as the sign-in arrives.
+* Stored: only the token, in `data/auth/f1tv_auth.json` (mode 0600, git-ignored;
+  `data/auth/signin_key` = the bookmark's per-installation key). Never logged,
+  never sent to a dashboard / WebSocket, never in recordings.
+* **Later starts** reuse it (no browser). Expired, rejected by F1 (HTTP 401/403
+  on negotiate or the WebSocket), or deleted → the sign-in page opens again
+  (at most every 10 min) and the anonymous feed is used meanwhile.
+  `python main.py --f1-login` forces a new sign-in, `--f1-logout` deletes it,
+  `--f1-status` shows state / product / expiry (no secret).
+* Status everywhere: **AUTHENTICATED** or **ANONYMOUS** (log, `/api/diagnostics`,
+  dashboard data-source line). "Authentication: SUCCESS" only after F1 accepted
+  a connection with the token.
+* Nothing is assumed from the subscription tier: which topics F1 actually
+  streams to your account is measured. `python main.py --diagnose 120`
+  connects for 120 s and prints ✓ / ✗ per topic, how many drivers deliver
+  fresh `Position.z` / `CarData.z`, which CarData channels appear, safety-car
+  position availability, track geometry, tyres, race control, weather. The same
+  report: `http://localhost:8080/api/diagnostics?format=text` and in the log
+  45 s after connecting, then every 10 min / when the set of topics changes.
+* Docker: the sign-in needs a browser on the same machine and a loopback
+  request – run it once outside Docker (or set `F1DASH_F1_TV_SUBSCRIPTION=false`).
+* The legacy manual token (`live.f1tv_token` / `F1TV_TOKEN`) still works and
+  takes precedence.
+
+What the authenticated data adds, when F1 actually sends it:
+
+* **Position.z** – per car X / Y / Z (local track coordinates, not GPS), status,
+  sample time; stale after 5 s (faded on the map where it was last seen, hidden
+  after 15 s – never moved on a guess). Keys that are not on the driver list are
+  *non-driver objects*: listed in the diagnostics, never drawn as cars.
+* **Safety car position** – only if a key listed in
+  `safety_car_position_keys` is actually in Position.z (exposed as
+  `state.map.safety_car` = `{available, x, y, z, age_ms, fresh}` and drawn as an
+  "SC" box). Otherwise `available: false` with the reason (e.g. "Position.z has
+  1 non-driver object (241) – none is configured as the safety car"). Add a key
+  only after seeing it in the diagnostics and knowing what it is.
+* **CarData.z** – speed, RPM, gear, throttle, brake (on/off), DRS (pre-2026);
+  every other channel F1 sends is passed on raw (`channels`); ERS is not in the
+  feed → `null`. WebSocket `tel` = one object per car with `age_ms` / `fresh`;
+  stale after 5 s, values hidden after 30 s.
+* **TyreStintSeries** – stints (compound, new/used, tyre age, laps, stint number)
+  when TimingAppData has none for a car.
+* Track status: `state` (GREEN / YELLOW / DOUBLE_YELLOW / SAFETY_CAR / VSC /
+  VSC_ENDING / RED_FLAG / CHEQUERED, unknown official codes as
+  `TRACK_STATUS_<code>`), `timestamp`, `pit_exit` / `pit_entry` (only from
+  literal race-control messages), `red_flag_restart`.
+* Race control messages: `tags` (investigation, penalty, deleted_lap,
+  track_limits, unsafe_release, pit_lane, safety_car, red_flag, …, only from the
+  message itself), `importance`, F1's own `Mode` / `Status`.
+
 * Session detection is automatic: `SessionInfo` decides meeting, session type
   (Practice / Qualifying / Sprint Qualifying / Sprint / Race), circuit and
   track map; a new session resets the state without a restart. When nothing is

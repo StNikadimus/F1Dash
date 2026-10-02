@@ -10,7 +10,8 @@ from starlette.websockets import WebSocket
 
 log = logging.getLogger("hub")
 
-SECTIONS = ("session", "track_status", "weather", "order", "race_control", "radio", "availability", "timeline")
+SECTIONS = ("session", "track_status", "weather", "order", "race_control", "radio", "availability", "timeline",
+            "map")
 LOSSY = {"pos", "tel"}          # may be dropped for slow clients
 
 

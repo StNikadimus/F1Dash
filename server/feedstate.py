@@ -18,6 +18,7 @@ _META_KEYS = {"_kf"}
 IN_PIT_SINCE = "_InPitSince"      # {num: [F1 time ms the car went InPit, stale]} (derived, not a feed topic)
 STOPPED_SINCE = "_StoppedSince"    # {num: F1 time ms the car reported Stopped (and did not move since)}
 PIT_ACTIVITY_MS = 45_000           # timing activity later than this after going in = racing, not in the pit
+TIMES = "_Times"                   # {topic: F1 time ms of its last message} (derived)
 
 
 def _index(key: Any) -> int | None:
@@ -121,6 +122,10 @@ class FeedState:
             self.topics[topic] = deep_merge({}, data) if isinstance(data, dict) else copy.deepcopy(data)
         else:
             self.topics[topic] = deep_merge(self.topics[topic], data)
+        if t_ms is not None and not snapshot and not topic.startswith("_"):
+            # F1 time of the last update per topic (derived; restored with checkpoints). A snapshot /
+            # keyframe / checkpoint restore says nothing about when the content last changed.
+            self.topics.setdefault(TIMES, {})[topic] = t_ms
         if topic == "TimingData" and t_ms is not None:
             # a snapshot / keyframe / checkpoint restore carries every key of every car: it says
             # nothing about who is moving now - only live updates count as activity

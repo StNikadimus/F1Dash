@@ -18,10 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import random
-import re
 import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -29,8 +29,9 @@ from typing import Any, Optional
 
 import httpx
 from websockets.asyncio.client import connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
+from ..f1tv_auth import AuthManager, parse_token, token_info
 from ..telemetry import parse_utc
 from .archive_follow import ArchiveFollower
 from .base import Sink, Source
@@ -50,30 +51,26 @@ UA_LEGACY = "BestHTTP"
 ORIGIN = "https://www.formula1.com"
 # second line-crossing signal of server/laps.py (the F1 archive / recordings carry it too)
 REQUIRED_TOPICS = ("LapSeries",)
+# what the dashboard needs at least - used alone if F1 refuses a subscription to the full list
+CORE_TOPICS = [
+    "Heartbeat", "SessionInfo", "SessionStatus", "SessionData", "ExtrapolatedClock",
+    "LapCount", "TrackStatus", "DriverList", "TimingData", "TimingDataF1",
+    "TimingAppData", "TimingStats", "RaceControlMessages", "WeatherData",
+    "TeamRadio", "TopThree", "PitLaneTimeCollection", "CurrentTyres",
+    "LapSeries", "Position.z", "CarData.z",
+]
 
 
 class FeedError(Exception):
     pass
 
 
-def parse_token(raw: str) -> Optional[str]:
-    """Accept a bare JWT or the complete (URL-encoded) ``login-session`` cookie."""
-    if not raw:
-        return None
-    raw = raw.strip().strip('"')
-    if raw.lower().startswith("bearer "):
-        raw = raw[7:].strip()
-    if raw.startswith("eyJ") and raw.count(".") == 2:
-        return raw
-    try:
-        data = json.loads(urllib.parse.unquote(raw))
-        tok = (data.get("data") or {}).get("subscriptionToken")
-        if tok:
-            return tok
-    except (ValueError, AttributeError):
-        pass
-    m = re.search(r"eyJ[\w-]+\.[\w-]+\.[\w-]+", urllib.parse.unquote(raw))
-    return m.group(0) if m else None
+class AuthRejected(FeedError):
+    """F1 refused the F1 TV token (HTTP 401 / 403) - sign in again, use the public feed meanwhile."""
+
+
+class SubscribeFailed(FeedError):
+    pass
 
 
 def token_expiry(token: str) -> Optional[datetime]:
@@ -89,7 +86,7 @@ def token_expiry(token: str) -> Optional[datetime]:
 class F1LiveSource(Source):
     mode = "live"
 
-    def __init__(self, cfg: dict[str, Any], recorder=None) -> None:
+    def __init__(self, cfg: dict[str, Any], recorder=None, auth: Optional[AuthManager] = None) -> None:
         self.cfg = cfg
         self.topics: list[str] = list(cfg.get("topics") or [])
         for t in REQUIRED_TOPICS:
@@ -103,21 +100,14 @@ class F1LiveSource(Source):
         self.reconnect_max = float(cfg.get("reconnect_max", 60.0))
         self.silence_timeout = float(cfg.get("silence_timeout", 120.0))
         self.recorder = recorder
-        self.token = parse_token(cfg.get("f1tv_token") or "")
-        if cfg.get("f1tv_token") and not self.token:
-            log.error("f1tv_token is set but could not be parsed - expected a JWT or the login-session cookie")
-        if self.token:
-            exp = token_expiry(self.token)
-            if exp:
-                left = exp - datetime.now(timezone.utc)
-                if left.total_seconds() < 0:
-                    log.error("F1 TV token EXPIRED at %s - positions/telemetry will be unavailable", exp)
-                else:
-                    log.info("F1 TV token configured, valid until %s (%.1f days)", exp, left.total_seconds() / 86400)
-        else:
-            log.info("No F1 TV token (optional). Timing, tyres, race control, weather and track status are "
-                     "public. F1 has been observed not to send Position.z/CarData.z to anonymous sockets; "
-                     "they are still subscribed, and the public archive stream is tried as fallback.")
+        # F1 TV sign-in ([f1_tv] subscription); without a manager: the legacy token setting only
+        self.auth = auth if auth is not None else AuthManager(
+            {"subscription": bool(cfg.get("f1tv_token"))}, _NullStore(), cfg.get("f1tv_token") or "",
+            opener=lambda _url: False)
+        self._conn_token: Optional[str] = None          # token of the current connection (None: anonymous)
+        self.auth_mode = "ANONYMOUS"
+        self._reduced = False                           # F1 refused the full topic list once
+        self._fallback_logged: Optional[str] = None
         self._failures = 0
         self._core_failures = 0
         # Public-archive fallback for Position.z / CarData.z (see archive_follow.py)
@@ -132,48 +122,112 @@ class F1LiveSource(Source):
 
     @property
     def token_configured(self) -> bool:
-        return bool(self.token)
+        return self.auth.token() is not None
+
+    @property
+    def token(self) -> Optional[str]:
+        """Token of the current connection (never logged / sent anywhere but to F1)."""
+        return self._conn_token
+
+    def connection_info(self) -> dict:
+        """Safe for diagnostics / dashboards."""
+        return {"auth_mode": self.auth_mode, "f1_tv": self.auth.public_info(),
+                "topics_subscribed": list(self._topics_now())}
+
+    def _topics_now(self) -> list[str]:
+        if not self._reduced:
+            return self.topics
+        return [t for t in self.topics if t in CORE_TOPICS] or list(CORE_TOPICS)
 
     # ------------------------------------------------------------------
     async def run(self, sink: Sink) -> None:
         asyncio.create_task(self._schedule_loop(sink))
         asyncio.create_task(self._archive_loop(sink))
+        if self.auth.subscription:
+            log.info("F1 TV subscription mode: ENABLED")
+            if self.auth.needs_login():
+                self.auth.request_login(self.auth.reason or "no stored sign-in")
+        else:
+            log.info("F1 TV subscription mode: DISABLED - anonymous public live timing")
         attempt = 0
         while True:
+            token = self.auth.token()
+            self._conn_token = token
+            self.auth_mode = "AUTHENTICATED" if token else "ANONYMOUS"
             transport = self._pick_transport()
-            sink.set_status(state="connecting", transport=transport, attempt=attempt,
-                            detail=f"Connecting to F1 live timing ({transport})")
+            if self.auth.subscription and token is None and self._fallback_logged != self.auth.state:
+                self._fallback_logged = self.auth.state
+                log.warning("F1 TV authentication unavailable (%s: %s) - falling back to anonymous public "
+                            "live timing", self.auth.state, self.auth.reason)
+            sink.set_status(state="connecting", transport=transport, attempt=attempt, auth=self.auth_mode,
+                            detail=f"Connecting to F1 live timing ({transport}, {self.auth_mode.lower()})")
             started = time.monotonic()
+            version = self.auth.version
+            conn = asyncio.create_task(self._run_core(sink) if transport == "core" else self._run_legacy(sink))
+            # a sign-in completed while connected anonymously: reconnect with it
+            waiter = asyncio.create_task(self.auth.wait_change(version)) if self.auth.subscription else None
+            quick = False
             try:
-                if transport == "core":
-                    await self._run_core(sink)
+                done, _ = await asyncio.wait({conn} | ({waiter} if waiter else set()),
+                                             return_when=asyncio.FIRST_COMPLETED)
+                if conn in done:
+                    conn.result()
+                    reason = "connection closed by server"
                 else:
-                    await self._run_legacy(sink)
-                reason = "connection closed by server"
+                    conn.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await conn
+                    reason = "F1 TV sign-in completed - reconnecting authenticated"
+                    log.info("F1 TV sign-in completed - reconnecting with authenticated live timing")
+                    quick = True
             except asyncio.CancelledError:
+                conn.cancel()
                 raise
+            except AuthRejected as exc:
+                self.auth.reject(str(exc))
+                reason = f"{exc} - falling back to anonymous public live timing"
+                quick = True
+            except InvalidStatus as exc:
+                code = getattr(getattr(exc, "response", None), "status_code", None)
+                if code in (401, 403) and token:
+                    self.auth.reject(f"websocket HTTP {code}")
+                    quick = True
+                reason = f"InvalidStatus: HTTP {code}"
+            except SubscribeFailed as exc:
+                if not self._reduced:
+                    self._reduced = True
+                    log.warning("F1 refused the subscription (%s) - next attempt subscribes to the core "
+                                "topics only (%d)", exc, len(self._topics_now()))
+                    quick = True
+                reason = str(exc)
             except (FeedError, ConnectionClosed, httpx.HTTPError, OSError, asyncio.TimeoutError, ValueError) as exc:
                 reason = f"{type(exc).__name__}: {exc}"
             except Exception as exc:  # noqa: BLE001
                 log.exception("Unexpected error in live client")
                 reason = f"{type(exc).__name__}: {exc}"
+            finally:
+                if waiter is not None:
+                    waiter.cancel()
 
             if time.monotonic() - started > 60:
                 attempt = 0            # connection was healthy for a while
                 self._core_failures = 0
-            elif transport == "core":
+            elif transport == "core" and not quick:
                 self._core_failures += 1
             attempt += 1
-            delay = min(self.reconnect_max, self.reconnect_min * (2 ** min(attempt - 1, 8)))
+            delay = min(1.0, self.reconnect_min) if quick else \
+                min(self.reconnect_max, self.reconnect_min * (2 ** min(attempt - 1, 8)))
             delay *= random.uniform(0.85, 1.15)
             log.warning("F1 feed disconnected (%s). Reconnecting in %.1fs (attempt %d)", reason, delay, attempt)
-            sink.set_status(state="reconnecting", transport=transport, attempt=attempt,
+            sink.set_status(state="reconnecting", transport=transport, attempt=attempt, auth=self.auth_mode,
                             retry_in=round(delay, 1), detail=reason)
             await asyncio.sleep(delay)
 
     def _pick_transport(self) -> str:
         if self.transport_pref in ("core", "legacy"):
             return self.transport_pref
+        if self._conn_token:
+            return "core"              # the legacy endpoint does not take the F1 TV token
         # auto: prefer core; after two consecutive core failures try legacy once
         if self._core_failures >= 2 and self._core_failures % 2 == 0:
             return "legacy"
@@ -212,8 +266,9 @@ class F1LiveSource(Source):
     # ------------------------------------------------------------------
     async def _run_core(self, sink: Sink) -> None:
         headers = {"User-Agent": UA_CORE, "Origin": ORIGIN}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        token = self._conn_token
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         ws_url = CORE_WS
         async with httpx.AsyncClient(timeout=20, headers=headers, follow_redirects=True) as http:
             try:  # pre-negotiate to obtain the load balancer cookie (AWSALBCORS)
@@ -222,7 +277,9 @@ class F1LiveSource(Source):
                 log.debug("OPTIONS negotiate failed: %s", exc)
             r = await http.post(f"{CORE_NEGOTIATE}?negotiateVersion=1")
             if r.status_code in (401, 403):
-                raise FeedError(f"negotiate rejected (HTTP {r.status_code}) - token invalid or expired?")
+                if token:
+                    raise AuthRejected(f"negotiate rejected the F1 TV sign-in (HTTP {r.status_code})")
+                raise FeedError(f"negotiate rejected (HTTP {r.status_code})")
             r.raise_for_status()
             neg = r.json()
             if neg.get("url"):                       # redirect to another SignalR service
@@ -245,11 +302,18 @@ class F1LiveSource(Source):
             first = str(hs).split(RS)[0]
             if first and json.loads(first).get("error"):
                 raise FeedError(f"handshake error: {json.loads(first)['error']}")
+            topics = self._topics_now()
             await ws.send(json.dumps({"type": 1, "invocationId": "1", "target": "Subscribe",
-                                      "arguments": [self.topics]}) + RS)
-            log.info("Connected to F1 live timing (SignalR Core%s), subscribed to %d topics",
-                     ", authenticated" if self.token else ", anonymous", len(self.topics))
-            sink.set_status(state="connected", transport="core", attempt=0, detail="Connected")
+                                      "arguments": [topics]}) + RS)
+            if token:
+                self.auth.confirm()
+                info = token_info(token)
+                log.info("F1 TV authentication successful (%s, %s) - authenticated live timing enabled",
+                         info.get("subscribed_product") or "product not stated",
+                         info.get("subscription_status") or "status not stated")
+            log.info("Connected to F1 live timing (SignalR Core, %s), subscribed to %d topics",
+                     "AUTHENTICATED" if token else "ANONYMOUS", len(topics))
+            sink.set_status(state="connected", transport="core", attempt=0, auth=self.auth_mode, detail="Connected")
             pinger = asyncio.create_task(self._core_ping(ws))
             try:
                 while True:
@@ -267,7 +331,7 @@ class F1LiveSource(Source):
                             await self._handle_feed(sink, msg.get("arguments") or [])
                         elif t == 3:
                             if msg.get("error"):
-                                raise FeedError(f"Subscribe failed: {msg['error']}")
+                                raise SubscribeFailed(f"Subscribe failed: {msg['error']}")
                             if msg.get("invocationId") == "1":
                                 await self._handle_snapshot(sink, msg.get("result"))
                         elif t == 7:
@@ -307,10 +371,12 @@ class F1LiveSource(Source):
                                                          "connectionToken": token})
                 except httpx.HTTPError as exc:
                     log.debug("legacy /start failed (ignored): %s", exc)
-                await ws.send(json.dumps({"H": "Streaming", "M": "Subscribe", "A": [self.topics], "I": 1}))
-                log.info("Connected to F1 live timing (legacy SignalR, anonymous), subscribed to %d topics",
-                         len(self.topics))
-                sink.set_status(state="connected", transport="legacy", attempt=0, detail="Connected")
+                topics = self._topics_now()
+                await ws.send(json.dumps({"H": "Streaming", "M": "Subscribe", "A": [topics], "I": 1}))
+                log.info("Connected to F1 live timing (legacy SignalR, ANONYMOUS), subscribed to %d topics",
+                         len(topics))
+                sink.set_status(state="connected", transport="legacy", attempt=0, auth="ANONYMOUS",
+                                detail="Connected")
                 while True:
                     raw = await asyncio.wait_for(ws.recv(), self.silence_timeout)
                     if not raw or len(raw) < 3:
@@ -368,7 +434,7 @@ class F1LiveSource(Source):
                     self._warned_no_pos = True
                     log.warning("Session is running but the live socket sends no Position.z/CarData.z "
                                 "(F1 withholds them from %s connections). %s",
-                                "this token's" if self.token else "anonymous",
+                                "this F1 TV account's" if self._conn_token else "anonymous",
                                 "Trying the public F1 archive stream." if self.archive_follow
                                 else "Archive follower disabled (live.archive_follow = false).")
                 if not self.archive_follow or not self._session_path:
@@ -436,3 +502,19 @@ def _local_to_utc(local: Optional[str], offset: Optional[str]) -> Optional[datet
     parts = [int(p) for p in (offset or "0:0:0").lstrip("+-").split(":")[:3]] + [0, 0, 0]
     delta = timedelta(hours=parts[0], minutes=parts[1], seconds=parts[2]) * sign
     return (dt - delta).replace(tzinfo=timezone.utc)
+
+
+class _NullStore:
+    """No stored sign-in (a source built without an AuthManager: tests / tools)."""
+
+    def load(self):
+        return None
+
+    def save(self, token):
+        pass
+
+    def clear(self):
+        return False
+
+
+__all__ = ["F1LiveSource", "FeedError", "AuthRejected", "SubscribeFailed", "parse_token", "token_expiry"]

@@ -43,6 +43,8 @@ ARCHIVE_TOPICS = [
     "TimingDataF1", "PitLaneTimeCollection",
     # lap completions (a second signal for the lap / sector progress of qualifying and practice)
     "LapSeries",
+    # tyre stints in their own topic, current tyres, top three (missing topics are skipped)
+    "TyreStintSeries", "CurrentTyres", "TopThree",
 ]
 # small topics downloaded as soon as the session is known (before SYNC): the session clock,
 # Q1 / Q2 / Q3 and start / end - the session-aware SYNC options need them

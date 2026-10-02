@@ -336,7 +336,8 @@ class Timeline:
         # the car positions at the checkpoint itself, so the map has a sample before the target
         replay: list = []
         by_t: dict = {}
-        for num, (t, x, y, status) in self.positions.latest.items():
+        for num, v in self.positions.latest.items():
+            t, x, y, status = v[0], v[1], v[2], v[3]
             by_t.setdefault(t, []).append([num, x, y, 1 if status == "OnTrack" else 0])
         for t in sorted(by_t):
             replay.append((ck.t_ms, {"t": t, "cars": by_t[t]}, "checkpoint"))

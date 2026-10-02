@@ -72,11 +72,20 @@ def to_ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 
+POS_FRESH_MS = 5000      # a position / telemetry sample older than this (vs the shown F1 time) is stale
+CAR_FRESH_MS = 5000
+CAR_HIDE_MS = 30000      # telemetry older than this is not shown at all (never as if it were current)
+
+
 class PositionStore:
-    """Keeps the latest position per car and yields samples for streaming."""
+    """Keeps the latest position per car / object and yields samples for streaming.
+
+    ``latest[key] = (t, x, y, status, z)`` - t on the presentation time base (F1 ms when live),
+    x / y / z in F1's local track coordinates (decimetres, not GPS). Keys are whatever F1 sends
+    (car numbers; anything else is kept as a non-driver object, never drawn as a car)."""
 
     def __init__(self) -> None:
-        self.latest: dict[str, tuple[int, int, int, str]] = {}
+        self.latest: dict[str, tuple] = {}
         self.received = False
 
     def reset(self) -> None:
@@ -104,11 +113,15 @@ class PositionStore:
                 except (TypeError, ValueError):
                     continue
                 status = str(p.get("Status", ""))
+                try:
+                    z = int(p.get("Z", 0) or 0)
+                except (TypeError, ValueError):
+                    z = None
                 # (0,0,0) is sent for cars without a GPS fix -> not a real position
-                if x == 0 and y == 0 and int(p.get("Z", 0) or 0) == 0:
+                if x == 0 and y == 0 and not z:
                     continue
                 on_track = 1 if status == "OnTrack" else 0
-                self.latest[str(num)] = (t, x, y, status)
+                self.latest[str(num)] = (t, x, y, status, z)
                 cars.append([str(num), x, y, on_track])
             if cars:
                 self.received = True
@@ -116,7 +129,19 @@ class PositionStore:
         return out
 
 
+    def freshness(self, now_ms: float, keys=None) -> dict[str, dict]:
+        """Per key: age of the newest sample relative to the shown F1 time ``now_ms``."""
+        out = {}
+        for k, v in self.latest.items():
+            if keys is not None and k not in keys:
+                continue
+            age = max(0, int(now_ms - v[0]))
+            out[k] = {"age_ms": age, "fresh": age <= POS_FRESH_MS}
+        return out
+
+
 _DRS_OPEN = {10, 12, 14}
+KNOWN_CHANNELS = {"0": "rpm", "2": "speed", "3": "gear", "4": "throttle", "5": "brake", "45": "drs_raw"}
 
 
 def decode_drs(value: Optional[int], year: Optional[int]) -> Optional[str]:
@@ -149,6 +174,7 @@ class CarDataStore:
         for entry in obj.get("Entries") or []:
             if not isinstance(entry, dict):
                 continue
+            ets = parse_utc(entry.get("Utc"))
             for num, car in (entry.get("Cars") or {}).items():
                 ch = (car or {}).get("Channels") if isinstance(car, dict) else None
                 if not isinstance(ch, dict):
@@ -160,11 +186,12 @@ class CarDataStore:
                     except (TypeError, ValueError):
                         pass
                 if clean:
+                    if ets is not None:
+                        clean["_t"] = int(ets.timestamp() * 1000)     # F1 time of the sample
                     self.latest[str(num)] = clean
                     self.received = True
-            ts = parse_utc(entry.get("Utc"))
-            if ts:
-                self.last_utc = ts
+            if ets:
+                self.last_utc = ets
 
     def telemetry(self, num: str, year: Optional[int]) -> TelemetryState:
         ch = self.latest.get(num)
@@ -181,6 +208,36 @@ class CarDataStore:
             drs=decode_drs(ch.get("45"), year),
             ch45_raw=ch.get("45"),
         )
+
+    def car_object(self, num: str, year: Optional[int], now_ms: Optional[float]) -> dict:
+        """Telemetry of one car as sent to the dashboards: only what CarData.z carries.
+        Unknown channels are passed on as ``channels`` (new fields need no redesign); ERS is
+        not in the feed -> None. Old data is flagged (``fresh`` false) and, beyond
+        CAR_HIDE_MS, no value is shown at all."""
+        ch = self.latest.get(num) or {}
+        t = ch.get("_t")
+        age = None if t is None or now_ms is None else max(0, int(now_ms - t))
+        fresh = age is not None and age <= CAR_FRESH_MS
+        obj = {"driver": num, "t": t, "age_ms": age, "fresh": fresh, "ers": None}
+        tel = self.telemetry(num, year)
+        hide = age is None or age > CAR_HIDE_MS
+        for k in ("speed", "rpm", "gear", "throttle", "brake", "drs"):
+            obj[k] = None if hide else getattr(tel, k)
+        obj["drs_raw"] = None if hide else tel.ch45_raw
+        obj["channels"] = {} if hide else {k: v for k, v in ch.items() if k != "_t" and k not in KNOWN_CHANNELS}
+        return obj
+
+    def objects(self, year: Optional[int], now_ms: Optional[float]) -> dict[str, dict]:
+        return {num: self.car_object(num, year, now_ms) for num in self.latest}
+
+    def freshness(self, now_ms: float) -> dict[str, dict]:
+        out = {}
+        for k, v in self.latest.items():
+            t = v.get("_t")
+            if t is not None:
+                age = max(0, int(now_ms - t))
+                out[k] = {"age_ms": age, "fresh": age <= CAR_FRESH_MS}
+        return out
 
     def compact(self, year: Optional[int]) -> dict[str, list]:
         """Compact form for the websocket: num -> [speed, rpm, gear, throttle, brake, drs, ch45]."""

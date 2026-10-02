@@ -22,28 +22,47 @@ mode = "live"
 # [sync] mode = "AUTO". The delay is applied on F1's event-time axis (see [sync]).
 delay_seconds = 0.0
 
+[f1_tv]
+# true  - use your F1 TV account for the live timing feed (authenticated SignalR). On the
+#         first start (and whenever the sign-in expires or F1 rejects it) the browser opens
+#         the sign-in page; the token is stored in data/auth/f1tv_auth.json. Until you are
+#         signed in - or if F1 refuses the sign-in - the anonymous public feed is used.
+#         Which topics F1 actually streams to your account is reported at startup and in
+#         the log ("Live feed topics"); nothing is assumed from the subscription tier.
+#         Force a new sign-in: python main.py --f1-login   (status: --f1-status)
+# false - never sign in; anonymous public live timing only (the previous behaviour).
+subscription = true
+# open the default browser automatically when a sign-in is needed
+open_browser = true
+# Position.z keys that are NOT cars and are known to be the safety car. Empty = no object is
+# ever shown as the safety car. Objects F1 sends that are not on the driver list are listed
+# in the diagnostics ("non-driver objects"); only add a key here once you have seen it there
+# and know what it is.
+safety_car_position_keys = []
+
 [live]
 # "auto"   - SignalR Core first, falls back to legacy SignalR 1.5 on failure
 # "core"   - wss://livetiming.formula1.com/signalrcore only
 # "legacy" - wss://livetiming.formula1.com/signalr only
 transport = "auto"
 
-# OPTIONAL F1 TV subscription token. The dashboard works without it.
-# Findings (see README "Car positions without F1 TV"): F1 accepts a subscribe
-# for Position.z / CarData.z from anonymous connections but does not send
-# them; with a token they are sent. Without a token the server additionally
-# tries the public archive stream of the running session (archive_follow).
-# Paste the bare JWT ("eyJ...") or the complete "login-session" cookie value
-# from formula1.com - or better, set env F1TV_TOKEN.
+# Legacy / manual alternative to the browser sign-in of [f1_tv]: the bare JWT ("eyJ...") or
+# the complete "login-session" cookie value (or env F1TV_TOKEN). Leave empty - with
+# [f1_tv] subscription = true the sign-in happens in the browser and is stored automatically.
 f1tv_token = ""
 
-# Topics to subscribe to. Unknown/unavailable topics are simply ignored.
+# Topics to subscribe to. Everything F1 sends is used, recorded and listed in the diagnostics
+# (also topics not listed here); topics F1 does not provide to this connection are reported as
+# not received. If F1 refuses the subscription, the next attempt uses the core set only.
 topics = [
   "Heartbeat", "SessionInfo", "SessionStatus", "SessionData", "ExtrapolatedClock",
   "LapCount", "TrackStatus", "DriverList", "TimingData", "TimingDataF1",
   "TimingAppData", "TimingStats", "RaceControlMessages", "WeatherData",
   "TeamRadio", "TopThree", "PitLaneTimeCollection", "CurrentTyres",
   "LapSeries", "Position.z", "CarData.z",
+  "TyreStintSeries", "AudioStreams", "ContentStreams", "TlaRcm", "RcmSeries",
+  "PitStopSeries", "PitStop", "DriverRaceInfo", "OvertakeSeries",
+  "ChampionshipPrediction", "WeatherDataSeries",
 ]
 
 # Reconnect back-off (seconds)

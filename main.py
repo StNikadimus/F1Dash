@@ -8,6 +8,9 @@
     python main.py --replay latest # newest finished session from the F1 archive
     python main.py --vod           # follow a VOYO recording (session detected from its title)
     python main.py --vod 11253     # ... of this OpenF1 session_key
+    python main.py --f1-login      # sign in to F1 TV again (opens the browser)
+    python main.py --f1-status     # F1 TV sign-in state;  --f1-logout deletes it
+    python main.py --diagnose 120  # which live topics / cars actually deliver data (then exit)
 """
 from __future__ import annotations
 
@@ -34,6 +37,13 @@ def main() -> None:
                    help="replay a recording file, an F1 archive path or 'latest'")
     g.add_argument("--vod", nargs="?", const="auto", metavar="SESSION_KEY",
                    help="follow a VOYO recording: session from the VOYO title (auto) or an OpenF1 session_key")
+    p.add_argument("--f1-login", action="store_true",
+                   help="forget the stored F1 TV sign-in and sign in again in the browser (live mode)")
+    p.add_argument("--f1-logout", action="store_true", help="delete the stored F1 TV sign-in and exit")
+    p.add_argument("--f1-status", action="store_true", help="show the F1 TV sign-in state (no secrets) and exit")
+    p.add_argument("--diagnose", nargs="?", const=90.0, type=float, metavar="SECONDS",
+                   help="connect to F1 live timing for SECONDS (default 90), print which topics / cars "
+                        "actually deliver data, and exit")
     p.add_argument("--speed", type=float, help="replay speed factor")
     p.add_argument("--delay", type=float, help="fixed delay of N seconds instead of the VOYO playback clock")
     p.add_argument("--host")
@@ -67,6 +77,31 @@ def main() -> None:
         cfg["server"]["host"] = args.host
     if args.port:
         cfg["server"]["port"] = args.port
+
+    if args.f1_status or args.f1_logout:
+        from server.app import make_auth
+        auth = make_auth(cfg)
+        if args.f1_logout:
+            print("F1 TV sign-in deleted." if auth.logout() else "No stored F1 TV sign-in.")
+            return
+        info = auth.public_info()
+        print(f"F1 TV subscription mode: {'ENABLED' if info['subscription'] else 'DISABLED'}")
+        print(f"Sign-in: {info['state']} ({info['reason']})")
+        if info["state"] == "VALID":
+            print(f"Product: {info['product'] or '-'} · status: {info['subscription_status'] or '-'} · "
+                  f"valid until: {info['expires_utc']}")
+        return
+    if args.f1_login:
+        cfg["source"]["mode"] = "live"
+        cfg["f1_tv"]["subscription"] = True
+        cfg["_force_login"] = True
+    if args.diagnose is not None:
+        cfg["source"]["mode"] = "live"
+        logging.getLogger().setLevel("INFO")
+        import asyncio
+        from server.app import diagnose
+        asyncio.run(diagnose(cfg, max(10.0, float(args.diagnose))))
+        return
 
     level = str(cfg["server"].get("log_level", "INFO")).upper()
     logging.getLogger().setLevel(level)
