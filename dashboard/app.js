@@ -640,19 +640,6 @@
     if (!d) { panel.innerHTML = '<div class="map-notice">NO DRIVER DATA</div>'; return; }
     const t = d.tyre || {};
     const name = d.first_name && d.last_name ? `${esc(d.first_name)} <span>${esc(d.last_name)}</span>` : esc(d.full_name || d.tla || num);
-    // sectors: the one being driven now (running time), the last time of each, the personal best -
-    // a completed sector is never shown as the current one
-    const secs = [0, 1, 2].map((k) => {
-      const s = (d.sectors || [])[k] || {};
-      const b = (d.best_sectors || [])[k] || {};
-      const cur = d.sector_now === k + 1;
-      const run = cur && has(d.sector_start_ms) ? runSpan(d.sector_start_ms) : cur ? "…" : "";
-      const lastDone = d.last_sector && d.last_sector.n === k + 1 && !cur;
-      return `<div class="sec ${secClass(s)}${cur ? " now" : ""}"><div class="k">S${k + 1}${cur ? ' <em>NOW</em>' : lastDone ? ' <em class="ls">LAST</em>' : ""}</div>` +
-        `<div class="v">${cur ? `<span class="srun">${run}</span>` : na(s.value)}</div>` +
-        `<div class="b">BEST <span class="${b.overall_best ? "ob" : ""}">${has(b.value) ? esc(b.value) : "--"}</span></div></div>`;
-    }).join("");
-    const lastSec = d.last_sector ? `S${esc(d.last_sector.n)} ${esc(d.last_sector.value)}` : "--";
     const lapNow = d.dnf || d.retired ? "OUT" : d.in_garage || d.in_pit ? "IN PIT" :
       has(d.lap_now) ? `LAP ${esc(d.lap_now)}${has(d.sector_now) ? " · S" + esc(d.sector_now) : ""}` +
         (lapStateTag(d, true) || (d.lap_how === "pit" ? " <small>OUT LAP</small>" : "")) : "--";
@@ -682,7 +669,7 @@
             <div class="kv"><div class="k">NOW</div><div class="v lapnow">${lapNow}${has(d.lap_now) && has(d.lap_start_ms) ? ` <span class="cur-run">${runSpan(d.lap_start_ms)}</span>` : ""}</div></div>
             <div class="kv"><div class="k">BEST LAP</div><div class="v ${d.best_lap && d.best_lap.overall_best ? "ob" : ""}">${has(d.best_lap && d.best_lap.value) ? esc(d.best_lap.value) : isTimed() && !d.out_phase ? '<span class="na">NO TIME</span>' : NA}${d.best_deleted ? " <small>F1 best deleted</small>" : ""}</div></div>
             <div class="kv"><div class="k">LAST LAP</div><div class="v ${timeClass(d.last_lap)}">${has(d.last_lap && d.last_lap.value) ? esc(d.last_lap.value) : '<span class="na">--</span>'}${d.last_deleted ? " <small>last lap deleted</small>" : ""}</div></div>
-            <div class="sectors3" title="last completed sector: ${lastSec}">${secs}</div>
+            ${sectorsHTML(d)}
             <div class="kv"><div class="k">GAP / INT</div><div class="v" style="font-size:22px">${na(gapText(d, S.session.session_kind))} / ${na(d.interval && /^LAP/i.test(d.interval) ? "—" : d.interval)}</div></div>
             <div class="kv"><div class="k">STINTS</div><div class="stints">${stints}</div></div>
             <div class="dt-extra" style="flex-direction:column;gap:8px">
@@ -697,6 +684,24 @@
         </div>
       </div>`;
     renderTelemetryLive();
+  }
+
+  // S1 / S2 / S3 of a driver: the one being driven now (running time), the last time of each, the
+  // personal best - a completed sector is never shown as the current one. One implementation for the
+  // full dashboard (stats column) and the VOYO + data view (telemetry column).
+  function sectorsHTML(d) {
+    const secs = [0, 1, 2].map((k) => {
+      const s = (d.sectors || [])[k] || {};
+      const b = (d.best_sectors || [])[k] || {};
+      const cur = d.sector_now === k + 1;
+      const run = cur && has(d.sector_start_ms) ? runSpan(d.sector_start_ms) : cur ? "…" : "";
+      const lastDone = d.last_sector && d.last_sector.n === k + 1 && !cur;
+      return `<div class="sec ${secClass(s)}${cur ? " now" : ""}"><div class="k">S${k + 1}${cur ? ' <em>NOW</em>' : lastDone ? ' <em class="ls">LAST</em>' : ""}</div>` +
+        `<div class="v">${cur ? `<span class="srun">${run}</span>` : na(s.value)}</div>` +
+        `<div class="b">BEST <span class="${b.overall_best ? "ob" : ""}">${has(b.value) ? esc(b.value) : "--"}</span></div></div>`;
+    }).join("");
+    const lastSec = d.last_sector ? `S${esc(d.last_sector.n)} ${esc(d.last_sector.value)}` : "--";
+    return `<div class="sectors3" title="last completed sector: ${lastSec}">${secs}</div>`;
   }
 
   function renderTelemetryLive() {
@@ -715,6 +720,10 @@
       ? `<div class="meter ${cls}"><i style="width:${val}%"></i><span>${val}%</span></div>` : NA;
     const tile = (k, val, note) => `<div class="tile"><div class="k">${k}</div><div class="v">${val}</div>${note ? `<div class="note">${note}</div>` : ""}</div>`;
     const extra = Object.entries(v.channels || {}).map(([k, x]) => `ch${esc(k)} ${esc(x)}`).join(" · ");
+    // VOYO + data view: S1 / S2 / S3 (same component as the stats column) instead of DRS / ERS /
+    // OVERTAKE, which the feed does not deliver reliably
+    const video = (S.ui.tv_mode_effective || "FULL_DASHBOARD") !== "FULL_DASHBOARD";
+    const d = num ? S.drivers[num] : null;
     const stale = a && !a.fresh;
     const age = a && has(a.age_ms) ? (a.age_ms >= 10000 ? Math.round(a.age_ms / 1000) + " s" : (a.age_ms / 1000).toFixed(1) + " s") : null;
     col.innerHTML = `
@@ -725,10 +734,11 @@
         ${tile("GEAR", na(v.gear, (x) => (x === 0 ? "N" : x)))}
         ${tile("RPM", na(v.rpm, (x) => x.toLocaleString("en-US")))}
         ${tile("BRAKE", has(brk) ? (brk ? '<span style="color:var(--red)">ON</span>' : "OFF") : NA, "on / off only")}
-        ${tile("DRS", drs ? esc(drs) : NA, drsNote)}
+        ${video ? "" : `${tile("DRS", drs ? esc(drs) : NA, drsNote)}
         ${tile("ERS", has(v.ers) ? esc(JSON.stringify(v.ers)) : NA, has(v.ers) ? "" : "not in F1 feed")}
-        ${tile("OVERTAKE", NA, "not in F1 feed")}
+        ${tile("OVERTAKE", NA, "not in F1 feed")}`}
       </div>
+      ${video && d ? sectorsHTML(d) : ""}
       ${extra ? `<div class="notes">other CarData channels: ${extra}</div>` : ""}
       </div>
       ${a && stale ? `<div class="notes">STALE · last telemetry ${esc(age || "?")} ago${has(v.speed) ? "" : " - not shown"}</div>` : ""}
