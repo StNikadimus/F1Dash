@@ -85,6 +85,9 @@ def _new() -> dict:
     return {"n": None, "start": None, "how": None, "sec": None, "sec_start": None,
             "last_sec": None, "hist": [], "xing": None, "pit": False, "pit_t": None,
             "act": None, "seg": None, "lp": None, "lpit": False, "done": None,
+            # "pin": the car went into the pit lane from a lap on track (an in lap), not out of
+            # the garage / standing in the pit lane when the data began
+            "pin": False,
             # the lap being driven: sector times so far, speed at the line when it began;
             # the two laps before it (for OUT / PREP / HOT / COOLDOWN, see normalizer.lap_state)
             "cs": [None, None, None], "lfl": None, "pl": None, "pl2": None}
@@ -98,8 +101,11 @@ def _archive(st: dict, t: float) -> None:
     st["cs"], st["lfl"] = [None, None, None], None
 
 
-def _start_out_lap(st: dict, t: Optional[float], part: Optional[int]) -> None:
-    """An out lap begins: at the pit exit (t known) or found later (t None, how = "garage")."""
+def _start_out_lap(st: dict, t: Optional[float], part: Optional[int], from_pit: bool = False) -> None:
+    """An out lap begins: at the pit exit (t known) or found later (t None, how = "garage").
+    ``opit``: the car is known to have come out of the pit lane (PitOut / InPit, also when the
+    exit time is lost) - not only "moving again after a silence" (e.g. off the grid)."""
+    st["opit"] = t is not None or from_pit
     st["start"], st["how"] = t, ("pit" if t is not None else "garage")
     st["sec"], st["sec_start"] = (0, t) if t is not None else (None, None)
     st["lp"], st["lpit"] = part, True             # an out lap is never a timed lap
@@ -164,19 +170,27 @@ def track_laps(topics: dict, topic: str, data: Any, t_ms: float, before_all: dic
         if moving and not st["pit"] and (st["act"] is None or t_ms - st["act"] > IDLE_MS) and \
                 upd.get("PitOut") is not True and _int(upd.get("NumberOfLaps")) is None:
             # timing activity again after a long silence: the car left the garage although the
-            # pit-exit message is missing - an out lap whose start time is not known
-            _start_out_lap(st, None, part)
+            # pit-exit message is missing - an out lap whose start time is not known. It counts as
+            # coming out of the pit only when F1's line still says InPit (stuck flag, real 2026
+            # data) - a car moving off the grid after a long stand is not on an out lap
+            line = ((td.get("Lines") or {}).get(str(num)) or {}) if isinstance(td, dict) else {}
+            _start_out_lap(st, None, part, from_pit=bool(line.get("InPit")) or bool(upd.get("InPit")))
+        prev_act = st["act"]
         if moving:
             st["act"] = t_ms                   # last timing activity (a car in the garage has none)
         # ---- pit lane
         if upd.get("InPit") is True and not st["pit"]:
+            # a lap on track was being driven just now: pit entry (not a parked car re-flagged)
+            # (activity before this message: a full line re-sent after a reconnect - also its echo on
+            # the other timing topic at the same instant - is no lap)
+            st["pin"] = st["how"] is not None and prev_act is not None and 0 < t_ms - prev_act <= IDLE_MS
             st["pit"], st["pit_t"], st["lpit"] = True, t_ms, True     # this lap went through the pit
             st["start"] = st["how"] = st["sec"] = st["sec_start"] = None
         elif st["pit"] and st["pit_t"] is not None and t_ms - st["pit_t"] > PIT_ACTIVITY_MS and moving:
             # InPit stuck although the car keeps setting times (the "left the pit" message was
             # lost - real 2026 data): it is on track - an out lap of unknown start
-            st["pit"] = False
-            _start_out_lap(st, None, part)
+            st["pit"] = st["pin"] = False
+            _start_out_lap(st, None, part, from_pit=True)
         pit_exit = upd.get("PitOut") is True or (upd.get("InPit") is False and st["pit"])
         # ---- the timing line
         crossed = False
@@ -202,7 +216,7 @@ def track_laps(topics: dict, topic: str, data: Any, t_ms: float, before_all: dic
                 if st["pl"] and 0 <= t_ms - st["pl"]["t"] < DEDUPE_MS:
                     st["pl"]["time"] = v
         if pit_exit:
-            st["pit"] = False
+            st["pit"] = st["pin"] = False
             if not (st["how"] == "pit" and st["start"] is not None and 0 <= t_ms - st["start"] < DEDUPE_MS):
                 _start_out_lap(st, t_ms, part)
 

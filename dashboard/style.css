@@ -328,6 +328,12 @@ html, body {
 .sec.s-pb { border-top-color: var(--green); } .sec.s-pb .v { color: var(--green); }
 .sec.s-ob { border-top-color: var(--purple); } .sec.s-ob .v { color: var(--purple); }
 .sec.s-n { border-top-color: #cdd5dd; }
+/* OUT LAP / IN LAP / IN PIT ... in place of S1-S3 (same box style, all three columns) */
+.sec.sec-phase { grid-column: 1 / -1; text-align: center; border-top-color: var(--blue); }
+.sec.sec-phase .v { letter-spacing: .12em; }
+.sec.ph-IN-LAP, .sec.ph-IN-PIT { border-top-color: var(--amber); }
+.sec.ph-RETIRED, .sec.ph-STOPPED { border-top-color: var(--red); }
+.sec.sec-phase .b { letter-spacing: .08em; }
 .stints { display: flex; gap: 6px; flex-wrap: wrap; }
 .stint { display: flex; align-items: center; gap: 6px; background: var(--panel-2); border-radius: 4px; padding: 3px 8px 3px 4px; font-size: 18px; font-weight: 800; }
 .stint .tyre-dot { width: 22px; height: 22px; border-width: 3px; font-size: 11px; }

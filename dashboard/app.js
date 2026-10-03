@@ -689,7 +689,18 @@
   // S1 / S2 / S3 of a driver: the one being driven now (running time), the last time of each, the
   // personal best - a completed sector is never shown as the current one. One implementation for the
   // full dashboard (stats column) and the VOYO + data view (telemetry column).
+  // OUT LAP / IN LAP / IN PIT / RETIRED / STOPPED (server: normalizer._lap_phase, from the official
+  // pit / lap data) take the place of S1-S3: never "N/A" sectors for a car that is not on a timed lap
+  const PHASE_SUB = { "OUT LAP": "from the pit exit", "IN LAP": "in the pit lane", "IN PIT": "pit lane / garage",
+    RETIRED: "", STOPPED: "car stopped" };
   function sectorsHTML(d) {
+    const ph = d.lap_phase;
+    if (ph && ph in PHASE_SUB) {
+      const run = ph === "OUT LAP" && has(d.sector_now)
+        ? `S${esc(d.sector_now)}${has(d.sector_start_ms) ? " " + runSpan(d.sector_start_ms) : ""}` : PHASE_SUB[ph];
+      return `<div class="sectors3"><div class="sec sec-phase ph-${esc(ph.replace(" ", "-"))}">` +
+        `<div class="v">${esc(ph)}</div>${run ? `<div class="b">${run}</div>` : ""}</div></div>`;
+    }
     const secs = [0, 1, 2].map((k) => {
       const s = (d.sectors || [])[k] || {};
       const b = (d.best_sectors || [])[k] || {};
