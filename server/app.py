@@ -178,6 +178,23 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             return Response(format_report(engine.diagnostics()), media_type="text/plain; charset=utf-8")
         return JSONResponse(engine.diagnostics(), headers={"Cache-Control": "no-store"})
 
+    async def api_track_layouts(request: Request) -> Response:
+        return JSONResponse(engine.track_choices(), headers={"Cache-Control": "no-store"})
+
+    async def api_track_choice(request: Request) -> Response:
+        if not remote.enabled:
+            return JSONResponse({"ok": False, "error": "remote disabled"}, status_code=403)
+        if not remote.check_token(_token(request)):
+            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        try:
+            body = json.loads((await request.body())[:2048] or b"{}")
+            ref_id = body.get("layout") if isinstance(body, dict) else None
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+        if ref_id is not None and not isinstance(ref_id, str):
+            return JSONResponse({"ok": False, "error": "layout id expected"}, status_code=400)
+        return JSONResponse({"ok": True, "result": engine.set_track_choice(ref_id)})
+
     async def api_state(request: Request) -> Response:
         return JSONResponse(engine.snapshot())
 
@@ -354,6 +371,13 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                     await remote.handle_key(str(msg.get("key", "")), f"ws:{addr}")
                 elif kind == "command":
                     await remote.handle_command(str(msg.get("command", "")), msg.get("arg"), f"ws:{addr}")
+                elif kind == "track_choice":
+                    # "choose the circuit" menu of a dashboard: a known layout id or "auto"
+                    value = msg.get("value")
+                    if value is None or (isinstance(value, str) and len(value) <= 40):
+                        text = engine.set_track_choice(value)
+                        remote._toast(text)
+                        await publish_ui(remote.message())
                 elif kind == "sync_action":
                     # SYNC menu of a dashboard: same validation as POST /api/sync/{action}
                     action = str(msg.get("action", ""))
@@ -379,6 +403,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/api/health", health),
         Route("/api/state", api_state),
         Route("/api/diagnostics", api_diagnostics),
+        Route("/api/track/layouts", api_track_layouts),
+        Route("/api/track/choice", api_track_choice, methods=["POST"]),
         Route("/f1tv/login", f1tv_login),
         Route("/f1tv/callback", f1tv_callback, methods=["POST"]),
         Route("/f1tv/status", f1tv_status),
