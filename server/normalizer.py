@@ -128,6 +128,7 @@ PHASE_STATE = {"Started": "RUNNING", "Aborted": "SUSPENDED", "Finished": "ENDED"
                "Ends": "ENDED", "Inactive": "NOT STARTED"}
 RUNNING_MAX_MS = 10 * 60_000     # a lap / sector "running" longer than this is not shown as a running time
 from .laps import IDLE_MS       # noqa: E402  (no timing activity for this long: not driving a lap now)
+IN_LAP_MS = 90_000      # pit lane entered from a lap on track this recently: IN LAP (then IN PIT)
 
 
 class Normalizer:
@@ -518,6 +519,7 @@ class Normalizer:
             bs.append(TimeValue(value=_s(s.get("Value")) if isinstance(s, dict) else None,
                                 overall_best=isinstance(s, dict) and _i(s.get("Position")) == 1))
         d.best_sectors = bs
+        d.lap_phase = self._lap_phase(d, st if isinstance(st, dict) else {})
         if not isinstance(st, dict):
             return
         hist = st.get("hist") or []
@@ -547,6 +549,26 @@ class Normalizer:
             ss = st.get("sec_start")
             if ss is not None and 0 <= now - ss <= RUNNING_MAX_MS:
                 d.sector_start_ms = ss
+
+    def _lap_phase(self, d: DriverState, st: dict) -> Optional[str]:
+        """OUT LAP / IN LAP / IN PIT / RETIRED / STOPPED from the official pit and lap data only
+        (InPit, PitOut, Retired, Stopped and the lap tracker) - never from slow times or missing
+        sectors. None: driving a normal lap (or nothing known)."""
+        if d.retired or d.dnf:
+            return "RETIRED"
+        if d.stopped:
+            return "STOPPED"
+        if d.in_pit or d.in_garage or st.get("pit"):
+            # an in lap only when the car came in from a lap on track and has not been there long
+            pit_t = st.get("pit_t")
+            recent = pit_t is not None and 0 <= self._now_ms - pit_t <= IN_LAP_MS
+            return "IN LAP" if st.get("pin") and recent and not d.in_garage else "IN PIT"
+        act = st.get("act")
+        if act is None or self._now_ms - act > IDLE_MS:
+            return None                              # no timing activity: unknown, not guessed
+        if st.get("how") in ("pit", "garage") and st.get("opit", st.get("how") == "pit"):
+            return "OUT LAP"                         # the lap began at the pit exit
+        return None
 
     @staticmethod
     def _timed_lap(h: list, keep) -> bool:
