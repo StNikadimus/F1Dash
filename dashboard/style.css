@@ -334,6 +334,13 @@ html, body {
 .sec.ph-IN-LAP, .sec.ph-IN-PIT { border-top-color: var(--amber); }
 .sec.ph-RETIRED, .sec.ph-STOPPED { border-top-color: var(--red); }
 .sec.sec-phase .b { letter-spacing: .08em; }
+/* race: CHASING | POSITION | TYRE AGE in the sector boxes */
+.sec.rs .v { white-space: nowrap; }
+.sec.rs .b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sec.rs .b .tyre-dot { width: 15px; height: 15px; border-width: 2px; font-size: 8px; vertical-align: -2px; }
+.sec.rs-chase { border-top-color: var(--amber); }
+.sec.rs-up { border-top-color: var(--green); } .sec.rs-up .v { color: var(--green); }
+.sec.rs-down { border-top-color: var(--red); } .sec.rs-down .v { color: var(--red); }
 .stints { display: flex; gap: 6px; flex-wrap: wrap; }
 .stint { display: flex; align-items: center; gap: 6px; background: var(--panel-2); border-radius: 4px; padding: 3px 8px 3px 4px; font-size: 18px; font-weight: 800; }
 .stint .tyre-dot { width: 22px; height: 22px; border-width: 3px; font-size: 11px; }

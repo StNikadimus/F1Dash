@@ -127,6 +127,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     # selection at start (config / --live / --vod); auto: the detection decides
     fixed = start_mode.upper() if start_mode in ("test", "replay") else None
     selected = {"live": "LIVE", "vod": "VOD"}.get(start_mode, "AUTO")
+    from . import chase
+    chase.CHASE_GAP_S = max(0.1, float(cfg["dashboard"].get("chase_gap_seconds", 1.5)))
     hub = Hub()
     tracks = TrackProvider(DATA_DIR, cfg["tracks"])
     auth = make_auth(cfg)                     # one F1 TV sign-in for every LIVE period of this process

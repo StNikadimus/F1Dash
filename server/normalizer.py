@@ -11,6 +11,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from . import chase as _chase
+from .chase import CHASE
 from .feedstate import IN_PIT_SINCE, STOPPED_SINCE, TIMES, FeedState
 from .lap_state import classify as lap_state_classify, driver_ref, pace_refs
 from .laps import LAPS
@@ -502,6 +504,20 @@ class Normalizer:
             for n, d in out.items():
                 d.position = line_of(n)
 
+        if kind == "race":
+            chase = feed.get(CHASE) or {}
+            by_pos = {d.position: n for n, d in out.items() if d.position is not None}
+            for num, d in out.items():
+                c = chase.get(num)
+                if isinstance(c, dict):
+                    ah = out.get(str(c.get("ahead"))) if c.get("ahead") is not None else None
+                    laps, why = int(c.get("laps") or 0), c.get("why")
+                    now_ahead = by_pos.get(d.position - 1) if d.position and d.position > 1 else None
+                    if laps and now_ahead is not None and str(c.get("ahead")) != now_ahead:
+                        laps, why = 0, "ahead"      # passed / was passed since that lap: chase over
+                    d.chase = {"laps": laps, "ahead": c.get("ahead"),
+                               "ahead_tla": ah.tla if ah else None, "gap": c.get("gap"), "why": why,
+                               "threshold": _chase.CHASE_GAP_S}
         def sort_key(n: str):
             d = out[n]
             return (d.position is None, d.position or 99, line_of(n) or 99, _i(n) or 0)

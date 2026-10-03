@@ -693,8 +693,39 @@
   // pit / lap data) take the place of S1-S3: never "N/A" sectors for a car that is not on a timed lap
   const PHASE_SUB = { "OUT LAP": "from the pit exit", "IN LAP": "in the pit lane", "IN PIT": "pit lane / garage",
     RETIRED: "", STOPPED: "car stopped" };
+  // RACE: CHASING | POSITION | TYRE AGE in place of S1-S3 (same boxes). Practice / qualifying: sectors.
+  function raceStatsHTML(d) {
+    const box = (k, v, b, cls) => `<div class="sec rs ${cls || ""}"><div class="k">${k}</div><div class="v">${v}</div>` +
+      `<div class="b">${b || "&nbsp;"}</div></div>`;
+    // CHASING: consecutive laps within the configured gap of the same car ahead (server/chase.py)
+    const c = d.chase, ph = d.lap_phase;
+    let cv = "—", cb = "no lap completed yet";
+    if (ph === "IN LAP" || ph === "OUT LAP" || ph === "IN PIT") cb = ph;
+    else if (c && c.laps > 0) {
+      cv = `${c.laps} LAP${c.laps === 1 ? "" : "S"}`;
+      cb = `${c.ahead_tla ? esc(c.ahead_tla) : "car ahead"}${has(c.gap) ? " · " + Number(c.gap).toFixed(1) + " s" : ""}`;
+    } else if (c) {
+      cb = { leader: "LEADING", neutral: "SC / VSC lap", pit: "PIT STOP", ahead: "new car ahead" }[c.why] ||
+        (has(c.gap) ? `gap ${Number(c.gap).toFixed(1)} s > ${esc(c.threshold)} s` : "no gap data");
+    }
+    // POSITION: gain / loss against the grid position (TimingAppData GridPos), never the last lap
+    let pv = "—", pb = "no grid position", pcls = "";
+    if (has(d.position) && has(d.grid_position) && d.grid_position > 0) {
+      const g = d.grid_position - d.position;
+      pv = `P ${g > 0 ? "+" + g : g < 0 ? "−" + Math.abs(g) : "0"}`;
+      pb = `P${esc(d.position)} · GRID P${esc(d.grid_position)}`;
+      pcls = g > 0 ? "rs-up" : g < 0 ? "rs-down" : "";
+    }
+    // TYRE AGE: age of the current set (TotalLaps of the stint), not the race laps
+    const t = d.tyre || {};
+    const tv = has(t.tyre_age) ? `${esc(t.tyre_age)} LAP${t.tyre_age === 1 ? "" : "S"}` : "—";
+    const tb = has(t.compound) ? `${tyreDot(t.compound)} ${esc(t.compound)}${t.new === false ? " · USED" : ""}` : "compound unknown";
+    return `<div class="sectors3">${box("CHASING", cv, cb, c && c.laps > 0 ? "rs-chase" : "")}` +
+      `${box("POSITION", pv, pb, pcls)}${box("TYRE AGE", tv, tb)}</div>`;
+  }
   function sectorsHTML(d) {
     const ph = d.lap_phase;
+    if ((S.session || {}).session_kind === "race" && ph !== "RETIRED" && ph !== "STOPPED") return raceStatsHTML(d);
     if (ph && ph in PHASE_SUB) {
       const run = ph === "OUT LAP" && has(d.sector_now)
         ? `S${esc(d.sector_now)}${has(d.sector_start_ms) ? " " + runSpan(d.sector_start_ms) : ""}` : PHASE_SUB[ph];
