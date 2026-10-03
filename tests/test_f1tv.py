@@ -627,3 +627,36 @@ class DiagnosticsAndHttpTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HubRobustnessTest(unittest.TestCase):
+    """A value JSON cannot hold must never refuse a dashboard connection or stop publishing."""
+
+    def test_unsendable_values_do_not_break_dashboards(self):
+        from server.hub import Hub
+
+        class FakeWS:
+            async def send_text(self, text):
+                pass
+
+        async def go():
+            hub = Hub()
+            hub.publish_state({"session": {"a": 1}, "order": [], "drivers": {"1": {"x": 1}}})
+            circ = {}
+            circ["self"] = circ
+            # a set (not JSON) is sent as a list; a circular section keeps the previous one
+            hub.publish_state({"session": {"a": 2, "odd": {3, 4}}, "track_status": circ, "order": [],
+                               "drivers": {"1": {"x": 2}}})
+            hub.status = {"type": "status", "when": datetime(2026, 1, 1)}     # not JSON: sent as text
+            c = await hub.add(FakeWS(), "test")
+            msgs = []
+            while not c.queue.empty():
+                msgs.append(json.loads(c.queue.get_nowait()))
+            c.task.cancel()
+            return hub, msgs
+        hub, msgs = asyncio.run(go())
+        types = [m.get("type") for m in msgs]
+        state = next(m for m in msgs if m.get("type") == "state")
+        self.assertEqual(sorted(state["session"]["odd"]), [3, 4])
+        self.assertEqual(state["drivers"]["1"], {"x": 2})
+        self.assertIn("status", types)

@@ -326,7 +326,11 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     async def ws_endpoint(ws: WebSocket) -> None:
         await ws.accept()
         addr = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
-        client = await hub.add(ws, addr)
+        try:
+            client = await hub.add(ws, addr)
+        except Exception:  # noqa: BLE001 - log it once in full, then keep the dashboard connected
+            log.exception("Dashboard connection setup failed for %s", addr)
+            raise
         try:
             while True:
                 text = await ws.receive_text()

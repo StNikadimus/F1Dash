@@ -587,17 +587,39 @@ SERVER_LOG_SHOW = ("AUTO MEDIA SYNC", "VOD", "SYNC CHECK", "Sync:", "VOYO playba
 SERVER_LOG_HIDE = ("Circuit geometry", "No geometry", "multiviewer")
 
 
+SERVER_LOG_ERROR_START = ("Traceback (most recent call last)", "Exception in ASGI application")
+
+
+def _log_line(line: str) -> str:
+    """Drop the date of a timestamped log line; other lines (uvicorn, tracebacks) stay whole."""
+    s = line.rstrip()
+    return s[11:] if len(s) > 11 and s[:4].isdigit() and s[4] == "-" else s
+
+
 def follow_server_log(path: Path) -> None:
-    """Show the server lines that matter for VOD / sync in this terminal (the full log stays in the file)."""
+    """Show the server lines that matter for VOD / sync in this terminal (the full log stays in the file).
+    An error is shown with its whole traceback, ending with the line that says what went wrong."""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            in_trace = 0
             while True:
                 line = fh.readline()
                 if not line:
                     time.sleep(0.5)
                     continue
+                if in_trace:
+                    if line[:4].isdigit() or line.startswith("INFO:") or not line.strip():
+                        in_trace = 0                     # the next normal log line: the traceback ended
+                    else:
+                        in_trace -= 1
+                        print("  server | " + line.rstrip())
+                        continue
+                if any(k in line for k in SERVER_LOG_ERROR_START):
+                    in_trace = 80
+                    print("  server " + _log_line(line))
+                    continue
                 if any(k in line for k in SERVER_LOG_SHOW) and not any(k in line for k in SERVER_LOG_HIDE):
-                    print("  server " + line.rstrip()[11:])
+                    print("  server " + _log_line(line))
     except OSError:
         pass
 

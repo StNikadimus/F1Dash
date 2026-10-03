@@ -947,9 +947,15 @@ class Engine:
                 for num, d in state["drivers"].items():
                     self._in_pit[num] = bool(d["in_pit"])
                     self._laps[num] = d["laps"]
-                state["map"] = self.map_info()
+                try:
+                    state["map"] = self.map_info()
+                except Exception:  # noqa: BLE001 - map extras are optional, the board is not
+                    self._parse_error("map")
                 self.diag.session_running(bool(state["session"].get("live")), now)
-                self.hub.publish_state(state)
+                try:
+                    self.hub.publish_state(state)
+                except Exception:  # noqa: BLE001 - never let one state end the publishing for good
+                    self._parse_error("publish")
             if self._tel_dirty and now - last_tel >= TEL_INTERVAL:
                 self._tel_dirty = False
                 last_tel = now
@@ -959,7 +965,10 @@ class Engine:
                     year = int(path[:4])
                 # one object per car: only what CarData.z carries, with its age (old data is
                 # flagged, then hidden - never shown as current); refreshed at least every second
-                self.hub.broadcast({"type": "tel", "cars": self.cardata.objects(year, self._now_pres_ms())})
+                try:
+                    self.hub.broadcast({"type": "tel", "cars": self.cardata.objects(year, self._now_pres_ms())})
+                except Exception:  # noqa: BLE001
+                    self._parse_error("telemetry")
             elif self.cardata.latest and now - last_tel >= 1.0:
                 self._tel_dirty = True
             if self.source.mode == "live" and self.diag.due(now):
@@ -990,7 +999,10 @@ class Engine:
     def snapshot(self) -> dict:
         st = self.normalizer.build(self.feed_state, self._target_dt(), self._rate, self.availability,
                                    rc_until=self._rc_until())
-        st["map"] = self.map_info()
+        try:
+            st["map"] = self.map_info()
+        except Exception:  # noqa: BLE001
+            self._parse_error("map")
         return st
 
     # ------------------------------------------------------------------ positions / diagnostics
