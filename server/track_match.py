@@ -1,0 +1,223 @@
+"""Track outline from a KNOWN circuit layout, aligned to the real car positions.
+
+Instead of drawing the circuit from one lap of car positions (gaps in the position stream
+leave parts of the track missing or drawn as straight lines), the outline of the circuit is
+taken from a reference layout (bacinger/f1-circuits, MIT - real circuit geometry in WGS84,
+bundled in ``server/reference_tracks``) and fitted onto the positions F1 actually sends:
+rotation, mirroring, scale and offset are found by a coarse search plus an ICP refinement
+(2-D similarity transform, Umeyama). The result is only used when it really fits:
+
+* the median distance of the car positions to the fitted outline is small (a few metres),
+* 90 % of the positions are within ~15 m,
+* the positions cover most of the outline (cars have been all around it),
+* the scale is plausible (F1 units are decimetres; the reference is in metres x 10).
+
+Otherwise nothing is drawn from it (a different layout, too little data). Pure Python, runs in
+a worker thread (``asyncio.to_thread``).
+"""
+from __future__ import annotations
+
+import json
+import math
+import re
+import unicodedata
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+REF_DIR = Path(__file__).resolve().parent / "reference_tracks"
+CELL = 300.0                       # dm (30 m) grid cell for nearest-point lookups
+MEDIAN_OK = 70.0                   # dm: median distance of the positions to the outline
+P90_OK = 160.0                     # dm
+COVER_OK = 0.85                    # share of the outline with positions within COVER_DIST
+COVER_DIST = 300.0                 # dm
+SCALE_OK = (0.85, 1.18)
+MIN_SAMPLES = 400
+
+
+Point = tuple
+
+
+# ----------------------------------------------------------------------------- reference data
+def _norm(s: Optional[str]) -> str:
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+
+# F1 SessionInfo names (Meeting.Circuit.ShortName / Meeting.Location) that differ from the reference index
+ALIASES = {
+    "sakhir": "bh-2002", "bahrain": "bh-2002", "suzuka": "jp-1962", "melbourne": "au-1953",
+    "albert park": "au-1953", "shanghai": "cn-2004", "jeddah": "sa-2021", "miami": "us-2022",
+    "imola": "it-1953", "monte carlo": "mc-1929", "monaco": "mc-1929", "catalunya": "es-1991",
+    "barcelona": "es-1991", "montreal": "ca-1978", "spielberg": "at-1969", "silverstone": "gb-1948",
+    "hungaroring": "hu-1986", "budapest": "hu-1986", "spa francorchamps": "be-1925", "spa": "be-1925",
+    "zandvoort": "nl-1948", "monza": "it-1922", "baku": "az-2016", "singapore": "sg-2008",
+    "marina bay": "sg-2008", "austin": "us-2012", "mexico city": "mx-1962", "interlagos": "br-1940",
+    "sao paulo": "br-1940", "las vegas": "us-2023", "lusail": "qa-2004", "yas marina circuit": "ae-2009",
+    "yas island": "ae-2009", "yas marina": "ae-2009", "abu dhabi": "ae-2009", "madrid": "es-2026",
+    "madring": "es-2026",
+}
+
+
+def reference_id(*names: Optional[str]) -> Optional[str]:
+    """Reference layout for a circuit, from the names F1 gives it - None if not known
+    (never guessed from a partial match)."""
+    index = _index()
+    for name in names:
+        n = _norm(name)
+        if not n:
+            continue
+        if n in ALIASES:
+            return ALIASES[n]
+        for e in index:
+            if n in (_norm(e.get("location")), _norm(e.get("name"))):
+                return e["id"]
+    return None
+
+
+def _index() -> list:
+    try:
+        return json.loads((REF_DIR / "f1-locations.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def reference_points(ref_id: str) -> Optional[list]:
+    """The reference outline in decimetres (local east / north), one point every 5 m."""
+    from .track import geometry_from_geojson
+    path = REF_DIR / f"{ref_id}.geojson"
+    if not path.exists():
+        return None
+    return [tuple(p) for p in geometry_from_geojson(path).points]
+
+
+# ----------------------------------------------------------------------------- geometry
+class _Grid:
+    def __init__(self, pts: list) -> None:
+        self.pts = pts
+        self.g: dict = {}
+        for i, (x, y) in enumerate(pts):
+            self.g.setdefault((int(x // CELL), int(y // CELL)), []).append(i)
+
+    def nearest(self, x: float, y: float, max_ring: int = 6) -> tuple[float, int]:
+        cx, cy = int(x // CELL), int(y // CELL)
+        best, bi = float("inf"), -1
+        for r in range(max_ring + 1):
+            for gx in range(cx - r, cx + r + 1):
+                for gy in range(cy - r, cy + r + 1):
+                    if max(abs(gx - cx), abs(gy - cy)) != r:
+                        continue
+                    for i in self.g.get((gx, gy), ()):
+                        px, py = self.pts[i]
+                        d = (px - x) ** 2 + (py - y) ** 2
+                        if d < best:
+                            best, bi = d, i
+            if bi >= 0 and math.sqrt(best) <= r * CELL:
+                break
+        return math.sqrt(best), bi
+
+
+def _apply(p: tuple, s: float, c: float, sn: float, tx: float, ty: float, mirror: bool) -> tuple:
+    x, y = p
+    if mirror:
+        x = -x
+    return (s * (c * x - sn * y) + tx, s * (sn * x + c * y) + ty)
+
+
+def _umeyama(src: list, dst: list) -> tuple[float, float, float, float, float]:
+    """Similarity transform (scale, cos, sin, tx, ty) mapping src onto dst (least squares)."""
+    n = len(src)
+    mx = sum(p[0] for p in src) / n
+    my = sum(p[1] for p in src) / n
+    nx = sum(p[0] for p in dst) / n
+    ny = sum(p[1] for p in dst) / n
+    a = b = var = 0.0
+    for (x, y), (u, v) in zip(src, dst):
+        x, y, u, v = x - mx, y - my, u - nx, v - ny
+        a += x * u + y * v
+        b += x * v - y * u
+        var += x * x + y * y
+    ang = math.atan2(b, a)
+    s = math.hypot(a, b) / var if var else 1.0
+    c, sn = math.cos(ang), math.sin(ang)
+    return s, c, sn, nx - s * (c * mx - sn * my), ny - s * (sn * mx + c * my)
+
+
+@dataclass
+class Fit:
+    ok: bool
+    reason: str
+    points: Optional[list] = None          # the reference outline in F1 coordinates
+    median_m: Optional[float] = None
+    p90_m: Optional[float] = None
+    coverage: Optional[float] = None
+    scale: Optional[float] = None
+    mirror: Optional[bool] = None
+    rotation_deg: Optional[float] = None
+
+
+def fit_reference(ref: list, samples: list) -> Fit:
+    """Fit the reference outline ``ref`` (dm, local) onto car positions ``samples`` (F1 X/Y)."""
+    if len(samples) < MIN_SAMPLES:
+        return Fit(False, f"too few positions ({len(samples)} < {MIN_SAMPLES})")
+    step = max(1, len(samples) // 600)
+    obs = [tuple(p) for p in samples[::step]]
+    ogrid = _Grid(obs)
+    ox = sum(p[0] for p in obs) / len(obs)
+    oy = sum(p[1] for p in obs) / len(obs)
+    rx = sum(p[0] for p in ref) / len(ref)
+    ry = sum(p[1] for p in ref) / len(ref)
+    ref_c = [(x - rx, y - ry) for x, y in ref]
+    r_ref = math.sqrt(sum(x * x + y * y for x, y in ref_c) / len(ref_c))
+    r_obs = math.sqrt(sum((x - ox) ** 2 + (y - oy) ** 2 for x, y in obs) / len(obs))
+    s0 = r_obs / r_ref if r_ref else 1.0
+    sub = ref_c[:: max(1, len(ref_c) // 300)]
+
+    def score(s, c, sn, tx, ty, mirror):
+        # how far the transformed reference is from the positions (reference -> nearest position)
+        ds = sorted(ogrid.nearest(*_apply(p, s, c, sn, tx, ty, mirror), max_ring=3)[0] for p in sub)
+        return ds[len(ds) // 2]
+
+    cands = []
+    for mirror in (False, True):
+        for deg in range(0, 360, 4):
+            a = math.radians(deg)
+            cands.append((score(s0, math.cos(a), math.sin(a), ox, oy, mirror), deg, mirror))
+    cands.sort()
+    best = None
+    for _, deg, mirror in cands[:6]:
+        a = math.radians(deg)
+        s, c, sn, tx, ty = s0, math.cos(a), math.sin(a), ox, oy
+        for _ in range(25):
+            # ICP: every position paired with its nearest point of the transformed outline
+            moved = [_apply(p, s, c, sn, tx, ty, mirror) for p in ref_c]
+            mgrid = _Grid(moved)
+            src, dst = [], []
+            for q in obs:
+                d, i = mgrid.nearest(*q)
+                if i >= 0 and d < 600:
+                    src.append((-ref_c[i][0], ref_c[i][1]) if mirror else ref_c[i])
+                    dst.append(q)
+            if len(src) < MIN_SAMPLES // 4:
+                break
+            s, c, sn, tx, ty = _umeyama(src, dst)
+        moved = [_apply(p, s, c, sn, tx, ty, mirror) for p in ref_c]
+        mgrid = _Grid(moved)
+        d_obs = sorted(mgrid.nearest(*q)[0] for q in obs)
+        med, p90 = d_obs[len(d_obs) // 2], d_obs[int(len(d_obs) * 0.9)]
+        cover = sum(1 for p in moved[::5] if ogrid.nearest(*p, max_ring=2)[0] <= COVER_DIST) / len(moved[::5])
+        if best is None or med < best[0]:
+            best = (med, p90, cover, s, c, sn, tx, ty, mirror, moved)
+    med, p90, cover, s, c, sn, tx, ty, mirror, moved = best
+    fit = Fit(False, "", [list(map(lambda v: round(v, 1), p)) for p in moved], round(med / 10, 1),
+              round(p90 / 10, 1), round(cover, 2), round(s, 3), mirror, round(math.degrees(math.atan2(sn, c)), 1))
+    if not SCALE_OK[0] <= s <= SCALE_OK[1]:
+        fit.reason = f"scale {s:.2f} implausible - another layout?"
+    elif med > MEDIAN_OK or p90 > P90_OK:
+        fit.reason = f"does not fit the positions (median {med / 10:.1f} m, 90% {p90 / 10:.1f} m) - another layout?"
+    elif cover < COVER_OK:
+        fit.reason = f"positions cover only {cover:.0%} of the outline yet"
+    else:
+        fit.ok = True
+        fit.reason = f"fits the car positions (median {med / 10:.1f} m, 90% within {p90 / 10:.1f} m)"
+    return fit

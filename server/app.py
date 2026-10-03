@@ -75,6 +75,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
 
     remote = RemoteController(cfg["remote"], engine.order, publish_ui)
     remote.sync_hook = engine.sync_command
+    remote.track_hook = engine.track_report
     remote.auto_cycle_seconds = int(cfg["dashboard"].get("auto_cycle_seconds", 20))
     voyo_cfg = cfg.get("voyo") or {}
     remote.set_default_tv_mode(str(voyo_cfg.get("default_tv_mode", "RACE_VIEW")).upper())

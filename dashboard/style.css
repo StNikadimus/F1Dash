@@ -609,3 +609,4 @@ div.sm-keys { margin-top: 8px; }
 .fia-m b { color: var(--text-3); font-family: var(--mono); margin-right: 4px; }
 
 .tel-stale { opacity: .45; }
+.track-report { color: #ffb000; font-weight: 800; text-decoration: none; pointer-events: auto; }
