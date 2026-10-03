@@ -34,6 +34,8 @@ COMMANDS = {
     # VOYO <-> F1 synchronisation
     "SYNC_PLUS", "SYNC_MINUS", "SYNC_ADJUST", "SYNC_MARK", "SYNC_RESYNC", "SYNC_DEBUG", "PITLANE_DEBUG",
     "SYNC_START", "SYNC_CONFIRM", "SYNC_CLEAR", "SYNC_PIN", "SYNC_MENU", "SYNC_KEEP_OLD", "SYNC_USE_NEW",
+    # track map wrong: rebuild the outline of this circuit (pit lane kept)
+    "TRACK_REPORT",
 }
 SYNC_ACTIONS = {"SYNC_PLUS", "SYNC_MINUS", "SYNC_ADJUST", "SYNC_MARK", "SYNC_RESYNC",
                 "SYNC_START", "SYNC_CONFIRM", "SYNC_CLEAR", "SYNC_PIN", "SYNC_KEEP_OLD", "SYNC_USE_NEW"}
@@ -97,6 +99,7 @@ class RemoteController:
         self._rate: list[float] = []
         # set by the app: executes SYNC_* commands, returns a toast text (or None if rejected)
         self.sync_hook: Optional[Callable[[str, Optional[str]], Optional[str]]] = None
+        self.track_hook: Optional[Callable[[], str]] = None
 
     # ------------------------------------------------------------------
     def check_token(self, supplied: Optional[str]) -> bool:
@@ -264,6 +267,12 @@ class RemoteController:
             else:
                 self.ui.view = "overview"
         # ---- sync -----------------------------------------------------------
+        elif name == "TRACK_REPORT":
+            if self.track_hook is None:
+                return False
+            text = self.track_hook()
+            log.info("Track map: %s", text)
+            self._toast(text)
         elif name == "PITLANE_DEBUG":
             self.ui.pit_debug = not self.ui.pit_debug
         elif name in ("SYNC_MENU", "SYNC_DEBUG"):

@@ -26,7 +26,8 @@ from .telemetry import POS_FRESH_MS, parse_utc
 from .timeline import INF, Timeline
 from .pitlane import (PitLaneCollector, Reconstruction, collect_from_events, needs_reconstruction, reconstruct,
                       traversals_from_samples)
-from .track import OutlineLearner, TrackGeometry, TrackProvider
+from .track import OutlineLearner, TrackGeometry, TrackProvider, outline_problem
+from .track_match import MIN_SAMPLES, fit_reference, reference_id, reference_points
 
 log = logging.getLogger("engine")
 
@@ -74,6 +75,12 @@ class Engine:
         self.availability = Availability(token_configured=token_configured)
         self.geometry: Optional[TrackGeometry] = None
         self.outline_learner = OutlineLearner()
+        # known circuit layout fitted onto the car positions (server/track_match.py)
+        self._ref_samples: list = []
+        self._ref_task: Optional[asyncio.Task] = None
+        self._ref_last = 0.0
+        self._ref_note: Optional[str] = None
+        self._report_armed = 0.0
         # pit lane (cache-first): live/replay learn incrementally, VOD from the loaded archive
         self.pit_collector: Optional[PitLaneCollector] = None
         self._pit_ctx: dict = {}
@@ -602,6 +609,7 @@ class Engine:
     def _reset_side_state(self) -> None:
         log.info("Resetting session state")
         self.outline_learner = OutlineLearner()
+        self._ref_samples = []
         self.availability.positions = False
         self.availability.car_data = False
         self.availability.positions_source = None
@@ -652,14 +660,15 @@ class Engine:
                 self._track_task.cancel()
             self._track_task = asyncio.create_task(self._load_track(tid[0], year, circuit.get("ShortName")))
 
-    async def _load_track(self, key: int, year: Optional[int], name: Optional[str]) -> None:
+    async def _load_track(self, key: int, year: Optional[int], name: Optional[str], rebuild: bool = False) -> None:
         override = getattr(self.source, "geometry", None)
         if override is not None:
             geo = override
         else:
             geo = await self.tracks.load(key, year, name)
         self.geometry = geo
-        if geo is not None and not self.vod:
+        # (a rebuild of the outline never restarts or resets the pit-lane learning)
+        if geo is not None and not self.vod and not rebuild:
             self._pit_start_learning(geo, key, year, name)
         last = getattr(self, "_pit_last", None)
         if geo is not None and self.vod and last and last[0] == key:
@@ -823,14 +832,104 @@ class Engine:
         if self.source.mode == "test":
             return
         geo = self.geometry
-        if geo is None and self.tracks.learn_outline and self._track_id and self._track_id[0] is not None:
+        if not (self.tracks.learn_outline and self._track_id and self._track_id[0] is not None):
+            return
+        if geo is None or geo.source == "learned":
+            # positions of cars on the track (not in the pit lane) for the known-layout fit
+            for num, x, y, on_track in sample["cars"]:
+                if on_track and not self._in_pit.get(num, False):
+                    self._ref_samples.append((x, y))
+            if len(self._ref_samples) > 24000:
+                del self._ref_samples[::2]          # keep the spread, halve the count
+        if geo is None:
             for num, x, y, _ in sample["cars"]:
                 self.outline_learner.observe(num, x, y, self._laps.get(num), self._in_pit.get(num, False))
             if self.outline_learner.result:
-                si = self.feed_state.get("SessionInfo") or {}
-                name = ((si.get("Meeting") or {}).get("Circuit") or {}).get("ShortName") or ""
-                self.geometry = self.tracks.save_outline(self._track_id[0], name, self.outline_learner.result)
+                pts = self.outline_learner.result
+                why = outline_problem(pts)
+                if why:
+                    # a lap with holes in the position stream: drawn it would miss part of the track
+                    log.info("Learned lap outline rejected (%s) - learning another lap", why)
+                    self.outline_learner = OutlineLearner()
+                    return
+                if "learned" in self.tracks.rejected(self._track_id[0]):
+                    return
+                self.geometry = self.tracks.save_outline(self._track_id[0], self._circuit_name(), pts)
+                self.tracks.attach_pitlane(self.geometry, self._track_id[1])
                 self.hub.set_track(self.geometry.to_dict())
+
+    def _circuit_name(self) -> str:
+        si = self.feed_state.get("SessionInfo") or {}
+        return ((si.get("Meeting") or {}).get("Circuit") or {}).get("ShortName") or ""
+
+    def _ref_poll(self, mono: float) -> None:
+        """Every 15 s while the outline is missing or only learned: fit the known layout of the
+        circuit onto the collected car positions (worker thread)."""
+        geo = self.geometry
+        if self._track_id is None or self._track_id[0] is None or (geo is not None and geo.source != "learned"):
+            return
+        if (self._ref_task is not None and not self._ref_task.done()) or mono - self._ref_last < 15:
+            return
+        if len(self._ref_samples) < MIN_SAMPLES or "reference" in self.tracks.rejected(self._track_id[0]):
+            return
+        si = self.feed_state.get("SessionInfo") or {}
+        meeting = si.get("Meeting") or {}
+        ref_id = reference_id(self._circuit_name(), meeting.get("Location"), meeting.get("Name"))
+        self._ref_last = mono
+        if ref_id is None:
+            if self._ref_note != "unknown":
+                self._ref_note = "unknown"
+                log.info("No known layout for circuit %s (%s) - the outline is learned from a lap",
+                         self._track_id[0], self._circuit_name())
+            return
+        self._ref_task = asyncio.get_event_loop().create_task(self._ref_fit(ref_id, list(self._ref_samples)))
+
+    async def _ref_fit(self, ref_id: str, samples: list) -> None:
+        key = self._track_id[0] if self._track_id else None
+        ref = reference_points(ref_id)
+        if ref is None or key is None:
+            return
+        fit = await asyncio.to_thread(fit_reference, ref, samples)
+        if self._track_id is None or self._track_id[0] != key:
+            return                                  # another circuit meanwhile
+        if not fit.ok:
+            if self._ref_note != fit.reason:
+                self._ref_note = fit.reason
+                log.info("Known layout %s for circuit %s: %s", ref_id, key, fit.reason)
+            return
+        geo = self.geometry
+        if geo is not None and geo.source not in ("learned",):
+            return
+        self.geometry = self.tracks.save_reference(key, self._circuit_name(), ref_id, fit)
+        self.geometry.year = self._track_id[1]
+        self.tracks.attach_pitlane(self.geometry, self._track_id[1])     # (read only: the cached pit lane)
+        self.hub.set_track(self.geometry.to_dict())
+
+    def track_report(self) -> str:
+        """"Track map wrong": the first request arms it, a second one within 8 s rebuilds the
+        outline of this circuit (cached outline deleted, the source shown rejected for it). The
+        pit lane - its cache and its learning - is not touched."""
+        if self._track_id is None or self._track_id[0] is None:
+            return "No circuit known yet"
+        now = time.monotonic()
+        if now - self._report_armed > 8:
+            self._report_armed = now
+            return "Track map wrong? Press again within 8 s to rebuild it (the pit lane is kept)"
+        self._report_armed = 0.0
+        key, year = self._track_id
+        src = self.geometry.source if self.geometry is not None else None
+        self.tracks.reset_circuit(key, src)
+        self.geometry = None
+        self.outline_learner = OutlineLearner()
+        self._ref_note = None
+        self._ref_last = 0.0
+        self.hub.set_track(None)
+        if self._track_task and not self._track_task.done():
+            self._track_task.cancel()
+        self._track_task = asyncio.get_event_loop().create_task(
+            self._load_track(key, year, self._circuit_name(), rebuild=True))
+        return (f"Track map of {self._circuit_name() or key} cleared ({src or 'none'} rejected) - rebuilding "
+                "from the car positions; the pit lane is kept")
 
     # ------------------------------------------------------------------ time helpers
     def _target_dt(self) -> datetime:
@@ -978,6 +1077,10 @@ class Engine:
                         log.info("%s", line)
                 except Exception:  # noqa: BLE001
                     self._parse_error("diagnostics")
+            try:
+                self._ref_poll(now)
+            except Exception:  # noqa: BLE001
+                self._parse_error("track-reference")
             if self.pit_collector is not None and now - self._pit_last_poll >= 2.0:
                 self._pit_last_poll = now
                 try:

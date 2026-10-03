@@ -147,7 +147,7 @@
     f: "KEY_F", F: "KEY_F", a: "KEY_A", A: "KEY_A", t: "KEY_T", T: "KEY_T",
     s: "KEY_S", S: "KEY_S", r: "KEY_R", R: "KEY_R", d: "KEY_D", D: "KEY_D",
     y: "KEY_Y", Y: "KEY_Y", l: "KEY_L", L: "KEY_L", c: "KEY_C", C: "KEY_C", x: "KEY_X", X: "KEY_X", k: "KEY_K", K: "KEY_K",
-    o: "KEY_O", O: "KEY_O", n: "KEY_N", N: "KEY_N", g: "KEY_G", G: "KEY_G",
+    o: "KEY_O", O: "KEY_O", n: "KEY_N", N: "KEY_N", g: "KEY_G", G: "KEY_G", w: "KEY_W", W: "KEY_W",
     "+": "KEY_KPPLUS", "=": "KEY_EQUAL", "-": "KEY_MINUS", "_": "KEY_MINUS",
   };
   document.addEventListener("keydown", (e) => {
@@ -805,7 +805,12 @@
     const a = S.availability || {};
     const ts = S.track_status || {};
     const legend = [];
-    if (tr && tr.source === "learned") legend.push("Outline learned from live positions");
+    if (tr) {
+      const src = { multiviewer: "Track: MultiViewer", reference: "Track: known layout fitted to the car positions",
+                    learned: "Track: learned from one lap of positions", test: "" }[tr.source];
+      if (src) legend.push(src);
+      if (tr.source !== "test") legend.push('<a href="#" id="track-report" class="track-report" title="Rebuild the outline of this circuit (the pit lane is kept). Key W twice.">MAP WRONG?</a>');
+    }
     if (tr) {
       const pi = tr.pitlane_info || {};
       const n = (x) => `${x} pass${x === 1 ? "" : "es"}`;
@@ -829,6 +834,8 @@
       legend.push(`Positions: public F1 archive stream${a.positions_age_s !== null && a.positions_age_s !== undefined ? ` · ${Math.round(a.positions_age_s)} s behind` : ""}`);
     }
     $("map-legend").innerHTML = legend.join(" · ");
+    const rep = document.getElementById("track-report");
+    if (rep) rep.onclick = (e) => { e.preventDefault(); send({ type: "command", command: "TRACK_REPORT" }); };
 
     const notice = $("map-notice");
     let msg = "";

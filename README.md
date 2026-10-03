@@ -343,6 +343,24 @@ cached in `data/tracks/`. Pre-download a season (recommended before a weekend):
 python tools/fetch_tracks.py --year 2026 --pitlane
 ```
 
+When MultiViewer is not reachable, the outline comes from a **known layout fitted onto the
+real car positions** (`server/track_match.py`): the circuit's outline from the bundled
+[bacinger/f1-circuits](https://github.com/bacinger/f1-circuits) collection
+(`server/reference_tracks/`, MIT) is rotated / mirrored / scaled / shifted (coarse search + ICP)
+onto the positions of the cars on track, and used only if it fits all around the lap
+(median ≤ 7 m, 90 % ≤ 16 m, ≥ 85 % of the outline covered, scale 0.85–1.18; on a real lap of
+the 2025 Azerbaijan GP: median 2.9 m, scale 1.001). A layout that does not fit (another
+configuration) or too little data → not used. Only if no known layout fits, the outline is
+learned from one lap of positions – and only kept when it is a closed loop of 2.5–8 km
+without gaps (a hole in the position stream used to draw part of the track as missing / a
+straight line). The map legend says which source is shown.
+
+**Track map wrong?** Click **MAP WRONG?** in the map legend (or press **W**), then once more
+within 8 s. That deletes the cached outline of *this* circuit (`mv_*`, `ref_*`, `learned_*`
+in `data/tracks/`), never uses the source that was shown for it again
+(`data/tracks/track_reports.json`; when all sources were rejected the list starts over) and
+builds the outline again. **The pit lane – its cache and its learning – is not touched.**
+
 The pit lane is not part of that dataset. It is **reconstructed automatically**
 (`server/pitlane.py`) and cached per circuit – cache-first:
 

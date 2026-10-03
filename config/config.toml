@@ -177,6 +177,7 @@ KEY_K = "SYNC_PIN"                # manual anchor: "the dashboard time is right 
 KEY_O = "SYNC_KEEP_OLD"           # after "possible sync drift": keep the current sync
 KEY_N = "SYNC_USE_NEW"            # ... or use the new anchor (the old one stays in the history)
 KEY_R = "SYNC_RESYNC"
+KEY_W = "TRACK_REPORT"            # track map wrong: press twice within 8 s -> rebuild it (pit lane kept)
 KEY_D = "SYNC_DEBUG"              # = SYNC menu
 KEY_Y = "SYNC_MENU"               # SYNC menu (countdown / exact time / automatic / estimate)
 KEY_EQUAL = "SYNC_PLUS"           # + : more delay (dashboard shows older data)
