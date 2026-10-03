@@ -83,6 +83,22 @@ def circuit_location(ref_id: Optional[str]) -> Optional[tuple[float, float]]:
     return None
 
 
+def circuit_outline_latlon(ref_id: Optional[str], max_points: int = 120) -> Optional[list]:
+    """The known layout's outline as [[lat, lon], ...] (bundled GeoJSON, real coordinates) - the
+    circuit marker on the weather radar."""
+    if not ref_id:
+        return None
+    try:
+        gj = json.loads((REF_DIR / f"{ref_id}.geojson").read_text(encoding="utf-8"))
+        coords = gj["features"][0]["geometry"]["coordinates"]
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return None
+    if coords and isinstance(coords[0][0], list):          # MultiLineString / Polygon
+        coords = coords[0]
+    step = max(1, len(coords) // max_points)
+    return [[round(c[1], 5), round(c[0], 5)] for c in coords[::step]]
+
+
 def _index() -> list:
     try:
         return json.loads((REF_DIR / "f1-locations.json").read_text(encoding="utf-8"))

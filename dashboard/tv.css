@@ -29,6 +29,12 @@
 #stage.tv-RACE_VIEW .wx-box .wx-tiles .tile .v { font-size: 20px; }
 #stage.tv-RACE_VIEW .wx-box .wx-text { font-size: 16px; }
 #stage.tv-RACE_VIEW .wx-box h2 { font-size: 20px; white-space: nowrap; }
+#stage.tv-RACE_VIEW .wx-cols { grid-template-columns: 250px 1fr; gap: 10px; }
+#stage.tv-RACE_VIEW .wx-radar .wx-tiles { grid-template-columns: 1fr; }
+#stage.tv-RACE_VIEW .wx-legend { gap: 5px; font-size: 9px; }
+#stage.tv-RACE_VIEW .wx-info .wx-tiles { grid-template-columns: repeat(2, 1fr); }
+#stage.tv-RACE_VIEW .wx-box .wx-sec { margin: 6px 0 4px; }
+#stage.tv-RACE_VIEW .wx-box .wx-text.dim, #stage.tv-RACE_VIEW .wx-foot { display: none; }
 #stage.tv-RACE_VIEW .wx-box h2 .wx-lap { font-size: 16px; }
 #stage.tv-RACE_VIEW #rc-panel { position: absolute; left: 934px; top: 728px; width: 560px; height: 344px; }
 #stage.tv-RACE_VIEW #race-info { display: flex; position: absolute; left: 1502px; top: 728px; width: 410px; height: 344px; }

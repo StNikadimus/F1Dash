@@ -529,7 +529,21 @@ RACE VIEW over the leaderboard, never under the VOYO window).
   none, and the text never contains a value that is not in the data.
 * Missing data stays **N/A** (never 0 °C / 0 % / NONE); without a forecast the current conditions
   are still shown ("Weather forecast unavailable"). No popup when there is no weather data at all.
-* TEST mode: no automatic popup (`test_auto = true` enables it); simulated forecasts with
+* **RADAR** (`server/radar.py`, `[weather.radar]`): a map centred on the circuit (~100 km radius),
+  the circuit marked above the precipitation (ring + the real outline from the bundled layout,
+  magnified so it stays visible + name), range rings, north, a movement arrow, PAST -> NOW ->
+  FORECAST animation. Imagery: **RainViewer** radar tiles (observed radar composite, 10-min frames,
+  nowcast frames when RainViewer lists them). Numbers - intensity at the circuit, movement
+  (APPROACHING / MOVING AWAY / OVER CIRCUIT / FORMING / DISSIPATING / STATIONARY) and **RAIN ETA**
+  (`~8 MIN / LAP 34`, `NOW`, `UNCERTAIN`, `RAIN POSSIBLE`): the **Open-Meteo 15-min precipitation**
+  grid (9 x 9 points; the same thresholds). ETA = mean of (a) the first forecast step with >= LIGHT
+  at the circuit and (b) the nearest rain's distance / approach speed when both agree within
+  20 min, otherwise the one there is (lower confidence) or UNCERTAIN; laps from the leader's pace.
+  Fetched only for a report, kept 3 min; a failed refresh keeps data < 15 min old, labelled
+  "updated N min ago"; older -> RADAR UNAVAILABLE (the rest of the report stays). No radar for a
+  recording.
+* TEST mode: no automatic popup (`test_auto = true` enables it); radar test states
+  `WEATHER_REPORT:norain|approaching|over|away|heavyrain|radaroff`; simulated forecasts with
   `WEATHER_REPORT:dry|drizzle|light|medium|heavy|stopping|noforecast|disagree` (phone remote:
   "TEST mode: simulated weather"). Log lines: `[WEATHER] Current: …`, `[WEATHER] Forecast: …`,
   `[WEATHER] Report generated for lap 15`.
