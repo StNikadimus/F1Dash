@@ -290,7 +290,7 @@ What the authenticated data adds, when F1 actually sends it:
 | Per-driver Overtake mode | – | **not in the feed → always N/A** |
 | Safety-car position | – | the SC is not in Position.z → **N/A** (SC status is shown) |
 | DNF / IN PIT next to the driver | `Retired`, or `Stopped` with no sector/lap data for 60 s → **DNF**; `InPit` for > 75 s (or DNF in the pit) → **IN PIT** (garage) and the car is not drawn on the map. An `InPit` flag that stays set while the car keeps setting sectors (lost "left the pit" message, seen in real 2026 data) is ignored | derived from TimingData / TimingDataF1, kept with the checkpoints (correct after seeking) |
-| Pit lane geometry | reconstructed from real positions of complete pit-lane passes (`InPit` / `PitOut` / `PitLaneTimeCollection`) | cached per circuit; else after the first complete passes (VOD: at once from the loaded session) |
+| Pit lane geometry | reconstructed from real positions of complete pit-lane passes (`InPit` / `PitOut` / `PitLaneTimeCollection`) of the **last finished race at this circuit in the F1 archive** | cached per circuit; else loaded from the archive as soon as the circuit is known – no pit stop of the current session needed (§8) |
 
 ## 7a. Car positions without F1 TV – what the code of other projects shows
 
@@ -337,7 +337,10 @@ Real circuit geometry comes from the MultiViewer circuit API (the dataset
 FastF1 uses), in the same coordinate system as `Position.z`, including rotation,
 corner numbers and marshal sectors. It is chosen by `SessionInfo.Meeting.Circuit.Key`
 (every circuit on the calendar, no hard-coding), downloaded on first use and
-cached in `data/tracks/`. Pre-download a season (recommended before a weekend):
+cached in `data/tracks/`. When there is no outline for the current season yet (early in a
+weekend), the circuit's outline of the previous / the season before is used (log: *No
+MultiViewer outline of circuit X for Y - using its Z outline*). Pre-download a season
+(recommended before a weekend):
 
 ```bash
 python tools/fetch_tracks.py --year 2026 --pitlane
@@ -355,15 +358,19 @@ learned from one lap of positions – and only kept when it is a closed loop of 
 without gaps (a hole in the position stream used to draw part of the track as missing / a
 straight line). The map legend says which source is shown.
 
+**Circuit identity comes from the session metadata only:** `SessionInfo.Meeting.Circuit.Key`
+(F1's own circuit id, e.g. Baku 144, Sakhir 63, Suzuka 46) for the cache and MultiViewer, and
+the circuit short name / location / meeting name for the bundled known layout. The circuit is
+**never guessed from the shape of the car positions** – when the metadata names no known
+layout, nothing is substituted (choose it yourself, below).
+
 **Every drawn outline is checked against the cars.** Once ~1500 positions of cars on track
 are in, every minute: if more than 5 % of them are > 40 m away from the drawn track (part of it
 missing, or another layout – also when it came from MultiViewer), the outline is replaced by the
-known layout that fits (legend: "auto-corrected"). If the circuit's name is unknown or its layout
-does not fit, every bundled layout is tried (quick ranking, full fit of the best 3; ~30 s in the
-background). On a real Baku lap: a half outline is detected (33 % of positions off), Baku is
-identified without its name.
+known layout *of this circuit* (from its name) when that fits (legend: "auto-corrected"). On a
+real Baku lap: a half outline is detected (33 % of positions off) and replaced.
 
-**Choose the circuit yourself:** **CHOOSE CIRCUIT** in the map legend → pick one of the 40
+**Choose the circuit yourself:** **CIRCUIT…** in the map legend → pick one of the 40
 known layouts (or *Automatic*). It is saved per circuit (`data/tracks/track_choice.json`) and wins
 over every other source; it is fitted onto the car positions (without positions yet it is shown
 as it is, north up, without cars). API: `GET /api/track/layouts`, `POST /api/track/choice`
@@ -375,14 +382,34 @@ in `data/tracks/`), never uses the source that was shown for it again
 (`data/tracks/track_reports.json`; when all sources were rejected the list starts over) and
 builds the outline again. **The pit lane – its cache and its learning – is not touched.**
 
-The pit lane is not part of that dataset. It is **reconstructed automatically**
-(`server/pitlane.py`) and cached per circuit – cache-first:
+The pit lane is not part of that dataset (no source publishes it as a line). It is static
+circuit geometry, so it is **loaded as soon as the circuit is known – it never waits for a pit
+stop of the session you watch** (`server/pitlane_seed.py`, `server/pitlane.py`), cache-first:
 
 1. session opened → circuit (`circuit_key`, never the GP name, the media id or the session)
    → `data/tracks/pitlane_geometry_<circuit_key>.json`;
-2. a **verified** pit lane seen in this season → drawn at once, nothing is recomputed
-   (Baku race today → Baku qualifying / another recording of Baku tomorrow: already there);
-3. otherwise: **complete pit-lane passes** are collected – pit entry line (`InPit` rising) →
+2. a **verified** pit lane in the cache (this season, or an earlier one not superseded by a
+   different layout) → drawn at once, nothing is recomputed or downloaded;
+3. otherwise it is **built from the F1 archive** right away: the official live-timing archive
+   (`livetiming.formula1.com/static/<year>/Index.json`) is searched for finished sessions with
+   the same `Meeting.Circuit.Key` (this season and the two before; races first, then sprints,
+   qualifying, practice; newest first; the running session excluded). The `Position.z`,
+   `TimingDataF1` and `PitLaneTimeCollection` streams of the best one (a race: 20–60 normal pit
+   stops of many drivers) go through the reconstruction below; up to 3 sessions are tried.
+   Legend: `Pit lane loading…` → `Pit lane ✓`. Why: in practice almost every pit visit is a
+   garage stay (> 120 s → rejected below), so a pit lane learned only from the current session
+   was usually never drawn in FP – and is never drawn from one driver;
+4. nothing reliable (archive unreachable, no finished session here, too few agreeing passes)
+   → **`Pit lane geometry unavailable`** in the legend / log / diagnostics, with the reason – no
+   lane is invented. Then (only then) the current session's own complete passes are collected
+   as before (≥ 3 agreeing passes for HIGH);
+5. a **known (verified) pit lane is never replaced by live samples**: each live complete pass
+   is only compared with it (≤ 8 m median deviation = agrees; log *Live pit pass … matches* /
+   *does NOT match*; diagnostics `validation: n of m live passes agree`).
+
+Reconstruction of passes (archive or live):
+
+1. **complete pit-lane passes** are collected – pit entry line (`InPit` rising) →
    pit lane → pit exit line (`InPit` falling / `PitOut`), cross-checked with the official
    pit-lane time (`PitLaneTimeCollection`; in the 2026 feed the `InPit` edge is often
    missing, then entry = exit − official time). A stop alone, a few points at the entry,
@@ -403,7 +430,34 @@ The pit lane is not part of that dataset. It is **reconstructed automatically**
    caches of an older reconstruction.
 
 VOD: the whole session is searched once when its data is loaded (in the background).
-Live / replay: passes are collected as they happen; learning stops once it is verified.
+Live / replay: the archive seed runs at circuit identification; live passes then only validate
+(or, when no lane is available, are collected until one is verified). TEST mode uses its
+synthetic test pit lane (no download).
+
+**Map validation** (log at load, when the pit lane arrives and every 5 min; also in
+`/api/diagnostics?format=text`):
+
+```
+Track: Azerbaijan Grand Prix - Baku (circuit_key 144, season 2026, layout az-2016)
+Track geometry: OK - MultiViewer 2026 (202 points)
+Pit lane geometry: OK - F1 archive: Azerbaijan Grand Prix Race 2025 - HIGH, 4 passes
+Position mapping: OK - median 3.1 m from the track
+Drivers mapped: 20/20 with a fresh position (20 drivers)
+Safety car position: not available - not provided by the feed (Position.z carries cars only)
+```
+
+All of track, pit lane, cars and a safety car marker use the **same transform**: F1 `Position.z`
+X/Y (decimetres, local circuit coordinates) → rotated by the circuit's MultiViewer rotation →
+scaled/centred into the map canvas. A car > 50 m from both track and pit lane is listed by
+number (a wrong map is visible, not hidden). The safety car is drawn only if its position is
+actually in `Position.z` under a configured key (`[f1_tv] safety_car_position_keys`); otherwise
+the SC *status* is shown with "position not provided by the feed".
+
+**Messages never cover the map:** the map panel is split into the map area (canvas only) and a
+footer below it – line 1: important race-control status (red flag, SC/VSC, yellow sectors),
+line 2: compact legend (`Track ✓ source`, `Pit lane ✓ / loading… / ✗ unavailable`, MAP WRONG?,
+CIRCUIT…). Details (sources, reconstruction) are in tooltips, the **G** debug view and the
+diagnostics, not on the map.
 
 Map: the pit lane is drawn as a smaller road that branches off and rejoins the track, with
 the entry/exit lines. Where it runs so close to the main straight that the two roads would

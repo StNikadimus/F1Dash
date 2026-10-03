@@ -152,6 +152,15 @@ def format_report(rep: dict) -> str:
                  f"({cd.get('with_data', 0)} with any); channels seen: {', '.join(cd.get('channels') or []) or '-'}")
     sc = rep.get("safety_car_position") or {}
     lines.append(f"Safety car position: {'AVAILABLE' if sc.get('available') else 'not available'} - {sc.get('reason')}")
+    mv = rep.get("map_validation") or {}
+    if mv:
+        i = mv.get("identity") or {}
+        lines.append(f"Track: {i.get('meeting') or '?'} - {i.get('name') or '?'} (circuit_key {i.get('circuit_key')}, "
+                     f"layout {i.get('layout') or 'unknown'})")
+        lines.append(f"Track geometry: {'OK - ' if mv['track']['ok'] else ''}{mv['track']['detail']}")
+        lines.append(f"Pit lane geometry: {'OK - ' if mv['pit_lane']['ok'] else ''}{mv['pit_lane']['detail']}")
+        pm = mv.get("positions") or {}
+        lines.append(f"Position mapping: {pm.get('detail')} · drivers mapped {pm.get('mapped')}/{pm.get('with_position')}")
     for k, label in (("track_geometry", "Track geometry"), ("tyres", "Tyre data"), ("race_control", "Race control"),
                      ("weather", "Weather"), ("track_status", "Track status")):
         v = rep.get(k) or {}

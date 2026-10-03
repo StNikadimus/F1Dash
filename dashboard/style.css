@@ -157,11 +157,22 @@ html, body {
 #view-panel { flex: 1 1 auto; min-height: 0; }
 
 /* ------------------------------------------------------------------ map */
+/* the map panel = title row + MINI_MAP_RECT (#map-area) + MESSAGE_RECT (#map-footer): they never overlap */
+#map-panel { display: flex; flex-direction: column; }
+#map-area { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
 #map { position: absolute; inset: 0; width: 100%; height: 100%; }
-.map-title { position: absolute; left: 14px; top: 10px; font-size: 18px; font-weight: 800;
-  letter-spacing: .1em; color: var(--text-2); text-transform: uppercase; }
-.map-legend { position: absolute; left: 14px; bottom: 10px; font-size: 14px; font-weight: 700;
-  color: var(--text-3); letter-spacing: .04em; max-width: 70%; }
+.map-title { flex: 0 0 auto; padding: 8px 14px 0; font-size: 18px; font-weight: 800;
+  letter-spacing: .1em; color: var(--text-2); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#map-footer { flex: 0 0 auto; border-top: 1px solid var(--line); padding: 4px 12px 6px; display: flex;
+  flex-direction: column; gap: 2px; min-height: 46px; justify-content: center; }
+.map-status { font-size: 16px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; min-height: 20px; }
+.map-status small { font-weight: 600; color: var(--text-2); }
+.map-status .st-sc { color: var(--amber); } .map-status .st-red { color: var(--red); }
+.map-footer-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.map-legend { flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 700; color: var(--text-3);
+  letter-spacing: .04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-legend .ok { color: var(--green, #3ad07a); } .map-legend .bad { color: var(--red); }
 .map-legend .flag-y { color: var(--yellow); }
 .map-notice {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
@@ -170,11 +181,10 @@ html, body {
   max-width: 88%;
 }
 .map-notice small { display: block; font-size: 16px; color: var(--text-2); font-weight: 600; margin-top: 6px; letter-spacing: .02em; }
-.pit-box { position: absolute; right: 12px; top: 10px; background: rgba(13,18,24,.9);
-  border: 1px solid var(--line-2); border-radius: 6px; padding: 6px 12px; font-size: 18px; font-weight: 800; }
+.pit-box { flex: 0 0 auto; font-size: 14px; font-weight: 800; white-space: nowrap; }
 .pit-box .lbl { color: var(--text-3); letter-spacing: .12em; font-size: 14px; }
-.test-watermark { position: absolute; right: 12px; bottom: 10px; font-size: 16px; font-weight: 900;
-  color: var(--orange); letter-spacing: .14em; opacity: .9; }
+.test-watermark { flex: 0 0 auto; font-size: 13px; font-weight: 900; white-space: nowrap;
+  color: var(--orange); letter-spacing: .1em; }
 
 /* flag treatment of the whole dashboard */
 #stage.flag-RED .panel { border-color: var(--red); }

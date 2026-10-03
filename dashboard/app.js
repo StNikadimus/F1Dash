@@ -829,46 +829,65 @@
     }).catch(() => { box.innerHTML = "<b>CHOOSE CIRCUIT</b><div>not available</div>"; });
   }
   function renderMapInfo() {
+    // Everything here goes to the MESSAGE_RECT under the map (#map-footer) - never over the map.
     const tr = S.track;
     const s = S.session || {};
     $("map-title").textContent = tr ? tr.name : s.circuit_name || "";
     const a = S.availability || {};
     const ts = S.track_status || {};
-    const legend = [];
-    if (tr) {
-      const inf = tr.info || {};
-      const src = { multiviewer: "Track: MultiViewer",
-                    reference: `Track: ${inf.chosen ? "your choice" : "known layout"} ${esc(inf.ref_id || "")}` +
-                      (inf.unaligned ? "" : " fitted to the cars"),
-                    learned: "Track: learned from one lap of positions", test: "" }[tr.source];
-      if (src) legend.push(src + (inf.unaligned ? " (not aligned yet - waiting for car positions)" :
-        inf.note && !inf.chosen ? ` <span title="${esc(inf.note)}">(auto-corrected)</span>` : ""));
-      if (tr.source !== "test") legend.push('<a href="#" id="track-report" class="track-report" title="Rebuild the outline of this circuit (the pit lane is kept). Key W twice.">MAP WRONG?</a>');
-    }
-    if (S.mode !== "test" && (tr || s.circuit_key)) {
-      legend.push('<a href="#" id="track-choose" class="track-report" title="Choose the circuit layout yourself">CHOOSE CIRCUIT</a>');
-    }
-    if (tr) {
-      const pi = tr.pitlane_info || {};
-      const n = (x) => `${x} pass${x === 1 ? "" : "es"}`;
-      if (tr.pitlane) {
-        legend.push(`Pit lane: ${pi.state === "reconstructed" ? "reconstructed" : "cached"} (${pi.confidence || "?"}` +
-          `${pi.traversals ? " · " + n(pi.traversals) : ""}${pi.status === "provisional" ? " · provisional" : ""})`);
-      } else if (pi.state === "learning") {
-        legend.push(`Pit lane: learning… ${n(pi.passes || 0)}`);
-      } else {
-        legend.push("Pit lane: N/A (reconstructed from the first complete passes through the pit lane)");
-      }
+
+    // ---- line 1: what matters during the session (flags, safety car, data problems)
+    const status = [];
+    const sc = (S.map || {}).safety_car || {};
+    if (ts.status === "RED") status.push('<span class="st-red">RED FLAG</span>');
+    if (["SC", "VSC", "VSC_ENDING"].includes(ts.status)) {
+      const label = ts.status === "SC" ? "SAFETY CAR" : ts.status === "VSC" ? "VIRTUAL SAFETY CAR" : "VSC ENDING";
+      status.push(`<span class="st-sc">${label}</span>` + (ts.status === "SC"
+        ? ` <small>· position ${sc.available ? (sc.fresh ? "on the map" : "STALE") : "not provided by the feed"}</small>` : ""));
     }
     const ys = Object.entries(ts.sector_flags || {});
-    if (ys.length) legend.push(`<span class="flag-y">${ys.map(([k, f]) => (f === "DOUBLE YELLOW" ? "DY" : "Y") + " MS" + k).join("  ")}</span>`);
-    if (["SC", "VSC", "VSC_ENDING"].includes(ts.status)) {
-      const sc = (S.map || {}).safety_car || {};
-      legend.push(sc.available ? `Safety car position: ${sc.fresh ? "live" : "STALE"} (Position.z ${esc(sc.key)})`
-        : `Safety car position: N/A (${esc(sc.reason || "not in F1 feed")})`);
+    if (ys.length) status.push(`<span class="flag-y">${ys.map(([k, f]) => (f === "DOUBLE YELLOW" ? "DY" : "Y") + " MS" + k).join("  ")}</span>`);
+    let dataMsg = "";
+    if (tr && !a.positions) {
+      dataMsg = S.mode === "live" && s.live
+        ? (a.token_configured ? "Live car positions: not received yet" : "Live car positions: N/A for anonymous connections")
+        : "No car positions received";
+    } else if (a.positions && a.positions_source === "archive") {
+      dataMsg = `Positions from the public archive stream${has(a.positions_age_s) ? ` · ${Math.round(a.positions_age_s)} s behind` : ""}`;
     }
-    if (a.positions && a.positions_source === "archive") {
-      legend.push(`Positions: public F1 archive stream${a.positions_age_s !== null && a.positions_age_s !== undefined ? ` · ${Math.round(a.positions_age_s)} s behind` : ""}`);
+    if (S.mode === "live" && !s.live && s.status && S.status.next_session && tr) {
+      const ns = S.status.next_session, d = utcDate(ns.start_utc);
+      dataMsg = `No live session · next: ${esc(ns.meeting || "")} ${esc(ns.session || "")}` +
+        (d ? " " + d.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }) : "");
+    }
+    if (dataMsg) status.push(`<small>${dataMsg}</small>`);
+    $("map-status").innerHTML = status.join(" · ");
+
+    // ---- line 2: compact map status (details: tooltip, /api/diagnostics, the server log)
+    const legend = [];
+    if (tr && tr.source !== "test") {
+      const inf = tr.info || {};
+      const src = { multiviewer: "MultiViewer", reference: (inf.chosen ? "your choice " : "known layout ") + (inf.ref_id || ""),
+                    learned: "learned lap" }[tr.source] || tr.source;
+      const title = inf.unaligned ? "not aligned to the car positions yet" : (inf.note || inf.fit || inf.check || "");
+      legend.push(`<span title="${esc(title)}">Track <span class="ok">✓</span> ${esc(src)}${inf.unaligned ? " (not aligned)" : ""}</span>`);
+    } else if (!tr && s.circuit_key) {
+      legend.push('Track <span class="bad">✗</span>');
+    }
+    if (tr && tr.source !== "test") {
+      const pi = tr.pitlane_info || {};
+      if (tr.pitlane) {
+        legend.push(`<span title="${esc((pi.source || "") + " · " + (pi.confidence || "") + " · " + (pi.traversals || "?") + " passes")}">` +
+          `Pit lane <span class="ok">✓</span></span>`);
+      } else if (pi.state === "loading" || pi.state === "learning") {
+        legend.push(`<span title="${esc(pi.note || "")}">Pit lane: loading…</span>`);
+      } else {
+        legend.push(`<span title="${esc(pi.note || "")}">Pit lane <span class="bad">✗</span> unavailable</span>`);
+      }
+    }
+    if (tr && tr.source !== "test") legend.push('<a href="#" id="track-report" class="track-report" title="Rebuild the outline of this circuit (the pit lane is kept). Key W twice.">MAP WRONG?</a>');
+    if (S.mode !== "test" && (tr || s.circuit_key)) {
+      legend.push('<a href="#" id="track-choose" class="track-report" title="Override the automatically detected circuit (debug / fallback)">CIRCUIT…</a>');
     }
     $("map-legend").innerHTML = legend.join(" · ");
     const rep = document.getElementById("track-report");
@@ -876,24 +895,12 @@
     const ch = document.getElementById("track-choose");
     if (ch) ch.onclick = (e) => { e.preventDefault(); openTrackMenu(); };
 
+    // ---- only when there is no map at all, a notice may use the map area (nothing to cover)
     const notice = $("map-notice");
     let msg = "";
     if (!tr) {
-      msg = s.circuit_key ? "TRACK MAP UNAVAILABLE<small>Circuit geometry could not be downloaded yet and has not been learned. It will be learned from position data automatically.</small>"
+      msg = s.circuit_key ? "TRACK MAP UNAVAILABLE<small>Circuit geometry not loaded yet (see the status below the map)</small>"
         : S.mode === "live" && S.status.state !== "connected" ? "CONNECTING TO F1 LIVE TIMING…" : "WAITING FOR SESSION";
-    } else if (!a.positions) {
-      msg = S.mode === "live" && s.live
-        ? "LIVE CAR POSITIONS: N/A<small>F1 does not send Position.z to " + (a.token_configured ? "this token" : "anonymous connections") +
-          " and the public archive stream of this session is not readable yet. Positions appear automatically as soon as either source delivers.</small>"
-        : "NO POSITION DATA RECEIVED<small>Car markers appear as soon as Position.z data arrives</small>";
-    }
-    if (S.mode === "live" && !s.live && s.status && S.status.next_session) {
-      const ns = S.status.next_session;
-      const d = utcDate(ns.start_utc);
-      const mins = d ? Math.round((d - Date.now()) / 60000) : null;
-      const when = d ? d.toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false }) : "";
-      const rel = mins === null ? "" : mins > 1440 ? `in ${Math.floor(mins / 1440)} d ${Math.floor((mins % 1440) / 60)} h` : mins > 60 ? `in ${Math.floor(mins / 60)} h ${mins % 60} min` : mins > 0 ? `in ${mins} min` : "starting";
-      msg = `NO LIVE SESSION<small>Next: ${esc(ns.meeting || "")} · ${esc(ns.session || "")} · ${esc(when)} (${rel})</small>`;
     }
     notice.innerHTML = msg;
     notice.hidden = !msg;
@@ -902,7 +909,7 @@
     const inPit = S.order.filter((n) => S.drivers[n] && S.drivers[n].in_pit && !S.drivers[n].in_garage).map((n) => S.drivers[n].tla || n);
     const pb = $("pit-box");
     pb.hidden = !inPit.length;
-    pb.innerHTML = `<span class="lbl">IN PIT</span> ${inPit.map(esc).join(" ")}`;
+    pb.innerHTML = `<span class="lbl">PIT</span> ${inPit.map(esc).join(" ")}`;
   }
 
   // ------------------------------------------------------------------ TV modes: compact info + focus bar
@@ -1817,6 +1824,7 @@
 
   new ResizeObserver(() => { layoutBoard(); Map2D.resize(); }).observe($("board"));
   new ResizeObserver(() => Map2D.resize()).observe($("map-panel"));
+  new ResizeObserver(() => Map2D.resize()).observe($("map-area"));
 
   window.VoyoPlayer && VoyoPlayer.init($("video-slot"), (t) => showToast(t));
   fit();
