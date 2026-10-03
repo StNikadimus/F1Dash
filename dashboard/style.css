@@ -426,20 +426,22 @@ button { transition: background-color var(--t-micro), border-color var(--t-micro
 
 /* leaderboard rows glide (transform) - the order is always the server's */
 .lb-row { top: 0; will-change: transform; transition: transform var(--reorder-ms) var(--ease-out), background-color var(--t-normal); }
-.lb-row[class*="ev-"]::after { content: attr(data-delta); position: absolute; left: 300px; top: 50%; transform: translateY(-50%);
-  font: 900 15px var(--mono); padding: 1px 7px; border-radius: 3px; pointer-events: none; animation: ev-chip .9s var(--ease-out) forwards; }
+/* the ▲n / ▼n chip is a flex item right after the TLA inside the driver cell - it never covers another column */
+.lb-row[class*="ev-"] .drv::after { content: attr(data-delta); flex: 0 0 auto; order: 1;
+  font: 900 15px var(--mono); line-height: 1.3; padding: 0 6px; border-radius: 3px; pointer-events: none; animation: ev-chip .9s var(--ease-out) forwards; }
+.lb-row .drv .tla { order: 0; } .lb-row .drv > :not(.tla) { order: 2; }
 .lb-row.ev-overtake { animation: ev-row-up .9s var(--ease-out); }
 .lb-row.ev-overtake::before { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--green);
   transform-origin: left; animation: ev-sweep .9s var(--ease-out) forwards; pointer-events: none; }
-.lb-row.ev-overtake::after, .lb-row.ev-gain::after { color: #04130b; background: var(--green); }
+.lb-row.ev-overtake .drv::after, .lb-row.ev-gain .drv::after { color: #04130b; background: var(--green); }
 .lb-row.ev-gain { animation: ev-row-gain .8s var(--ease-out); }
 .lb-row.ev-loss { animation: ev-row-down .7s var(--ease-out); }
-.lb-row.ev-loss::after { color: #fff; background: rgba(255,45,61,.85); }
+.lb-row.ev-loss .drv::after { color: #fff; background: rgba(255,45,61,.85); }
 @keyframes ev-row-up { 0% { background-color: rgba(0,210,120,.30); } 100% { background-color: transparent; } }
 @keyframes ev-row-gain { 0% { background-color: rgba(61,139,255,.26); } 100% { background-color: transparent; } }
 @keyframes ev-row-down { 0% { background-color: rgba(255,45,61,.14); } 100% { background-color: transparent; } }
 @keyframes ev-sweep { 0% { transform: scaleX(0); opacity: 1; } 60% { transform: scaleX(1); opacity: 1; } 100% { transform: scaleX(1); opacity: 0; } }
-@keyframes ev-chip { 0% { opacity: 0; transform: translate(-6px, -50%); } 20%, 75% { opacity: 1; transform: translate(0, -50%); } 100% { opacity: 0; transform: translate(0, -50%); } }
+@keyframes ev-chip { 0% { opacity: 0; transform: translateX(-6px); } 20%, 75% { opacity: 1; transform: none; } 100% { opacity: 0; transform: none; } }
 .lb-row .pit.ev-pit { animation: ev-pop .7s var(--ease-out); }
 .lb-row .tyre.ev-tyre { animation: ev-in .6s var(--ease-out); }
 .lb-row .best.ev-fastest span { animation: ev-fastest 1.1s var(--ease-out); border-radius: 3px; }
@@ -492,7 +494,7 @@ button { transition: background-color var(--t-micro), border-color var(--t-micro
  * short fades only; every state stays visible */
 @media (prefers-reduced-motion: reduce) {
   .lb-row { transition: background-color var(--t-micro) !important; }
-  .lb-row[class*="ev-"], .lb-row[class*="ev-"]::before, .lb-row[class*="ev-"]::after,
+  .lb-row[class*="ev-"], .lb-row[class*="ev-"]::before, .lb-row[class*="ev-"] .drv::after,
   .ev-pit, .ev-tyre, .ev-fastest span, .ev-sector, #map-flag i, .map-flagpill, #map-panel, #rc-panel, #track-status { animation: none !important; }
 }
 #stage.anim-reduced .lb-row { transition: background-color var(--t-micro) !important; }

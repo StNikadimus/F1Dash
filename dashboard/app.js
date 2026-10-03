@@ -756,7 +756,7 @@
     const race = (S.session || {}).session_kind === "race";
     for (const [, r, from, to] of changed) {
       const up = to < from;
-      r.el.dataset.delta = (up ? "▲" : "▼") + Math.abs(from - to);
+      r.cells.drv.dataset.delta = (up ? "▲" : "▼") + Math.abs(from - to);   // shown after the TLA (in its own cell)
       // the gainer travels above the others while the rows glide
       r.el.style.zIndex = up ? 3 : 2;
       clearTimeout(r.zt); r.zt = setTimeout(() => { r.el.style.zIndex = ""; }, 900);
