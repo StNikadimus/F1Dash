@@ -12,11 +12,14 @@ port = 8080
 log_level = "INFO"          # DEBUG, INFO, WARNING, ERROR
 
 [source]
+# Mode at start - switchable at any time on the dashboard (MODE: AUTO / LIVE / VOD, no restart):
+# "auto"   - AUTO: LIVE while an F1 session is on (90 min before its start .. 60 min after its
+#            end, official F1 schedule; re-checked every minute), otherwise VOD (VOYO recording)
 # "live"   - official F1 live timing feed (livetiming.formula1.com)
 # "test"   - built-in simulator (clearly marked TEST MODE on screen)
 # "replay" - replay a recorded session (see [replay])
 # "vod"    - follow a VOYO recording: the session shown in VOYO, at the video's time (see [vod])
-mode = "live"
+mode = "auto"
 
 # Classic fixed delay (seconds) used when the VOYO video layer is off and
 # [sync] mode = "AUTO". The delay is applied on F1's event-time axis (see [sync]).
@@ -178,6 +181,8 @@ KEY_O = "SYNC_KEEP_OLD"           # after "possible sync drift": keep the curren
 KEY_N = "SYNC_USE_NEW"            # ... or use the new anchor (the old one stays in the history)
 KEY_R = "SYNC_RESYNC"
 KEY_W = "TRACK_REPORT"            # track map wrong: press twice within 8 s -> rebuild it (pit lane kept)
+KEY_E = "CYCLE_MODE"              # MODE selector: AUTO -> LIVE -> VOD (applied after 1.5 s without another press)
+KEY_MENU = "CYCLE_MODE"           # (WD TV remote MENU); also SET_MODE:AUTO|LIVE|VOD, MODE_AUTO, MODE_LIVE, MODE_VOD
 KEY_D = "SYNC_DEBUG"              # = SYNC menu
 KEY_Y = "SYNC_MENU"               # SYNC menu (countdown / exact time / automatic / estimate)
 KEY_EQUAL = "SYNC_PLUS"           # + : more delay (dashboard shows older data)

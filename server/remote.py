@@ -36,7 +36,12 @@ COMMANDS = {
     "SYNC_START", "SYNC_CONFIRM", "SYNC_CLEAR", "SYNC_PIN", "SYNC_MENU", "SYNC_KEEP_OLD", "SYNC_USE_NEW",
     # track map wrong: rebuild the outline of this circuit (pit lane kept)
     "TRACK_REPORT",
+    # LIVE / VOD mode selector (server/mode.py): AUTO detection or a manual override
+    "SET_MODE", "CYCLE_MODE", "MODE_AUTO", "MODE_LIVE", "MODE_VOD",
 }
+MODE_COMMANDS = {"SET_MODE": None, "CYCLE_MODE": "NEXT", "MODE_AUTO": "AUTO", "MODE_LIVE": "LIVE",
+                 "MODE_VOD": "VOD"}
+MODE_ARG_RE = re.compile(r"^(AUTO|LIVE|VOD|NEXT)$")
 SYNC_ACTIONS = {"SYNC_PLUS", "SYNC_MINUS", "SYNC_ADJUST", "SYNC_MARK", "SYNC_RESYNC",
                 "SYNC_START", "SYNC_CONFIRM", "SYNC_CLEAR", "SYNC_PIN", "SYNC_KEEP_OLD", "SYNC_USE_NEW"}
 VIDEO_ACTIONS = {"VIDEO_PLAY_PAUSE": "play_pause", "VIDEO_MUTE": "mute", "VIDEO_VOLUME": "volume",
@@ -87,6 +92,8 @@ class RemoteController:
         # newer features get their key even with an older config.toml (unless that key is mapped)
         if self.keymap:
             self.keymap.setdefault("KEY_G", "PITLANE_DEBUG")
+            self.keymap.setdefault("KEY_E", "CYCLE_MODE")         # mode selector AUTO -> LIVE -> VOD
+            self.keymap.setdefault("KEY_MENU", "CYCLE_MODE")      # (WD TV remote MENU)
         # active while a TV mode with video is shown (RACE_VIEW / VIDEO_FOCUS)
         self.keymap_video = _parse_keymap(cfg.get("keymap_video"), "keymap_video")
         # active while the video player has the remote focus
@@ -100,6 +107,9 @@ class RemoteController:
         # set by the app: executes SYNC_* commands, returns a toast text (or None if rejected)
         self.sync_hook: Optional[Callable[[str, Optional[str]], Optional[str]]] = None
         self.track_hook: Optional[Callable[[], str]] = None
+        # set by the app: select AUTO / LIVE / VOD / NEXT, returns a toast text (switching may take a moment)
+        self.mode_hook: Optional[Callable[[str], Awaitable[str]]] = None
+        self._mode_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     def check_token(self, supplied: Optional[str]) -> bool:
@@ -170,6 +180,14 @@ class RemoteController:
             arg = str(arg)[:32]
         if log_it:
             log.info("Remote command %s%s (%s)", name, f":{arg}" if arg else "", origin)
+        if name in MODE_COMMANDS:
+            target = MODE_COMMANDS[name] or (arg or "").upper()
+            if not MODE_ARG_RE.match(target) or self.mode_hook is None:
+                return False
+            # the switch runs in the background (stopping one source and starting the other takes a
+            # moment); the selector state is pushed by the mode controller, the result as a toast
+            self._mode_task = asyncio.get_event_loop().create_task(self._run_mode(target))
+            return True
         async with self._lock:
             changed = self._apply(name, arg)
             if changed:
@@ -177,6 +195,17 @@ class RemoteController:
         if changed:
             await self._publish(self.message())
         return True
+
+    async def _run_mode(self, target: str) -> None:
+        try:
+            text = await self.mode_hook(target)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Mode selection %s failed", target)
+            text = f"Mode {target}: {exc}"
+        async with self._lock:
+            self._toast(text)
+            self.ui.seq += 1
+        await self._publish(self.message())
 
     def message(self) -> dict:
         return {"type": "ui", **asdict(self.ui)}

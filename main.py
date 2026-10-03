@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """F1 TV Dashboard - start the server.
 
-    python main.py                 # mode from config/config.toml (default: live)
+    python main.py                 # mode from config/config.toml (default: auto = LIVE / VOD detected)
+    python main.py --auto          # AUTO: LIVE while an F1 session is on, else VOD (switchable on the dashboard)
+    python main.py --live          # start in LIVE (manual; switch on the dashboard with MODE)
     python main.py --test          # simulator (TEST MODE)
     python main.py --replay        # replay [replay] source from the config
     python main.py --replay data/recordings/xyz.jsonl.gz
@@ -31,6 +33,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Self-hosted F1 live timing dashboard for TV screens")
     p.add_argument("--config", help="path to config TOML (default: config/config.toml)")
     g = p.add_mutually_exclusive_group()
+    g.add_argument("--auto", action="store_true",
+                   help="AUTO mode: LIVE while an F1 session is on, else VOD (the dashboard's MODE selector "
+                        "overrides it at any time)")
     g.add_argument("--live", action="store_true", help="use the official F1 live timing feed")
     g.add_argument("--test", action="store_true", help="run the built-in simulator (TEST MODE)")
     g.add_argument("--replay", nargs="?", const="", metavar="SOURCE",
@@ -54,7 +59,9 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)-10s %(message)s",
                         datefmt="%Y-%m-%d %H:%M:%S")
     cfg = load_config(args.config)
-    if args.live:
+    if args.auto:
+        cfg["source"]["mode"] = "auto"
+    elif args.live:
         cfg["source"]["mode"] = "live"
     elif args.test:
         cfg["source"]["mode"] = "test"

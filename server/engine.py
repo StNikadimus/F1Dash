@@ -120,6 +120,12 @@ class Engine:
         self._clock_sent: Optional[tuple] = None
         self._selected: Optional[str] = None
 
+    def close(self) -> None:
+        """The data source is being switched (LIVE <-> VOD): stop this engine's background jobs."""
+        for t in (self._detect_task, self._track_task, self._ref_task, self._seed_task, self._pit_task):
+            if t is not None and not t.done():
+                t.cancel()
+
     # state views (the state *at the target time*)
     @property
     def feed_state(self):

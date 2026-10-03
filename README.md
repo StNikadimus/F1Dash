@@ -92,7 +92,8 @@ or simply double-click / run `start-windows.bat --test` (creates the venv on fir
 ## 3. Start
 
 ```bash
-python main.py                 # live mode (config default)
+python main.py                 # AUTO (config default): LIVE while an F1 session is on, else VOD
+python main.py --live          # start in LIVE (manual override)
 python main.py --test          # TEST MODE simulator
 python main.py --replay        # replay the bundled real 2026 Japanese GP sample
 python main.py --vod           # follow a VOYO recording (session from the VOYO title, §9b)
@@ -108,6 +109,32 @@ F1DASH_SOURCE_MODE=test docker compose up -d     # test mode in Docker
 ```
 
 For a permanent install see `deploy/f1-dashboard.service`.
+
+### LIVE / VOD mode selector (no restart)
+
+Top right of the dashboard (in RACE VIEW: the session panel under the leaderboard, in VIDEO
+FOCUS: the bottom bar): **MODE [AUTO] [LIVE] [VOD]**. The selected one is filled; below it
+`DETECTED: LIVE` / `DETECTED: VOD` is what the automatic detection says, and `MANUAL` when you
+override it. Click a button, press **E** (keyboard, also forwarded from the VOYO window) or
+**MENU** on the IR remote (AUTO → LIVE → VOD, applied 1.5 s after the last press), use the
+phone remote (`/remote`, MODE row) or `POST /api/mode {"mode": "VOD"}` (`GET /api/mode` = state).
+Remote commands: `CYCLE_MODE`, `SET_MODE:AUTO|LIVE|VOD`, `MODE_AUTO`, `MODE_LIVE`, `MODE_VOD`.
+
+| | |
+|---|---|
+| `selected_mode` | what you chose: AUTO, LIVE or VOD (start: `[source] mode`, default `auto`; `--live` / `--vod` start with that override) |
+| `detected_mode` | the automatic detection, always running: **LIVE** while an F1 session is on (official schedule, 90 min before its start until 60 min after its end - the same rule `tools/tv_launcher.py` used at start - or the live feed's own SessionStatus says it runs), otherwise **VOD**; re-checked every minute |
+| `effective_mode` | what runs: the selection, or in AUTO the detection |
+
+Switching stops the current data source and engine and starts the other one in the same
+server process: LIVE = the F1 live timing feed (F1 TV sign-in or anonymous, all topics),
+VOD = the recording pipeline (session from the VOYO title, VOYO playback clock as the time
+reference, the VOYO video layer is turned on). The dashboards get the new mode at once and drop
+everything of the old source. A manual LIVE / VOD stays until you choose AUTO again - the
+detection never switches it back. LIVE without a session running shows
+`NO LIVE SESSION` and keeps waiting on the feed; it connects as soon as F1 starts one.
+`--test` / `--replay` are developer sources: there AUTO means that source (detected TEST /
+REPLAY), LIVE / VOD still switch. The selection is not saved: every start uses `[source] mode`.
 Useful flags: `--port 8080`, `--delay 45` (fixed delay instead of the VOYO video clock, §9b),
 `--speed 4` (replay/test speed-up).
 
@@ -973,7 +1000,7 @@ then `S` at a couple of line crossings of the selected car.
 | Nothing between sessions | Normal: the feed is idle; the map shows NO LIVE SESSION and the next session. |
 | Dashboard not in sync with the VOYO picture | Open the SYNC menu (`Y`): it shows the session, the video position, method, anchors and the reason. No video position → see "VOYO clock" lines in the launcher console. Session "not identified" → choose it (`POST /api/sync/session`). Without the VOYO window: `--delay 30` / `SYNC +/−`. |
 | Sync panel says `VOYO CLOCK LOST` | The launcher is not reading the player: VOYO window closed, no `<video>` on the page yet, or the window was not started by the launcher (`--attach` needs a VOYO window started with `--remote-debugging-port=9223`). |
-| Recording on VOYO, time set, board stays empty; no `VOD` / `SYNC CHECK` lines in the launcher console | The server runs in **LIVE** mode (banner `RECORDING IN LIVE MODE`): live timing only keeps the last minutes. `launch.bat` without an argument now picks the mode itself (LIVE only from 90 min before a session until 60 min after it, otherwise VOD) and prints `Mode: …`; force it with `launch.bat vod` / `launch.bat live`. A server that is still running in the other mode is reported – close it first. |
+| Recording on VOYO, time set, board stays empty; no `VOD` / `SYNC CHECK` lines in the launcher console | The server runs in **LIVE** mode (banner `RECORDING IN LIVE MODE`): live timing only keeps the last minutes. `launch.bat` without an argument starts in **AUTO** (LIVE only from 90 min before a session until 60 min after it, otherwise VOD) and prints `Mode: AUTO - detected …`. Click **VOD** in the MODE selector (top right, key **E**) - the server switches at once, no restart. |
 | Board empty before SYNC (VOD) | Intended: without a video time no session data is shown, and with `[vod] preload_data = false` (default) it is not even downloaded – only the session details (start, time zone, OpenF1 lap times for L/S). Banner `SYNC REQUIRED`; the download starts the moment a time is set. |
 | Time entered, but the board stays empty (VOD) | Look at the **DATA** line in the SYNC menu and the banner: `DOWNLOADING SESSION DATA` (a race is 200+ MB – the sync you entered is kept and the board fills when the download finishes), `SESSION DATA NOT LOADED` (reason shown, retried every 60 s) or `NO SESSION DATA AT THIS TIME` (the time is outside the recorded session). The launcher console mirrors the important server lines (`server … AUTO MEDIA SYNC / VOD / SYNC CHECK`) and every change of the VOYO player (`VOYO clock: playing at …, video length …`). |
 | Dashboard jerky on a weak TV browser | `[dashboard] map_fps = 20`, `animations = "reduced"`. |

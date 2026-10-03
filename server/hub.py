@@ -64,6 +64,7 @@ class Hub:
         self.pit_debug: Optional[dict] = None     # pit-lane reconstruction details (debug overlay)
         self.sync: dict[str, Any] = {}
         self.clock: dict[str, Any] = {}
+        self.mode: dict[str, Any] = {}            # LIVE / VOD mode selector state (server/mode.py)
 
     # ---- client management ---------------------------------------------
     async def add(self, ws: WebSocket, addr: str) -> Client:
@@ -74,7 +75,7 @@ class Hub:
         initial = [("hello", self.hello), ("state", self._full_state()),
                    ("track", {"type": "track", "track": self.track} if self.track else None),
                    ("status", self.status), ("video", self.video), ("pit_debug", self.pit_debug),
-                   ("ui", self.ui), ("clock", self.clock), ("sync", self.sync)]
+                   ("ui", self.ui), ("clock", self.clock), ("sync", self.sync), ("mode", self.mode)]
         for name, msg in initial:
             if not msg:
                 continue
@@ -184,6 +185,25 @@ class Hub:
     def set_ui(self, ui: dict) -> None:
         self.ui = ui
         self.broadcast(ui)
+
+    def set_mode(self, mode: dict) -> None:
+        self.mode = mode
+        self.broadcast(mode)
+
+    def reset_data(self, hello: dict) -> None:
+        """The data source was switched (LIVE <-> VOD): forget everything of the old one and tell
+        the dashboards to start over (new hello, empty state, no track)."""
+        self.state = {}
+        self._last.clear()
+        self.track = None
+        self.status = {}
+        self.pit_debug = None
+        self.sync = {}
+        self.clock = {}
+        self.hello = hello
+        self.broadcast(hello)
+        self.broadcast(self._full_state())
+        self.broadcast({"type": "track", "track": None})
 
     def set_sync(self, sync: dict) -> None:
         self.sync = sync

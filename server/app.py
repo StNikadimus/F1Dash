@@ -19,6 +19,7 @@ from .config import DASHBOARD_DIR, DATA_DIR, resolve_path
 from .engine import Engine
 from .f1tv_auth import AuthManager, AuthStore, login_page, result_page
 from .hub import Hub
+from .mode import SELECTABLE, ModeController
 from .recorder import Recorder
 from .remote import RemoteController
 from .sources.base import Source
@@ -33,7 +34,8 @@ MAX_CLOCK_BODY = 8192
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 
-def build_source(cfg: dict[str, Any], tracks: TrackProvider) -> tuple[Source, bool]:
+def build_source(cfg: dict[str, Any], tracks: TrackProvider,
+                 auth: AuthManager | None = None) -> tuple[Source, bool]:
     mode = cfg["source"]["mode"]
     if mode == "test":
         from .sources.simulator import SimulatorSource
@@ -50,7 +52,7 @@ def build_source(cfg: dict[str, Any], tracks: TrackProvider) -> tuple[Source, bo
         return VodSource(vod, client, DATA_DIR / "archive_cache"), False
     from .sources.f1_live import F1LiveSource
     recorder = Recorder(DATA_DIR / "recordings") if cfg["live"].get("record") else None
-    src = F1LiveSource(cfg["live"], recorder, auth=make_auth(cfg))
+    src = F1LiveSource(cfg["live"], recorder, auth=auth if auth is not None else make_auth(cfg))
     return src, src.token_configured
 
 
@@ -61,29 +63,93 @@ def make_auth(cfg: dict[str, Any]) -> AuthManager:
     return AuthManager(f1, store, override=(cfg.get("live") or {}).get("f1tv_token") or "")
 
 
+class Runtime:
+    """The data source + engine that run now. Switching LIVE <-> VOD (the mode selector,
+    server/mode.py) stops both and starts the other pair in the same process - the HTTP server,
+    the dashboards' WebSockets, the remote, the VOYO monitor and the F1 TV sign-in stay."""
+
+    def __init__(self, cfg: dict[str, Any], hub: Hub, tracks: TrackProvider, auth: AuthManager) -> None:
+        self.cfg = cfg
+        self.hub = hub
+        self.tracks = tracks
+        self.auth = auth
+        self.source: Source | None = None
+        self.engine: Engine | None = None
+        self.tasks: list[asyncio.Task] = []
+
+    def mode_cfg(self, mode: str) -> dict[str, Any]:
+        c = dict(self.cfg)
+        c["source"] = {**self.cfg["source"], "mode": mode}
+        if mode == "vod":
+            c["voyo"] = {**(self.cfg.get("voyo") or {}), "enabled": True}   # a recording is watched in VOYO
+        return c
+
+    async def stop(self) -> None:
+        tasks, self.tasks = self.tasks, []
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self.engine is not None:
+            self.engine.close()
+        rec = getattr(self.source, "recorder", None)
+        if rec:
+            rec.close()
+
+    async def switch(self, mode: str) -> None:
+        """Run ``mode`` (live / vod / test / replay) from now on."""
+        old = self.source.mode if self.tasks and self.source is not None else None
+        await self.stop()
+        source, engine = self.prepare(mode)
+        if old is None:
+            log.info("Starting data source: %s", source.mode.upper())
+        else:
+            log.info("Data source switched: %s -> %s (no restart)", old.upper(), source.mode.upper())
+        self.tasks = [asyncio.create_task(source.run(engine), name="source"),
+                      asyncio.create_task(engine.publish_loop(), name="publish")]
+
+    def prepare(self, mode: str) -> tuple[Source, Engine]:
+        """Build the source + engine of ``mode`` (not started) and reset the dashboards."""
+        c = self.mode_cfg(mode)
+        source, token_ok = build_source(c, self.tracks, self.auth)
+        engine = Engine(c, source, self.tracks, self.hub, token_configured=token_ok)
+        self.source, self.engine = source, engine
+        hello = dict(self.hub.hello)
+        hello["mode"] = source.mode
+        hello["config"] = {**(hello.get("config") or {}), "sync_enabled": engine.sync.enabled}
+        self.hub.reset_data(hello)
+        return source, engine
+
+
 def create_app(cfg: dict[str, Any]) -> Starlette:
-    if cfg["source"]["mode"] == "vod":
-        cfg.setdefault("voyo", {})["enabled"] = True     # a recording is always watched in the VOYO window
+    start_mode = str(cfg["source"].get("mode") or "auto").lower()
+    # --test / --replay: developer sources, AUTO means "that source"; live / vod: a manual
+    # selection at start (config / --live / --vod); auto: the detection decides
+    fixed = start_mode.upper() if start_mode in ("test", "replay") else None
+    selected = {"live": "LIVE", "vod": "VOD"}.get(start_mode, "AUTO")
     hub = Hub()
     tracks = TrackProvider(DATA_DIR, cfg["tracks"])
-    source, token_ok = build_source(cfg, tracks)
-    engine = Engine(cfg, source, tracks, hub, token_configured=token_ok)
+    auth = make_auth(cfg)                     # one F1 TV sign-in for every LIVE period of this process
+    rt = Runtime(cfg, hub, tracks, auth)
 
     async def publish_ui(msg: dict) -> None:
-        engine.set_selected(msg.get("selected"))
+        if rt.engine is not None:
+            rt.engine.set_selected(msg.get("selected"))
         hub.set_ui(msg)
 
-    remote = RemoteController(cfg["remote"], engine.order, publish_ui)
-    remote.sync_hook = engine.sync_command
-    remote.track_hook = engine.track_report
+    remote = RemoteController(cfg["remote"], lambda: rt.engine.order() if rt.engine else [], publish_ui)
+    remote.sync_hook = lambda name, arg: rt.engine.sync_command(name, arg) if rt.engine else None
+    remote.track_hook = lambda: rt.engine.track_report() if rt.engine else "No data source running"
     remote.auto_cycle_seconds = int(cfg["dashboard"].get("auto_cycle_seconds", 20))
     voyo_cfg = cfg.get("voyo") or {}
+    if start_mode == "vod":
+        voyo_cfg = {**voyo_cfg, "enabled": True}
     remote.set_default_tv_mode(str(voyo_cfg.get("default_tv_mode", "RACE_VIEW")).upper())
     video = VideoMonitor(voyo_cfg, remote, hub)
     hub.ui = remote.message()
     dash = cfg["dashboard"]
     hub.hello = {
-        "type": "hello", "mode": source.mode,
+        "type": "hello", "mode": None,
         "config": {
             "interp_delay_ms": int(dash.get("interp_delay_ms", 1200)),
             "map_fps": max(5, min(60, int(dash.get("map_fps", 30)))),
@@ -91,36 +157,67 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             "pulse_period_ms": int(dash.get("pulse_period_ms", 2400)),
             "reorder_ms": int(dash.get("reorder_ms", 450)),
             "remote_enabled": remote.enabled,
-            "sync_enabled": engine.sync.enabled,
+            "sync_enabled": bool((cfg.get("sync") or {}).get("enabled", True)),
         },
         "keymap": remote.keymap,
         "keymap_video": remote.keymap_video,
         "keymap_video_focus": remote.keymap_video_focus,
     }
 
-    auth: AuthManager | None = getattr(source, "auth", None)
     port = int(cfg["server"]["port"])
     callback_url = f"http://127.0.0.1:{port}/f1tv/callback"
-    if auth is not None and auth.subscription:
+    if auth.subscription:
         auth.login_url = f"http://127.0.0.1:{port}/f1tv/login"
         if cfg.get("_force_login"):
             auth.logout()
 
     tasks: list[asyncio.Task] = []
 
+    def restart_video() -> None:
+        # a recording is watched in the VOYO window: switching to VOD turns the video layer on
+        if not video.enabled:
+            video.enabled = True
+            vt = next((t for t in tasks if t.get_name() == "video"), None)
+            if vt is not None:
+                vt.cancel()
+                tasks.remove(vt)
+            tasks.append(asyncio.create_task(video.run(), name="video"))
+
+    async def switch(mode: str) -> None:
+        await rt.switch(mode)
+        if rt.engine is not None:
+            rt.engine.set_selected(remote.ui.selected)
+        if mode == "vod":
+            restart_video()
+
+    def feed_status():
+        if rt.source is None or rt.source.mode != "live" or rt.engine is None:
+            return None
+        return (rt.engine.feed_state.get("SessionStatus") or {}).get("Status")
+
+    mode = ModeController(selected, fixed=fixed, switch=switch, publish=hub.set_mode, feed_status=feed_status)
+    # an engine exists from the start (API requests); the lifespan starts the mode actually wanted
+    rt.prepare(fixed.lower() if fixed else "vod" if selected == "VOD" else "live")
+    remote.mode_hook = mode.select
+
     @contextlib.asynccontextmanager
     async def lifespan(app):
-        log.info("Starting data source: %s", source.mode.upper())
-        tasks.append(asyncio.create_task(source.run(engine), name="source"))
-        tasks.append(asyncio.create_task(engine.publish_loop(), name="publish"))
+        if fixed is None:
+            try:                                # the first detection decides what AUTO starts with
+                await asyncio.wait_for(mode.detect(), 12)
+            except asyncio.TimeoutError:
+                log.info("Mode detection: F1 schedule did not answer within 12 s - assuming a recording")
+        st = mode.state()
+        log.info("Mode: selected %s, detected %s (%s) -> %s", st["selected_mode"], st["detected_mode"],
+                 st["detected_reason"], st["effective_mode"])
+        await mode.apply()
+        tasks.append(asyncio.create_task(mode.run(), name="mode"))
         tasks.append(asyncio.create_task(remote.auto_cycle_loop(), name="autocycle"))
         tasks.append(asyncio.create_task(video.run(), name="video"))  # independent of the F1 data pipeline
         yield
         for t in tasks:
             t.cancel()
-        rec = getattr(source, "recorder", None)
-        if rec:
-            rec.close()
+        await rt.stop()
 
     # ---------------------------------------------------------------- HTTP
     async def index(request: Request) -> Response:
@@ -130,17 +227,39 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return FileResponse(DASHBOARD_DIR / "remote.html", headers={"Cache-Control": "no-cache"})
 
     async def health(request: Request) -> Response:
-        return JSONResponse({"ok": True, "mode": source.mode, "status": engine._status,
-                             "clients": len(hub.clients)})
+        st = mode.state()
+        return JSONResponse({"ok": True, "mode": rt.source.mode if rt.source else None,
+                             "selected_mode": st["selected_mode"], "detected_mode": st["detected_mode"],
+                             "effective_mode": st["effective_mode"],
+                             "status": rt.engine._status if rt.engine else {}, "clients": len(hub.clients)})
+
+    async def api_mode(request: Request) -> Response:
+        """GET: the mode selector state. POST {"mode": "AUTO" | "LIVE" | "VOD"}: select it
+        (switches the data source in the running server, no restart)."""
+        if request.method == "GET":
+            return JSONResponse(mode.state(), headers={"Cache-Control": "no-store"})
+        bad = _remote_guard(request)
+        if bad:
+            return bad
+        try:
+            body = json.loads((await request.body())[:MAX_WS_MESSAGE] or b"{}")
+            value = str(body.get("mode", "")).upper() if isinstance(body, dict) else ""
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+        if value not in SELECTABLE:
+            return JSONResponse({"ok": False, "error": "mode AUTO, LIVE or VOD expected"}, status_code=400)
+        text = await mode.select(value)
+        st = mode.state()
+        return JSONResponse({"ok": not st["error"], "result": text, **st}, status_code=200 if not st["error"] else 500)
 
     # ---------------------------------------------------------------- F1 TV sign-in (this computer only)
     def _local(request: Request) -> bool:
         return (request.client.host if request.client else "") in LOOPBACK
 
     async def f1tv_login(request: Request) -> Response:
-        if auth is None or not auth.subscription:
-            return HTMLResponse(result_page(False, "F1 TV sign-in is off ([f1_tv] subscription = false, or not in "
-                                                   "LIVE mode)."), status_code=409)
+        if not auth.subscription:
+            return HTMLResponse(result_page(False, "F1 TV sign-in is off ([f1_tv] subscription = false)."),
+                                status_code=409)
         if not _local(request):
             return HTMLResponse(result_page(False, "Open this page on the computer that runs the dashboard."),
                                 status_code=403)
@@ -148,7 +267,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                             headers={"Cache-Control": "no-store"})
 
     async def f1tv_callback(request: Request) -> Response:
-        if auth is None or not auth.subscription:
+        if not auth.subscription:
             return HTMLResponse(result_page(False, "F1 TV sign-in is off."), status_code=409)
         if not _local(request):
             return HTMLResponse(result_page(False, "Only accepted from this computer."), status_code=403)
@@ -169,17 +288,20 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                             headers={"Cache-Control": "no-store"})
 
     async def f1tv_status(request: Request) -> Response:
-        info = auth.public_info() if auth is not None else {"subscription": False, "state": "DISABLED"}
+        info = auth.public_info()
         return JSONResponse(info, headers={"Cache-Control": "no-store"})
 
     async def api_diagnostics(request: Request) -> Response:
         if request.query_params.get("format") == "text":
             from .diagnostics import format_report
-            return Response(format_report(engine.diagnostics()), media_type="text/plain; charset=utf-8")
-        return JSONResponse(engine.diagnostics(), headers={"Cache-Control": "no-store"})
+            st = mode.state()
+            head = (f"Mode: selected {st['selected_mode']} · detected {st['detected_mode']} "
+                    f"({st['detected_reason']}) · effective {st['effective_mode']}\n")
+            return Response(head + format_report(rt.engine.diagnostics()), media_type="text/plain; charset=utf-8")
+        return JSONResponse({**rt.engine.diagnostics(), "mode": mode.state()}, headers={"Cache-Control": "no-store"})
 
     async def api_track_layouts(request: Request) -> Response:
-        return JSONResponse(engine.track_choices(), headers={"Cache-Control": "no-store"})
+        return JSONResponse(rt.engine.track_choices(), headers={"Cache-Control": "no-store"})
 
     async def api_track_choice(request: Request) -> Response:
         if not remote.enabled:
@@ -193,10 +315,10 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
         if ref_id is not None and not isinstance(ref_id, str):
             return JSONResponse({"ok": False, "error": "layout id expected"}, status_code=400)
-        return JSONResponse({"ok": True, "result": engine.set_track_choice(ref_id)})
+        return JSONResponse({"ok": True, "result": rt.engine.set_track_choice(ref_id)})
 
     async def api_state(request: Request) -> Response:
-        return JSONResponse(engine.snapshot())
+        return JSONResponse(rt.engine.snapshot())
 
     async def api_ui(request: Request) -> Response:
         # read-only UI state (TV mode, focus); polled by tools/tv_launcher.py
@@ -246,7 +368,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     clock_rate: list[float] = []
 
     async def api_sync(request: Request) -> Response:
-        return JSONResponse(engine.sync_status(), headers={"Cache-Control": "no-cache"})
+        return JSONResponse(rt.engine.sync_status(), headers={"Cache-Control": "no-cache"})
 
     def _remote_guard(request: Request) -> Response | None:
         if not remote.enabled:
@@ -269,9 +391,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                 raise ValueError
         except (ValueError, TypeError, AttributeError):
             return JSONResponse({"ok": False, "error": "session_key (integer) expected"}, status_code=400)
-        if source.mode != "vod":
+        if rt.source.mode != "vod":
             return JSONResponse({"ok": False, "error": "only in VOD mode (python main.py --vod)"}, status_code=409)
-        engine.select_session(key)
+        rt.engine.select_session(key)
         return JSONResponse({"ok": True})
 
     SYNC_ACTIONS = {"capture": None, "countdown": "countdown", "exact": "f1_time", "auto": None,
@@ -280,7 +402,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
 
     async def api_media_catalog(request: Request) -> Response:
         """SELECT SESSION: Grands Prix + sessions of a season (public data, read-only)."""
-        if source.mode != "vod":
+        if rt.source.mode != "vod":
             return JSONResponse({"error": "only in VOD mode"}, status_code=409)
         try:
             year = int(request.query_params.get("year", ""))
@@ -288,7 +410,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                 raise ValueError
         except ValueError:
             return JSONResponse({"error": "year expected"}, status_code=400)
-        return JSONResponse(await engine.media_catalog(year), headers={"Cache-Control": "no-cache"})
+        return JSONResponse(await rt.engine.media_catalog(year), headers={"Cache-Control": "no-cache"})
 
     async def api_sync_action(request: Request) -> Response:
         """SYNC menu: POST /api/sync/{capture|countdown|exact|auto|estimate|clear}.
@@ -315,7 +437,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         value = body.get(field) if field else None
         if value is not None and not isinstance(value, (str, int, float)):
             return JSONResponse({"ok": False, "error": f"{field}: string or number expected"}, status_code=400)
-        res = engine.sync_action(action, value)
+        res = rt.engine.sync_action(action, value)
         return JSONResponse(res, status_code=200 if res.get("ok") or "result" in res else 400)
 
     async def api_sync_voyo(request: Request) -> Response:
@@ -337,7 +459,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             sample = parse_voyo_sample(json.loads(raw or b"{}"), time.time(), time.monotonic())
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)[:80]}, status_code=400)
-        engine.voyo_sample(sample)
+        rt.engine.voyo_sample(sample)
         return JSONResponse({"ok": True})
 
     # ---------------------------------------------------------------- WebSocket
@@ -371,11 +493,18 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                     await remote.handle_key(str(msg.get("key", "")), f"ws:{addr}")
                 elif kind == "command":
                     await remote.handle_command(str(msg.get("command", "")), msg.get("arg"), f"ws:{addr}")
+                elif kind == "mode":
+                    # mode selector of a dashboard: AUTO / LIVE / VOD (switches in the background)
+                    value = str(msg.get("value", "")).upper()
+                    if value in SELECTABLE:
+                        await remote.handle_command("SET_MODE", value, f"ws:{addr}")
+                    else:
+                        log.warning("Rejected mode %r from %s", value[:10], addr)
                 elif kind == "track_choice":
                     # "choose the circuit" menu of a dashboard: a known layout id or "auto"
                     value = msg.get("value")
                     if value is None or (isinstance(value, str) and len(value) <= 40):
-                        text = engine.set_track_choice(value)
+                        text = rt.engine.set_track_choice(value)
                         remote._toast(text)
                         await publish_ui(remote.message())
                 elif kind == "sync_action":
@@ -383,7 +512,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                     action = str(msg.get("action", ""))
                     value = msg.get("value")
                     if action in SYNC_ACTIONS and (value is None or isinstance(value, (str, int, float))):
-                        res = engine.sync_action(action, value)
+                        res = rt.engine.sync_action(action, value)
                         res.pop("state", None)
                         hub._send(client, json.dumps({"type": "sync_result", "action": action, **res}))
                     else:
@@ -403,6 +532,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/api/health", health),
         Route("/api/state", api_state),
         Route("/api/diagnostics", api_diagnostics),
+        Route("/api/mode", api_mode, methods=["GET", "POST"]),
         Route("/api/track/layouts", api_track_layouts),
         Route("/api/track/choice", api_track_choice, methods=["POST"]),
         Route("/f1tv/login", f1tv_login),
@@ -420,7 +550,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Mount("/static", StaticFiles(directory=str(DASHBOARD_DIR)), name="static"),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
-    app.state.engine = engine
+    app.state.runtime = rt
+    app.state.mode = mode
     return app
 
 

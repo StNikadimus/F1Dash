@@ -30,9 +30,14 @@
     </div>
     <div class="tb-weather" id="weather-mini"></div>
     <div class="tb-right">
-      <div id="mode-badge" class="mode-badge">—</div>
-      <div class="tb-chips"><div id="sync-chip"></div><div id="rule-chip" class="rule-chip"></div></div>
+      <!-- MODE selector: AUTO (detected) / LIVE / VOD (manual override), switches without a restart -->
+      <div id="mode-sel" class="mode-sel"></div>
       <div id="wallclock">--:--</div>
+      <div class="tb-row2">
+        <div id="mode-badge" class="mode-badge">—</div>
+        <div id="mode-detected" class="mode-detected"></div>
+        <div class="tb-chips"><div id="sync-chip"></div><div id="rule-chip" class="rule-chip"></div></div>
+      </div>
     </div>
   </header>
 

@@ -141,8 +141,14 @@ class F1LiveSource(Source):
 
     # ------------------------------------------------------------------
     async def run(self, sink: Sink) -> None:
-        asyncio.create_task(self._schedule_loop(sink))
-        asyncio.create_task(self._archive_loop(sink))
+        helpers = [asyncio.create_task(self._schedule_loop(sink)), asyncio.create_task(self._archive_loop(sink))]
+        try:
+            await self._run(sink)
+        finally:                    # stopped (LIVE -> VOD switch, shutdown): no helper keeps running
+            for t in helpers:
+                t.cancel()
+
+    async def _run(self, sink: Sink) -> None:
         if self.auth.subscription:
             log.info("F1 TV subscription mode: ENABLED")
             if self.auth.needs_login():

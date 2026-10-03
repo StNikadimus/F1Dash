@@ -44,6 +44,10 @@
   <button data-k="KEY_MINUS">SYNC −</button><button data-k="KEY_S">MARK</button><button data-k="KEY_EQUAL">SYNC +</button>
   <button data-k="KEY_R">RESYNC</button><button data-k="KEY_D">SYNC INFO</button><button data-k="KEY_T">TV MODE</button>
 </div>
+<div class="grid">
+  <button data-mode="AUTO">MODE AUTO</button><button data-mode="LIVE">MODE LIVE</button><button data-mode="VOD">MODE VOD</button>
+  <div class="wide" id="modest" style="text-align:center;font-size:13px"></div>
+</div>
 <div id="st"></div>
 <script src="/static/components/f1time.js"></script>
 <div class="sync">
@@ -88,6 +92,25 @@
       st.textContent = r.ok ? b.dataset.k : `${b.dataset.k}: HTTP ${r.status}`;
     } catch (e) { st.textContent = "server unreachable"; }
   }));
+
+  // ---- MODE: AUTO (detected) / LIVE / VOD (manual override), switched in the running server
+  async function modeShow(j) {
+    if (!j) { try { j = await (await fetch("/api/mode")).json(); } catch (e) { return; } }
+    document.querySelectorAll("button[data-mode]").forEach((b) => { b.style.outline = b.dataset.mode === j.selected_mode ? "3px solid #e10600" : ""; });
+    document.getElementById("modest").textContent = `selected ${j.selected_mode} · detected ${j.detected_mode} · running ${j.effective_mode}` +
+      (j.notice ? " · " + j.notice : "") + (j.switching ? " · switching…" : "");
+  }
+  document.querySelectorAll("button[data-mode]").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      const r = await fetch("/api/mode", { method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json" }, token ? { "X-Remote-Token": token } : {}),
+        body: JSON.stringify({ mode: b.dataset.mode }) });
+      const j = await r.json().catch(() => null);
+      st.textContent = j && j.result ? j.result : `MODE ${b.dataset.mode}: HTTP ${r.status}`;
+      modeShow(j && j.selected_mode ? j : null);
+    } catch (e) { st.textContent = "server unreachable"; }
+  }));
+  modeShow(); setInterval(() => modeShow(), 5000);
 
   // ---- SYNC (same API as the TV's SYNC menu)
   const $ = (id) => document.getElementById(id);

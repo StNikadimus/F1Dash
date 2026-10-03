@@ -599,6 +599,7 @@ class DiagnosticsAndHttpTest(unittest.TestCase):
         tok = jwt()
         with tempfile.TemporaryDirectory() as d:
             cfg = load_config("/nonexistent.toml")
+            cfg["source"]["mode"] = "live"
             cfg["live"]["record"] = False
             cfg["f1_tv"]["auth_file"] = str(Path(d) / "auth" / "f1tv_auth.json")
             cfg["f1_tv"]["open_browser"] = False
@@ -619,7 +620,7 @@ class DiagnosticsAndHttpTest(unittest.TestCase):
                 body = local.get(path).text
                 self.assertNotIn(tok.split(".")[1], body, path)
             self.assertEqual(local.get("/f1tv/status").json()["state"], "VALID")
-            eng = app.state.engine
+            eng = app.state.runtime.engine
             eng.set_status(state="connected", auth="AUTHENTICATED")
             self.assertNotIn(tok.split(".")[1], json.dumps(eng.hub.status))
             self.assertEqual(eng.hub.status["f1tv"]["product"], "F1 TV Access")
