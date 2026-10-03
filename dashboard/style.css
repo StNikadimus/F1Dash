@@ -610,3 +610,10 @@ div.sm-keys { margin-top: 8px; }
 
 .tel-stale { opacity: .45; }
 .track-report { color: #ffb000; font-weight: 800; text-decoration: none; pointer-events: auto; }
+.track-menu { position: absolute; left: 14px; bottom: 40px; z-index: 30; width: 520px; max-width: 90%;
+  background: #10151c; border: 1px solid #3a4452; border-radius: 6px; padding: 10px; font-size: 15px;
+  display: flex; flex-direction: column; gap: 6px; }
+.track-menu small { color: #9aa4ae; }
+.track-menu select { background: #0b0e12; color: #e6ebf0; font: inherit; border: 1px solid #3a4452; }
+.track-menu .tm-row { display: flex; gap: 8px; }
+.track-menu button { background: #2f6fd6; color: #fff; border: 0; padding: 6px 14px; font: inherit; font-weight: 800; cursor: pointer; }

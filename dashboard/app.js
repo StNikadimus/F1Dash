@@ -153,6 +153,11 @@
   document.addEventListener("keydown", (e) => {
     const field = e.target && e.target.closest && e.target.closest("input, select, textarea");
     if (field) {
+      if (field.closest("#track-menu")) {             // the "choose circuit" list: arrows pick, Enter uses
+        if (e.key === "Enter") { e.preventDefault(); document.getElementById("track-ok").click(); }
+        else if (e.key === "Escape") { e.preventDefault(); document.getElementById("track-menu").remove(); }
+        return;
+      }
       if (S.ui && S.ui.sync_menu && field.closest("#sync-menu")) {
         if (e.key === "Escape") field.blur();
         return;                                       // typing in the open SYNC menu
@@ -798,6 +803,31 @@
   }
 
   // ------------------------------------------------------------------ map info
+  // "choose the circuit": the known layouts; the choice is fitted onto the car positions server-side
+  function openTrackMenu() {
+    let box = document.getElementById("track-menu");
+    if (box) { box.remove(); return; }
+    box = document.createElement("div");
+    box.id = "track-menu";
+    box.className = "track-menu";
+    box.innerHTML = "<b>CHOOSE CIRCUIT</b><div>loading…</div>";
+    $("map-panel").appendChild(box);
+    fetch("/api/track/layouts").then((r) => r.json()).then((d) => {
+      const opts = ['<option value="auto">Automatic (MultiViewer / detected from the car positions)</option>']
+        .concat((d.layouts || []).map((l) => `<option value="${esc(l.id)}"${d.choice === l.id ? " selected" : ""}>` +
+          `${esc(l.location || "")} – ${esc(l.name || l.id)}</option>`));
+      box.innerHTML = `<b>CHOOSE CIRCUIT</b><small>${esc(d.circuit || "")} · now: ${esc(d.source || "none")}` +
+        `${d.info && d.info.ref_id ? " " + esc(d.info.ref_id) : ""}${d.note ? " · " + esc(d.note) : ""}</small>` +
+        `<select id="track-select" size="10">${opts.join("")}</select>` +
+        `<div class="tm-row"><button id="track-ok">USE</button><button id="track-cancel">CLOSE</button></div>` +
+        `<small>The layout is fitted onto the car positions (needs cars all around the lap). The pit lane is not changed.</small>`;
+      const sel = document.getElementById("track-select");
+      if (!d.choice) sel.value = "auto";
+      document.getElementById("track-ok").onclick = () => { send({ type: "track_choice", value: sel.value }); box.remove(); };
+      document.getElementById("track-cancel").onclick = () => box.remove();
+      sel.focus();
+    }).catch(() => { box.innerHTML = "<b>CHOOSE CIRCUIT</b><div>not available</div>"; });
+  }
   function renderMapInfo() {
     const tr = S.track;
     const s = S.session || {};
@@ -806,10 +836,17 @@
     const ts = S.track_status || {};
     const legend = [];
     if (tr) {
-      const src = { multiviewer: "Track: MultiViewer", reference: "Track: known layout fitted to the car positions",
+      const inf = tr.info || {};
+      const src = { multiviewer: "Track: MultiViewer",
+                    reference: `Track: ${inf.chosen ? "your choice" : "known layout"} ${esc(inf.ref_id || "")}` +
+                      (inf.unaligned ? "" : " fitted to the cars"),
                     learned: "Track: learned from one lap of positions", test: "" }[tr.source];
-      if (src) legend.push(src);
+      if (src) legend.push(src + (inf.unaligned ? " (not aligned yet - waiting for car positions)" :
+        inf.note && !inf.chosen ? ` <span title="${esc(inf.note)}">(auto-corrected)</span>` : ""));
       if (tr.source !== "test") legend.push('<a href="#" id="track-report" class="track-report" title="Rebuild the outline of this circuit (the pit lane is kept). Key W twice.">MAP WRONG?</a>');
+    }
+    if (S.mode !== "test" && (tr || s.circuit_key)) {
+      legend.push('<a href="#" id="track-choose" class="track-report" title="Choose the circuit layout yourself">CHOOSE CIRCUIT</a>');
     }
     if (tr) {
       const pi = tr.pitlane_info || {};
@@ -836,6 +873,8 @@
     $("map-legend").innerHTML = legend.join(" · ");
     const rep = document.getElementById("track-report");
     if (rep) rep.onclick = (e) => { e.preventDefault(); send({ type: "command", command: "TRACK_REPORT" }); };
+    const ch = document.getElementById("track-choose");
+    if (ch) ch.onclick = (e) => { e.preventDefault(); openTrackMenu(); };
 
     const notice = $("map-notice");
     let msg = "";
@@ -1702,6 +1741,8 @@
       const font = getComputedStyle(document.body).fontFamily;
       const order = S.order.slice().reverse();      // leader drawn last (on top)
       const drawn = new Set();
+      // a layout you chose that is not aligned to the car positions yet: no cars on it (they would be misplaced)
+      if (track && track.info && track.info.unaligned) return;
       const drawCar = (num) => {
         const d = S.drivers[num] || {};
         // in the garage (a long stay in the pit, or retired there): not on the map

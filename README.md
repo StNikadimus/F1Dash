@@ -355,6 +355,20 @@ learned from one lap of positions – and only kept when it is a closed loop of 
 without gaps (a hole in the position stream used to draw part of the track as missing / a
 straight line). The map legend says which source is shown.
 
+**Every drawn outline is checked against the cars.** Once ~1500 positions of cars on track
+are in, every minute: if more than 5 % of them are > 40 m away from the drawn track (part of it
+missing, or another layout – also when it came from MultiViewer), the outline is replaced by the
+known layout that fits (legend: "auto-corrected"). If the circuit's name is unknown or its layout
+does not fit, every bundled layout is tried (quick ranking, full fit of the best 3; ~30 s in the
+background). On a real Baku lap: a half outline is detected (33 % of positions off), Baku is
+identified without its name.
+
+**Choose the circuit yourself:** **CHOOSE CIRCUIT** in the map legend → pick one of the 40
+known layouts (or *Automatic*). It is saved per circuit (`data/tracks/track_choice.json`) and wins
+over every other source; it is fitted onto the car positions (without positions yet it is shown
+as it is, north up, without cars). API: `GET /api/track/layouts`, `POST /api/track/choice`
+`{"layout": "bh-2002"}` (or `"auto"`).
+
 **Track map wrong?** Click **MAP WRONG?** in the map legend (or press **W**), then once more
 within 8 s. That deletes the cached outline of *this* circuit (`mv_*`, `ref_*`, `learned_*`
 in `data/tracks/`), never uses the source that was shown for it again

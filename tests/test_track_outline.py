@@ -193,3 +193,101 @@ class RemoteCommandTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CheckAndChoiceTest(unittest.TestCase):
+    """The drawn outline is checked against the car positions; the layout can be chosen."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.lap = baku_lap()
+        cls.full = fit_reference(reference_points("az-2016"), cls.lap * 3).points
+
+    def test_check_outline(self):
+        from server.track_match import check_outline
+        samples = self.lap * 8
+        self.assertTrue(check_outline(self.full, samples).ok)
+        half = check_outline(self.full[: len(self.full) // 2], samples)
+        self.assertFalse(half.ok)                                       # part of the track missing
+        self.assertGreater(half.far_share, 0.2)
+        self.assertIsNone(check_outline(self.full, self.lap).ok)        # too few positions to tell
+
+    def test_identify_without_the_name(self):
+        from server.track_match import identify
+        rid, fit = identify(self.lap * 3)
+        self.assertEqual(rid, "az-2016")
+        self.assertTrue(fit.ok)
+
+    def engine(self):
+        from test_live import LiveClock, make_engine
+        from datetime import datetime, timezone
+        src = LiveClock()
+        src.t = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+        eng = make_engine(src)
+        eng._track_id = (144, 2025)
+        return eng
+
+    def test_half_multiviewer_outline_is_replaced(self):
+        from server.track import TrackGeometry
+
+        async def go():
+            eng = self.engine()
+            eng.geometry = TrackGeometry(144, "Baku", 2025, "multiviewer", self.full[: len(self.full) // 2])
+            pit_calls = []
+            eng._pit_start_learning = lambda *a, **k: pit_calls.append(a)
+            for x, y in self.lap * 8:
+                eng._learn({"t": 0, "cars": [["1", x, y, 1]]})
+            eng._ref_poll(1000.0)
+            await eng._ref_task
+            return eng.geometry, pit_calls
+        geo, pit_calls = asyncio.run(go())
+        self.assertEqual(geo.source, "reference")
+        self.assertEqual(geo.info["ref_id"], "az-2016")
+        self.assertIn("replaced the multiviewer outline", geo.info["note"])
+        self.assertEqual(pit_calls, [])                                 # the pit lane is not touched
+
+    def test_good_multiviewer_outline_stays(self):
+        from server.track import TrackGeometry
+
+        async def go():
+            eng = self.engine()
+            eng.geometry = TrackGeometry(144, "Baku", 2025, "multiviewer", self.full)
+            for x, y in self.lap * 8:
+                eng._learn({"t": 0, "cars": [["1", x, y, 1]]})
+            eng._ref_poll(1000.0)
+            await eng._ref_task
+            return eng.geometry
+        geo = asyncio.run(go())
+        self.assertEqual(geo.source, "multiviewer")
+        self.assertIn("match", geo.info["check"])
+
+    def test_choose_the_circuit_yourself(self):
+        from server.track import TrackGeometry
+
+        async def go():
+            eng = self.engine()
+            eng.geometry = TrackGeometry(144, "Baku", 2025, "multiviewer", self.full)
+            self.assertEqual(eng.set_track_choice("nonsense"), "Unknown layout")
+            msg = eng.set_track_choice("az-2016")
+            for x, y in self.lap * 3:
+                eng._learn({"t": 0, "cars": [["1", x, y, 1]]})
+            eng._ref_poll(1000.0)
+            await eng._ref_task
+            chosen = (eng.geometry.source, dict(eng.geometry.info), eng.tracks.choice(144), msg)
+            # a reload keeps your choice (its cached fit), even with MultiViewer reachable
+            again = await TrackProvider.load(eng.tracks, 144, 2025, "Baku")   # (make_engine stubs .load)
+            eng.set_track_choice("auto")
+            if eng._track_task:
+                await eng._track_task
+            return chosen, again.source, eng.tracks.choice(144)
+        (src, info, stored, msg), reloaded, after_auto = asyncio.run(go())
+        self.assertIn("chosen", msg)
+        self.assertEqual((src, info["ref_id"], info["chosen"], stored), ("reference", "az-2016", True, "az-2016"))
+        self.assertEqual(reloaded, "reference")
+        self.assertIsNone(after_auto)
+
+    def test_layouts_api(self):
+        from server.track_match import known_layouts
+        ids = {e["id"] for e in known_layouts()}
+        self.assertGreaterEqual(len(ids), 40)
+        self.assertTrue({"bh-2002", "az-2016", "jp-1962", "es-2026"} <= ids)

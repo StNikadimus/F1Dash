@@ -27,7 +27,8 @@ from .timeline import INF, Timeline
 from .pitlane import (PitLaneCollector, Reconstruction, collect_from_events, needs_reconstruction, reconstruct,
                       traversals_from_samples)
 from .track import OutlineLearner, TrackGeometry, TrackProvider, outline_problem
-from .track_match import MIN_SAMPLES, fit_reference, reference_id, reference_points
+from .track_match import (MIN_SAMPLES, check_outline, fit_reference, identify, known_layouts, reference_id,
+                          reference_points)
 
 log = logging.getLogger("engine")
 
@@ -81,6 +82,7 @@ class Engine:
         self._ref_last = 0.0
         self._ref_note: Optional[str] = None
         self._report_armed = 0.0
+        self._check_last = 0.0
         # pit lane (cache-first): live/replay learn incrementally, VOD from the loaded archive
         self.pit_collector: Optional[PitLaneCollector] = None
         self._pit_ctx: dict = {}
@@ -834,13 +836,13 @@ class Engine:
         geo = self.geometry
         if not (self.tracks.learn_outline and self._track_id and self._track_id[0] is not None):
             return
-        if geo is None or geo.source == "learned":
-            # positions of cars on the track (not in the pit lane) for the known-layout fit
-            for num, x, y, on_track in sample["cars"]:
-                if on_track and not self._in_pit.get(num, False):
-                    self._ref_samples.append((x, y))
-            if len(self._ref_samples) > 24000:
-                del self._ref_samples[::2]          # keep the spread, halve the count
+        # positions of cars on the track (not in the pit lane): what any drawn outline is checked
+        # against, and what a known layout is fitted onto
+        for num, x, y, on_track in sample["cars"]:
+            if on_track and not self._in_pit.get(num, False):
+                self._ref_samples.append((x, y))
+        if len(self._ref_samples) > 24000:
+            del self._ref_samples[::2]              # keep the spread, halve the count
         if geo is None:
             for num, x, y, _ in sample["cars"]:
                 self.outline_learner.observe(num, x, y, self._laps.get(num), self._in_pit.get(num, False))
@@ -862,48 +864,131 @@ class Engine:
         si = self.feed_state.get("SessionInfo") or {}
         return ((si.get("Meeting") or {}).get("Circuit") or {}).get("ShortName") or ""
 
-    def _ref_poll(self, mono: float) -> None:
-        """Every 15 s while the outline is missing or only learned: fit the known layout of the
-        circuit onto the collected car positions (worker thread)."""
-        geo = self.geometry
-        if self._track_id is None or self._track_id[0] is None or (geo is not None and geo.source != "learned"):
-            return
-        if (self._ref_task is not None and not self._ref_task.done()) or mono - self._ref_last < 15:
-            return
-        if len(self._ref_samples) < MIN_SAMPLES or "reference" in self.tracks.rejected(self._track_id[0]):
-            return
+    def _ref_hint(self) -> Optional[str]:
         si = self.feed_state.get("SessionInfo") or {}
         meeting = si.get("Meeting") or {}
-        ref_id = reference_id(self._circuit_name(), meeting.get("Location"), meeting.get("Name"))
-        self._ref_last = mono
-        if ref_id is None:
-            if self._ref_note != "unknown":
-                self._ref_note = "unknown"
-                log.info("No known layout for circuit %s (%s) - the outline is learned from a lap",
-                         self._track_id[0], self._circuit_name())
-            return
-        self._ref_task = asyncio.get_event_loop().create_task(self._ref_fit(ref_id, list(self._ref_samples)))
+        return reference_id(self._circuit_name(), meeting.get("Location"), meeting.get("Name"))
 
-    async def _ref_fit(self, ref_id: str, samples: list) -> None:
-        key = self._track_id[0] if self._track_id else None
-        ref = reference_points(ref_id)
-        if ref is None or key is None:
+    def _ref_poll(self, mono: float) -> None:
+        """The outline is kept honest by the car positions (worker thread, every 20 s at most):
+
+        * a circuit you chose yourself: that known layout is fitted onto the positions;
+        * no outline / only a learned lap: the known layout of the circuit is fitted - if the
+          name is unknown or its layout does not fit, every bundled layout is tried;
+        * any other outline (MultiViewer, a fitted layout) is checked every minute: when the
+          cars drive where it has no track (part missing, another layout), it is replaced by
+          the known layout that fits.
+        The pit lane is never touched."""
+        if self._track_id is None or self._track_id[0] is None:
             return
-        fit = await asyncio.to_thread(fit_reference, ref, samples)
+        if (self._ref_task is not None and not self._ref_task.done()) or mono - self._ref_last < 20:
+            return
+        if len(self._ref_samples) < MIN_SAMPLES:
+            return
+        key = self._track_id[0]
+        geo = self.geometry
+        choice = self.tracks.choice(key)
+        if choice:
+            if geo is not None and geo.source == "reference" and (geo.info or {}).get("ref_id") == choice \
+                    and not (geo.info or {}).get("unaligned"):
+                return
+            job = ("choice", choice)
+        elif geo is None or geo.source == "learned":
+            if "reference" in self.tracks.rejected(key):
+                return
+            job = ("identify", self._ref_hint())
+        elif geo.source in ("multiviewer", "reference"):
+            if mono - self._check_last < 60:
+                return
+            self._check_last = mono
+            job = ("check", None)
+        else:
+            return
+        self._ref_last = mono
+        self._ref_task = asyncio.get_event_loop().create_task(self._ref_job(job, list(self._ref_samples)))
+
+    async def _ref_job(self, job: tuple, samples: list) -> None:
+        kind, arg = job
+        key = self._track_id[0] if self._track_id else None
+        if key is None:
+            return
+        if kind == "check":
+            geo = self.geometry
+            if geo is None:
+                return
+            chk = await asyncio.to_thread(check_outline, geo.points, samples)
+            if chk.ok is not False:
+                if geo.info.get("check") != chk.reason and chk.ok:
+                    geo.info = {**geo.info, "check": chk.reason}
+                return
+            log.warning("Track map of circuit %s (%s) does not match the cars: %s - looking for the known layout "
+                        "that does", key, geo.source, chk.reason)
+            rid, fit = await asyncio.to_thread(identify, samples, self._ref_hint())
+            note = f"replaced the {geo.source} outline: {chk.reason}"
+        elif kind == "choice":
+            ref = reference_points(arg)
+            if ref is None:
+                return
+            fit = await asyncio.to_thread(fit_reference, ref, samples)
+            rid, note = arg, "the circuit you chose"
+        else:
+            rid, fit = await asyncio.to_thread(identify, samples, arg)
+            note = "known layout of this circuit" if rid == arg else "identified from the car positions"
         if self._track_id is None or self._track_id[0] != key:
             return                                  # another circuit meanwhile
-        if not fit.ok:
-            if self._ref_note != fit.reason:
-                self._ref_note = fit.reason
-                log.info("Known layout %s for circuit %s: %s", ref_id, key, fit.reason)
+        if not fit.ok or rid is None:
+            msg = f"{rid or arg or 'no known layout'}: {fit.reason}"
+            if self._ref_note != msg:
+                self._ref_note = msg
+                log.info("Track layout for circuit %s: %s", key, msg)
             return
-        geo = self.geometry
-        if geo is not None and geo.source not in ("learned",):
-            return
-        self.geometry = self.tracks.save_reference(key, self._circuit_name(), ref_id, fit)
+        if kind == "check" and self.geometry is not None and self.geometry.source == "reference" and \
+                (self.geometry.info or {}).get("ref_id") == rid:
+            return                                  # the same fit again: nothing better found
+        self.geometry = self.tracks.save_reference(key, self._circuit_name(), rid, fit)
         self.geometry.year = self._track_id[1]
+        self.geometry.info["note"] = note
         self.tracks.attach_pitlane(self.geometry, self._track_id[1])     # (read only: the cached pit lane)
+        self._ref_note = None
+        log.info("Track map of circuit %s: known layout %s (%s; %s)", key, rid, fit.reason, note)
         self.hub.set_track(self.geometry.to_dict())
+
+    def set_track_choice(self, ref_id: Optional[str]) -> str:
+        """Choose the circuit layout yourself (an id of known_layouts()) or "auto"."""
+        if self._track_id is None or self._track_id[0] is None:
+            return "No circuit known yet"
+        key, year = self._track_id
+        if ref_id in (None, "", "auto"):
+            self.tracks.set_choice(key, None)
+            self._ref_last = 0.0
+            if self._track_task and not self._track_task.done():
+                self._track_task.cancel()
+            self._track_task = asyncio.get_event_loop().create_task(
+                self._load_track(key, year, self._circuit_name(), rebuild=True))
+            return "Track layout: automatic"
+        if ref_id not in {e["id"] for e in known_layouts()}:
+            return "Unknown layout"
+        self.tracks.set_choice(key, ref_id)
+        self._ref_last = 0.0                        # fit it at the next poll
+        self._ref_note = None
+        n = len(self._ref_samples)
+        if n < MIN_SAMPLES:
+            # no car positions to fit it onto yet: show the layout as it is (north up, no cars on it)
+            ref = reference_points(ref_id)
+            if ref:
+                self.geometry = TrackGeometry(key, self._circuit_name(), year, "reference", [list(p) for p in ref],
+                                              info={"ref_id": ref_id, "chosen": True, "unaligned": True,
+                                                    "note": "not aligned yet - waiting for car positions"})
+                self.hub.set_track(self.geometry.to_dict())
+        return (f"Track layout {ref_id} chosen - fitted onto the car positions "
+                + ("now" if n >= MIN_SAMPLES else f"as soon as enough positions are in ({n}/{MIN_SAMPLES})"))
+
+    def track_choices(self) -> dict:
+        geo = self.geometry
+        key = self._track_id[0] if self._track_id else None
+        return {"circuit_key": key, "circuit": self._circuit_name(), "choice": self.tracks.choice(key) if key else None,
+                "source": geo.source if geo else None, "info": dict(geo.info) if geo else {},
+                "note": self._ref_note, "layouts": known_layouts()}
 
     def track_report(self) -> str:
         """"Track map wrong": the first request arms it, a second one within 8 s rebuilds the

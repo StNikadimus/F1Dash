@@ -59,6 +59,7 @@ class TrackGeometry:
     pitlane: Optional[list[Point]] = None
     pitlane_source: Optional[str] = None
     pitlane_info: dict = field(default_factory=dict)   # state / confidence / status / passes (pitlane.pit_info)
+    info: dict = field(default_factory=dict)           # outline: ref_id / fit / chosen / check (map legend)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -242,8 +243,12 @@ class TrackProvider:
             return None
         geo = None
         rejected = self.rejected(circuit_key)
+        choice = self.choice(circuit_key)
+        ref = self.dir / f"ref_{circuit_key}.json"
+        if choice:
+            geo = self._load_ref(ref, circuit_key, year, name, want=choice)   # the layout you chose, fitted
         cache = self.dir / f"mv_{circuit_key}_{year}.json"
-        if "multiviewer" not in rejected:
+        if geo is None and "multiviewer" not in rejected:
             if cache.exists():
                 geo = self._from_mv_file(cache, circuit_key, year)
             if geo is None:
@@ -256,17 +261,8 @@ class TrackProvider:
                     if geo:
                         log.warning("Using cached geometry %s for circuit %s/%s", p.name, circuit_key, year)
                         break
-        ref = self.dir / f"ref_{circuit_key}.json"
-        if geo is None and "reference" not in rejected and ref.exists():
-            try:
-                d = json.loads(ref.read_text())
-                geo = TrackGeometry(circuit_key=circuit_key, name=d.get("name") or name or "", year=year,
-                                    source="reference", points=d["points"])
-                geo.pitlane_info = {}
-                log.info("Loaded the known layout %s aligned to car positions for circuit %s (%s)",
-                         d.get("ref_id"), circuit_key, d.get("fit"))
-            except (OSError, ValueError, KeyError):
-                log.warning("Unreadable %s - ignored", ref.name)
+        if geo is None and "reference" not in rejected and not choice:
+            geo = self._load_ref(ref, circuit_key, year, name)
         learned = self.dir / f"learned_{circuit_key}.json"
         if geo is None and "learned" not in rejected and learned.exists():
             d = json.loads(learned.read_text())
@@ -284,6 +280,46 @@ class TrackProvider:
             geo.name = name
         self.attach_pitlane(geo, year)
         return geo
+
+    def _load_ref(self, path: Path, key: int, year: Optional[int], name: Optional[str],
+                  want: Optional[str] = None) -> Optional[TrackGeometry]:
+        if not path.exists():
+            return None
+        try:
+            d = json.loads(path.read_text())
+            if want and d.get("ref_id") != want:
+                return None
+            geo = TrackGeometry(circuit_key=key, name=d.get("name") or name or "", year=year,
+                                source="reference", points=d["points"],
+                                info={"ref_id": d.get("ref_id"), "fit": d.get("fit"), "chosen": bool(want)})
+            log.info("Loaded the known layout %s aligned to car positions for circuit %s (%s)",
+                     d.get("ref_id"), key, d.get("fit"))
+            return geo
+        except (OSError, ValueError, KeyError):
+            log.warning("Unreadable %s - ignored", path.name)
+            return None
+
+    # ---- the circuit you chose yourself ------------------------------------------
+    def _choices_path(self) -> Path:
+        return self.dir / "track_choice.json"
+
+    def choice(self, key: Optional[int]) -> Optional[str]:
+        try:
+            return json.loads(self._choices_path().read_text()).get(str(key))
+        except (OSError, ValueError):
+            return None
+
+    def set_choice(self, key: int, ref_id: Optional[str]) -> None:
+        try:
+            data = json.loads(self._choices_path().read_text())
+        except (OSError, ValueError):
+            data = {}
+        if ref_id:
+            data[str(key)] = ref_id
+        else:
+            data.pop(str(key), None)
+        _write_json(self._choices_path(), data)
+        log.info("Track layout for circuit %s: %s", key, ref_id or "automatic")
 
     def _from_mv_file(self, path: Path, key: int, year: Optional[int]) -> Optional[TrackGeometry]:
         try:
@@ -389,7 +425,8 @@ class TrackProvider:
                                                    "scale": fit.scale, "mirror": fit.mirror,
                                                    "rotation_deg": fit.rotation_deg})
         log.info("Saved the known layout %s aligned to car positions for circuit %s (%s)", ref_id, key, fit.reason)
-        return TrackGeometry(circuit_key=key, name=name, year=None, source="reference", points=fit.points)
+        return TrackGeometry(circuit_key=key, name=name, year=None, source="reference", points=fit.points,
+                             info={"ref_id": ref_id, "fit": fit.reason, "chosen": self.choice(key) == ref_id})
 
     def save_outline(self, key: int, name: str, points: list[Point]) -> TrackGeometry:
         _write_json(self.dir / f"learned_{key}.json", {"name": name, "points": points})
