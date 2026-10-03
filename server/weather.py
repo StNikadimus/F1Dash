@@ -240,6 +240,7 @@ class WeatherReport:
     sources: list
     display_seconds: int
     simulated: bool = False
+    radar: dict = field(default_factory=lambda: {"available": False, "reason": "radar disabled"})
 
     def to_dict(self) -> dict:
         return {"type": "weather_report", **asdict(self)}
@@ -264,7 +265,8 @@ def _fmt_window(f: dict, now_ms: float, lap: Optional[int], lap_s: Optional[floa
 
 
 def build_report(state: dict, now_ms: float, series: Optional[list], errors: list, cfg: dict,
-                 trend_c: Optional[float], trigger: str, simulated: bool = False) -> WeatherReport:
+                 trend_c: Optional[float], trigger: str, simulated: bool = False,
+                 radar: Optional[dict] = None) -> WeatherReport:
     th = {**DEFAULT_THRESHOLDS, **{k: float(v) for k, v in (cfg.get("thresholds") or {}).items() if k in DEFAULT_THRESHOLDS}}
     s = state.get("session") or {}
     w = state.get("weather") or {}
@@ -303,11 +305,18 @@ def build_report(state: dict, now_ms: float, series: Optional[list], errors: lis
     if fc.get("end_ms"):
         forecast["end_lap"], forecast["end_time"], _ = _fmt_window(fc, now_ms, lap, lap_s, total, "end_ms")
     forecast["text"] = forecast_text(current, forecast)
-    impact = race_impact(current, forecast)
+    radar = dict(radar or {"available": False, "reason": "radar disabled"})
+    if radar.get("available"):
+        eta = radar.get("rain_eta_minutes")
+        radar["rain_eta_lap"] = lap_at(now_ms + eta * 60_000, now_ms, lap, lap_s) if eta else None
+        if radar["rain_eta_lap"] and total and radar["rain_eta_lap"] > total:
+            radar["rain_eta_lap"] = None
+        sources += [f"radar: {radar.get('provider')}"]
+    impact = race_impact(current, forecast, radar)
     return WeatherReport(generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), session_lap=lap,
                          total_laps=total, trigger=trigger, current=current, forecast=forecast,
                          race_impact=impact, sources=sources,
-                         display_seconds=int(cfg.get("display_seconds", 15)), simulated=simulated)
+                         display_seconds=int(cfg.get("display_seconds", 15)), simulated=simulated, radar=radar)
 
 
 def forecast_text(cur: dict, f: dict) -> str:
@@ -347,9 +356,24 @@ def forecast_text(cur: dict, f: dict) -> str:
     return txt
 
 
-def race_impact(cur: dict, f: dict) -> dict:
+def race_impact(cur: dict, f: dict, radar: Optional[dict] = None) -> dict:
     """Fixed rules on the data above - never a value that is not in it, never a winner."""
     details = []
+    r = radar or {}
+    if r.get("available"):
+        mv, ci = r.get("movement"), r.get("current_intensity")
+        eta, lap = r.get("rain_eta_minutes"), r.get("rain_eta_lap")
+        inten = (r.get("area_max_intensity") or "").lower()
+        if mv == "OVER CIRCUIT" and ci not in (None, "NONE"):
+            details.append(f"The radar shows {ci.lower()} precipitation over the circuit now - grip will be "
+                           "reduced while it lasts.")
+        elif mv == "APPROACHING" and eta:
+            details.append(f"{inten.capitalize() or 'Rain'} precipitation is approaching the circuit; track "
+                           f"conditions may deteriorate within ~{eta} min{f' (~lap {lap})' if lap else ''}.")
+        elif mv == "APPROACHING":
+            details.append("Precipitation is approaching the circuit on the radar; its arrival time is uncertain.")
+        elif mv == "MOVING AWAY":
+            details.append("The rain on the radar is moving away from the circuit.")
     raining = cur.get("rainfall") is True
     inten = f.get("intensity")
     if f.get("available") and f.get("rain_expected"):
@@ -412,7 +436,12 @@ def scenario_series(name: str, now_ms: float) -> Optional[list]:
 
 
 SCENARIO_CURRENT = {"dry": False, "drizzle": False, "light": False, "medium": False, "heavy": False,
-                    "stopping": True, "noforecast": False, "disagree": False}
+                    "stopping": True, "noforecast": False, "disagree": False,
+                    # radar test states (server/radar.py) with a matching simulated forecast
+                    "norain": False, "approaching": False, "over": True, "away": True, "heavyrain": False,
+                    "radaroff": False}
+RADAR_TEST_FORECAST = {"norain": "dry", "approaching": "light", "over": "stopping", "away": "stopping",
+                       "heavyrain": "heavy", "radaroff": "light"}
 SCENARIOS = tuple(SCENARIO_CURRENT)
 
 
@@ -434,6 +463,11 @@ class WeatherReporter:
         self._base: Optional[int] = None           # last lap multiple already reported (or skipped)
         self._hist: list = []                      # [(shown ms, track temp)] for the trend
         self.last: Optional[dict] = None
+        from .radar import Radar
+        th = {**DEFAULT_THRESHOLDS, **{k: float(v) for k, v in (self.cfg.get("thresholds") or {}).items()
+                                      if k in DEFAULT_THRESHOLDS}}
+        rcfg = self.cfg.get("radar") or {}
+        self.radar = Radar(rcfg, th) if self.enabled and rcfg.get("enabled", True) else None
 
     def observe(self, state: dict, shown_ms: float) -> Optional[int]:
         """Every published state. -> the lap to report now, or None."""
@@ -480,16 +514,37 @@ class WeatherReporter:
         self._cache[key] = (time.monotonic(), series, errors)
         return series, errors
 
+    async def radar_for(self, location: Optional[tuple], shown_ms: float, outline: Optional[list],
+                        name: Optional[str]) -> dict:
+        if self.radar is None:
+            return {"available": False, "reason": "radar disabled ([weather.radar] enabled = false)"}
+        if abs(time.time() * 1000 - shown_ms) > LIVE_WINDOW_MS:
+            return {"available": False, "reason": "no radar for a recording (radar shows now)"}
+        if location is None:
+            return {"available": False, "reason": "circuit location unknown"}
+        frames, age, maps, errors = await self.radar.get(location[0], location[1], shown_ms)
+        return self.radar.build(location[0], location[1], shown_ms, frames, age, maps, errors, outline, name)
+
     async def report(self, state: dict, shown_ms: float, location: Optional[tuple], trigger: str,
-                     scenario: Optional[str] = None) -> Optional[dict]:
+                     scenario: Optional[str] = None, outline: Optional[list] = None,
+                     name: Optional[str] = None) -> Optional[dict]:
         if scenario:
-            series, errors = scenario_series(scenario, shown_ms), []
+            from .radar import scenario_frames
+            series, errors = scenario_series(RADAR_TEST_FORECAST.get(scenario, scenario), shown_ms), []
             st = json.loads(json.dumps(state, default=str))
             st.setdefault("weather", {})["rainfall"] = SCENARIO_CURRENT.get(scenario, False)
-            rep = build_report(st, shown_ms, series, errors, self.cfg, self.trend(shown_ms), "test", simulated=True)
+            radar = {"available": False, "reason": "radar disabled"}
+            if self.radar is not None:
+                loc = location or (45.0, 9.0)
+                fr = scenario_frames(scenario, shown_ms, self.radar.n, float(self.radar.cfg["radius_km"]))
+                radar = self.radar.build(loc[0], loc[1], shown_ms, fr, 0 if fr else None, None,
+                                         [] if fr else ["SIMULATED: radar unavailable"], outline, name, simulated=True)
+            rep = build_report(st, shown_ms, series, errors, self.cfg, self.trend(shown_ms), "test", simulated=True,
+                               radar=radar)
         else:
-            series, errors = await self.forecast(location, shown_ms)
-            rep = build_report(state, shown_ms, series, errors, self.cfg, self.trend(shown_ms), trigger)
+            (series, errors), radar = await asyncio.gather(self.forecast(location, shown_ms),
+                                                           self.radar_for(location, shown_ms, outline, name))
+            rep = build_report(state, shown_ms, series, errors, self.cfg, self.trend(shown_ms), trigger, radar=radar)
             if not rep.current["available"] and not rep.forecast["available"] and trigger == "auto":
                 log.info("[WEATHER] No weather data for the lap %s report - not shown", rep.session_lap)
                 return None
@@ -498,6 +553,13 @@ class WeatherReporter:
                  _u(c["air_temperature"], "°C"), _u(c["track_temperature"], "°C"), _u(c["humidity"], "%"),
                  c["condition"] or "rain N/A")
         log.info("[WEATHER] Forecast: %s", f["text"] if f["available"] else f"unavailable ({f.get('reason')})")
+        r = rep.radar
+        if r.get("available"):
+            log.info("[WEATHER] Radar: %s at the circuit, %s, ETA %s (%s)", r.get("current_intensity") or "N/A",
+                     r.get("movement") or "no movement", r.get("rain_eta_minutes") if r.get("rain_eta_minutes")
+                     is not None else r.get("eta_label") or "-", r.get("provider"))
+        else:
+            log.info("[WEATHER] Radar unavailable (%s)", r.get("reason"))
         log.info("[WEATHER] Report generated for lap %s (%s)", rep.session_lap, trigger)
         self.last = rep.to_dict()
         return self.last

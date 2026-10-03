@@ -51,7 +51,10 @@ DEFAULTS: dict[str, Any] = {
     # weather report popup (server/weather.py)
     "weather": {"enabled": True, "every_laps": 15, "display_seconds": 15, "forecast_cache_seconds": 600,
                 "horizon_hours": 3, "test_auto": False,
-                "thresholds": {"drizzle_mm_h": 0.1, "light_mm_h": 0.5, "medium_mm_h": 2.5, "heavy_mm_h": 7.6}},
+                "thresholds": {"drizzle_mm_h": 0.1, "light_mm_h": 0.5, "medium_mm_h": 2.5, "heavy_mm_h": 7.6},
+                "radar": {"enabled": True, "radius_km": 100, "grid_points": 9, "animation": True,
+                          "history_minutes": 30, "forecast_minutes": 30, "refresh_seconds": 180,
+                          "max_age_seconds": 900, "max_zoom": 7}},
     "dashboard": {
         "interp_delay_ms": 1200, "map_fps": 30, "animations": "full",
         "pulse_period_ms": 2400, "reorder_ms": 450, "auto_cycle_seconds": 20,

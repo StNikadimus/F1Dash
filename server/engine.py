@@ -28,8 +28,8 @@ from .pitlane import (PitLaneCollector, Reconstruction, collect_from_events, dev
                       reconstruct, traversals_from_samples)
 from .pitlane_seed import seed_pitlane
 from .track import OutlineLearner, TrackGeometry, TrackProvider, outline_problem
-from .track_match import (MIN_SAMPLES, _Grid, _densify, check_outline, circuit_location, fit_reference,
-                          known_layouts, reference_id, reference_points)
+from .track_match import (MIN_SAMPLES, _Grid, _densify, check_outline, circuit_location, circuit_outline_latlon,
+                          fit_reference, known_layouts, reference_id, reference_points)
 from .weather import SCENARIOS, WeatherReporter
 
 log = logging.getLogger("engine")
@@ -1178,11 +1178,16 @@ class Engine:
     def _start_weather(self, state: dict, why: str, trigger: str, scenario: Optional[str] = None) -> bool:
         if self._wx_task is not None and not self._wx_task.done():
             return False
-        loc = circuit_location(self._ref_hint())
+        ref = self.tracks.choice(self._track_id[0]) if self._track_id and self._track_id[0] is not None else None
+        ref = ref or self._ref_hint()            # the circuit you chose, else the session's circuit
+        loc = circuit_location(ref)
+        outline = circuit_outline_latlon(ref)
+        name = self._circuit_name() or (state.get("session") or {}).get("circuit_name")
 
         async def go() -> None:
             try:
-                rep = await self.weather.report(state, self._shown_ms(state), loc, trigger, scenario)
+                rep = await self.weather.report(state, self._shown_ms(state), loc, trigger, scenario,
+                                                outline=outline, name=name)
             except Exception:  # noqa: BLE001
                 log.exception("[WEATHER] Report failed (%s)", why)
                 return

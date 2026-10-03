@@ -132,6 +132,19 @@ light_mm_h = 0.5
 medium_mm_h = 2.5
 heavy_mm_h = 7.6
 
+# Weather radar in the report (server/radar.py): RainViewer radar imagery (observed) + Open-Meteo
+# 15-min precipitation grid (intensity, movement, rain ETA). No keys.
+[weather.radar]
+enabled = true
+radius_km = 100          # area around the circuit
+grid_points = 9          # 9 x 9 numeric grid (odd: a point on the circuit)
+animation = true
+history_minutes = 30
+forecast_minutes = 30
+refresh_seconds = 180    # radar data is fetched only for a report and kept this long
+max_age_seconds = 900    # older cached radar is not shown
+max_zoom = 7             # RainViewer tile zoom limit
+
 [dashboard]
 # Frontend interpolation buffer for car movement (milliseconds). Position
 # data arrives in batches, so the map is drawn slightly in the past.

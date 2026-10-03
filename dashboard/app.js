@@ -364,7 +364,7 @@
   // ------------------------------------------------------------------ weather report popup (server/weather.py)
   let wxTimer = null;
   function showWeatherReport(r) {
-    const c = r.current || {}, f = r.forecast || {}, ri = r.race_impact || {};
+    const c = r.current || {}, f = r.forecast || {}, ri = r.race_impact || {}, rd = r.radar || {};
     const u = (v, unit, dp = 1) => has(v) ? `${Number(v).toFixed(dp)}<small>${unit}</small>` : NA;
     const tile = (k, v, cls) => `<div class="tile ${cls || ""}"><div class="k">${k}</div><div class="v">${v}</div></div>`;
     const tr = has(c.track_temp_trend_c) && Math.abs(c.track_temp_trend_c) >= 0.5
@@ -381,28 +381,165 @@
       dur = has(f.duration_min) ? `~${esc(f.duration_min)}<small> min</small>` : NA;
     }
     if (f.available) conf = esc(f.confidence || "N/A");
+    // RADAR: ETA (an estimate from the radar / nowcast data - never shown as exact)
+    let eta = NA;
+    if (rd.available) {
+      if (has(rd.rain_eta_minutes) && rd.rain_eta_minutes > 0) {
+        eta = `~${esc(rd.rain_eta_minutes)}<small> MIN</small>${has(rd.rain_eta_lap) ? ` / <small>LAP</small> ${esc(rd.rain_eta_lap)}` : ""}`;
+      } else eta = esc(rd.eta_label || (rd.rain_eta_minutes === 0 ? "NOW" : "—"));
+    }
+    const mv = rd.available ? esc(rd.movement || "—") + (has(rd.direction_deg) && rd.speed_kmh ? ` <small>${esc(compass(rd.direction_deg))} ${esc(rd.speed_kmh)} km/h</small>` : "") : NA;
     const lap = has(r.session_lap) ? `LAP ${esc(r.session_lap)}${has(r.total_laps) ? " / " + esc(r.total_laps) : ""}` : "";
+    const hhmm = (ms) => { const d = new Date(ms); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
+    const rsrc = !rd.available ? `RADAR UNAVAILABLE${rd.reason ? " · " + esc(rd.reason) : ""}`
+      : `RADAR: ${esc(rd.provider || "")}${has(rd.timestamp_ms) ? " · " + hhmm(rd.timestamp_ms) : ""}` +
+        (rd.age_s > 60 ? ` · updated ${Math.round(rd.age_s / 60)} min ago` : "") + (rd.stale ? " · STALE" : "");
     $("wx-box").innerHTML =
       `<h2>🌦 WEATHER REPORT ${r.simulated ? '<span class="wx-sim">SIMULATED</span>' : ""}<span class="wx-lap">${lap}</span></h2>` +
-      `<div class="wx-sec">CURRENT${c.available ? "" : " · F1 SESSION WEATHER UNAVAILABLE"}</div>` +
-      `<div class="wx-tiles">${tile("AIR", u(c.air_temperature, "°C"))}${tile("TRACK", u(c.track_temperature, "°C") + tr)}` +
-      `${tile("HUMIDITY", u(c.humidity, "%", 0))}${tile("WIND", has(c.wind_speed_kmh) ? arrow + u(c.wind_speed_kmh, " km/h", 0) + (c.wind_direction ? ` <small>${esc(c.wind_direction)}</small>` : "") : NA)}` +
-      `${tile("RAIN", rainCur, c.rainfall ? "wx-rain" : "")}${tile("CONDITION", c.condition ? esc(c.condition) : NA)}</div>` +
-      `<div class="wx-sec">FORECAST</div>` +
-      `<div class="wx-tiles f4">${tile("RAIN", rainF, f.rain_expected ? "wx-rain" : "")}${tile("INTENSITY", inten, "wx-i-" + esc(f.intensity || ""))}` +
-      `${tile("DURATION", dur)}${tile("CONFIDENCE", conf)}</div>` +
-      `<div class="wx-sec">EXPECTED</div><div class="wx-text">${esc(f.text || "Forecast unavailable.")}</div>` +
+      `<div class="wx-cols"><div class="wx-radar">` +
+        `<div class="wx-sec">RADAR</div><div class="wx-rmap"><canvas id="wx-canvas"></canvas>` +
+          `<div class="wx-rlabel" id="wx-rlabel"></div>${rd.available ? "" : '<div class="wx-roff">RADAR UNAVAILABLE</div>'}</div>` +
+        `<div class="wx-legend">${["DRIZZLE", "LIGHT", "MEDIUM", "HEAVY"].map((k) => `<span><i style="background:${RADAR_COL[k]}"></i>${k}</span>`).join("")}</div>` +
+        `<div class="wx-tiles">${tile("RAIN ETA", eta, "wx-eta")}${tile("AT CIRCUIT", rd.available ? esc(rd.current_intensity || "N/A") : NA, "wx-i-" + esc(rd.current_intensity || ""))}` +
+        `${tile("MOVEMENT", mv)}</div>` +
+        `<div class="wx-rsrc">${rsrc}</div>` +
+      `</div><div class="wx-info">` +
+        `<div class="wx-sec">CURRENT${c.available ? " · F1 TIMING" : " · F1 SESSION WEATHER UNAVAILABLE"}</div>` +
+        `<div class="wx-tiles">${tile("AIR", u(c.air_temperature, "°C"))}${tile("TRACK", u(c.track_temperature, "°C") + tr)}` +
+        `${tile("HUMIDITY", u(c.humidity, "%", 0))}${tile("WIND", has(c.wind_speed_kmh) ? arrow + u(c.wind_speed_kmh, " km/h", 0) + (c.wind_direction ? ` <small>${esc(c.wind_direction)}</small>` : "") : NA)}` +
+        `${tile("RAIN", rainCur, c.rainfall ? "wx-rain" : "")}${tile("CONDITION", c.condition ? esc(c.condition) : NA)}</div>` +
+        `<div class="wx-sec">FORECAST</div>` +
+        `<div class="wx-tiles f2">${tile("RAIN", rainF, f.rain_expected ? "wx-rain" : "")}${tile("INTENSITY", inten, "wx-i-" + esc(f.intensity || ""))}` +
+        `${tile("DURATION", dur)}${tile("CONFIDENCE", conf)}</div>` +
+        `<div class="wx-sec">EXPECTED</div><div class="wx-text">${esc(f.text || "Forecast unavailable.")}</div>` +
+      `</div></div>` +
       `<div class="wx-sec">RACE IMPACT</div><div class="wx-text">${esc(ri.summary || "")}</div>` +
       (ri.details || []).map((x) => `<div class="wx-text dim">${esc(x)}</div>`).join("") +
       `<div class="wx-foot">SOURCES: ${esc((r.sources || []).join(" · ") || "none")}` +
       (f.available && f.rain_expected ? (f.lap_estimate ? ` · laps estimated from the leader's pace (${esc(f.lap_time_s)} s/lap), not an official F1 prediction` : " · no lap estimate (race pace unknown)") : "") +
-      (f.available ? " · hourly forecast models, compared" : "") + "</div>";
+      (rd.available ? " · radar ETA = estimate from radar / nowcast data" : "") + "</div>";
     const box = $("wx-report");
     box.hidden = false;
+    WxRadar.start(rd);
     clearTimeout(wxTimer);
-    wxTimer = setTimeout(() => { box.hidden = true; }, Math.max(5, r.display_seconds || 15) * 1000);
+    wxTimer = setTimeout(() => { box.hidden = true; WxRadar.stop(); }, Math.max(5, r.display_seconds || 15) * 1000);
   }
-  $("wx-report").addEventListener("click", () => { $("wx-report").hidden = true; clearTimeout(wxTimer); });
+  const RADAR_COL = { DRIZZLE: "rgba(120,200,255,.55)", LIGHT: "rgba(40,140,255,.7)", MEDIUM: "rgba(255,200,40,.8)", HEAVY: "rgba(240,60,60,.85)" };
+  function compass(deg) {
+    const d = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+    return d[Math.round(((deg % 360) + 360) % 360 / 22.5) % 16];
+  }
+  // The radar map: RainViewer radar tiles (observed) and / or the numeric precipitation grid, centred on
+  // the circuit; range rings, the circuit marker above the precipitation, frames PAST -> NOW -> FORECAST.
+  const WxRadar = (() => {
+    let timer = null, data = null, idx = 0, seq = [];
+    const imgs = new Map();
+    function img(url) {
+      if (!imgs.has(url)) { const im = new Image(); im.crossOrigin = "anonymous"; im.onload = () => draw(); im.src = url; imgs.set(url, im); }
+      return imgs.get(url);
+    }
+    function cat(v, th) {
+      if (!has(v) || v < th.drizzle_mm_h) return null;
+      return v >= th.heavy_mm_h ? "HEAVY" : v >= th.medium_mm_h ? "MEDIUM" : v >= th.light_mm_h ? "LIGHT" : "DRIZZLE";
+    }
+    function draw() {
+      const cv = document.getElementById("wx-canvas");
+      if (!cv || !data) return;
+      const S = cv.clientWidth || 300, dpr = window.devicePixelRatio || 1;
+      if (cv.width !== Math.round(S * dpr)) { cv.width = Math.round(S * dpr); cv.height = Math.round(S * dpr); }
+      const g = cv.getContext("2d");
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, S, S);
+      g.fillStyle = "#0b1118"; g.fillRect(0, 0, S, S);
+      if (!data.available) return;
+      const R = data.radius_km, k = S / 2 / R, lat0 = data.center.lat, lon0 = data.center.lon;
+      const kmLon = 111.32 * Math.cos(lat0 * Math.PI / 180);
+      const P = (lat, lon) => [S / 2 + (lon - lon0) * kmLon * k, S / 2 - (lat - lat0) * 111.32 * k];
+      const fr = seq[idx] || seq[seq.length - 1];
+      if (fr && fr.src === "rv") {
+        // RainViewer web-mercator tiles at zoom z, scaled to the km scale of the map
+        const rv = data.rainviewer, z = rv.zoom, n = 2 ** z, ts = 256;
+        const wx = (lon0 + 180) / 360 * n * ts;
+        const lr = lat0 * Math.PI / 180, wy = (1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n * ts;
+        const kmPx = 40075 * Math.cos(lr) / (n * ts), sc = kmPx * k;
+        const half = S / 2 / sc;
+        for (let tx = Math.floor((wx - half) / ts); tx <= Math.floor((wx + half) / ts); tx++) {
+          for (let ty = Math.floor((wy - half) / ts); ty <= Math.floor((wy + half) / ts); ty++) {
+            if (ty < 0 || ty >= n) continue;
+            const im = img(`${rv.host}${fr.path}/256/${z}/${((tx % n) + n) % n}/${ty}/${rv.color}/${rv.options}.png`);
+            if (im.complete && im.naturalWidth) g.drawImage(im, S / 2 + (tx * ts - wx) * sc, S / 2 + (ty * ts - wy) * sc, ts * sc, ts * sc);
+          }
+        }
+      } else if (fr) {
+        const N = data.grid.n, step = 2 * R / (N - 1);
+        fr.cells.forEach((v, i) => {
+          const c = cat(v, data.thresholds || {});
+          if (!c) return;
+          const e = -R + (i % N) * step, no = R - Math.floor(i / N) * step;
+          const x = S / 2 + e * k, y = S / 2 - no * k, rr = step * k * 0.85;
+          const gr = g.createRadialGradient(x, y, 0, x, y, rr);
+          gr.addColorStop(0, RADAR_COL[c]); gr.addColorStop(1, "rgba(0,0,0,0)");
+          g.fillStyle = gr; g.beginPath(); g.arc(x, y, rr, 0, Math.PI * 2); g.fill();
+        });
+      }
+      // range rings + north
+      g.strokeStyle = "rgba(255,255,255,.18)"; g.lineWidth = 1;
+      for (const f of [0.5, 1]) { g.beginPath(); g.arc(S / 2, S / 2, S / 2 * f - 1, 0, Math.PI * 2); g.stroke(); }
+      g.fillStyle = "rgba(255,255,255,.5)"; g.font = "700 10px sans-serif";
+      g.fillText(`${Math.round(R / 2)} km`, S / 2 + 3, S / 4 - 3); g.fillText("N", S / 2 - 3, 11);
+      // circuit marker (above the precipitation): ring, the real outline magnified, name
+      g.strokeStyle = "#fff"; g.lineWidth = 2; g.beginPath(); g.arc(S / 2, S / 2, 13, 0, Math.PI * 2); g.stroke();
+      const ol = data.outline || [];
+      if (ol.length > 3) {
+        let mx = 0; for (const p of ol) { const q = P(p[0], p[1]); mx = Math.max(mx, Math.abs(q[0] - S / 2), Math.abs(q[1] - S / 2)); }
+        const m = mx > 0 ? 9 / mx : 1;
+        g.strokeStyle = "#ff1e28"; g.lineWidth = 2; g.beginPath();
+        ol.forEach((p, i) => { const q = P(p[0], p[1]); const x = S / 2 + (q[0] - S / 2) * m, y = S / 2 + (q[1] - S / 2) * m; i ? g.lineTo(x, y) : g.moveTo(x, y); });
+        g.closePath(); g.stroke();
+      } else { g.fillStyle = "#ff1e28"; g.beginPath(); g.arc(S / 2, S / 2, 4, 0, Math.PI * 2); g.fill(); }
+      if (data.circuit) {
+        g.font = "800 11px sans-serif";
+        let name = data.circuit.toUpperCase();
+        while (name.length > 4 && g.measureText(name).width > S - 24) name = name.slice(0, -2).trimEnd() + "…";
+        const w = g.measureText(name).width;
+        g.fillStyle = "rgba(0,0,0,.65)"; g.fillRect(S / 2 - w / 2 - 4, S / 2 + 16, w + 8, 15);
+        g.fillStyle = "#fff"; g.fillText(name, S / 2 - w / 2, S / 2 + 27);
+      }
+      // movement arrow (from the analysis), bottom right
+      if (has(data.direction_deg) && data.speed_kmh) {
+        g.save(); g.translate(S - 24, S - 24); g.rotate(data.direction_deg * Math.PI / 180);
+        g.strokeStyle = "#fff"; g.lineWidth = 2.5; g.beginPath(); g.moveTo(0, 12); g.lineTo(0, -12); g.moveTo(-6, -5); g.lineTo(0, -12); g.lineTo(6, -5); g.stroke();
+        g.restore();
+      }
+      const lab = document.getElementById("wx-rlabel");
+      if (lab && fr) {
+        const rel = Math.round((fr.t - Date.now()) / 60000);
+        lab.textContent = (fr.kind === "forecast" || fr.kind === "nowcast" ? "FORECAST " : fr.kind === "now" || Math.abs(rel) <= 5 ? "NOW " : "PAST ") +
+          (Math.abs(rel) <= 5 ? "" : (rel > 0 ? "+" : "−") + Math.abs(rel) + " min") + (fr.src === "rv" ? " · RADAR" : data.simulated ? " · SIMULATED" : " · MODEL GRID");
+      }
+    }
+    function start(rd) {
+      stop(); data = rd; idx = 0; seq = [];
+      if (rd && rd.available) {
+        const rv = rd.rainviewer;
+        if (rv && rv.frames && rv.frames.length) {
+          seq = rv.frames.map((x) => ({ src: "rv", t: x.t, path: x.path, kind: x.kind }));
+          // future: RainViewer nowcast if it has one, else the numeric forecast frames (labelled)
+          if (!rv.frames.some((x) => x.kind === "nowcast")) seq = seq.concat((rd.frames || []).filter((x) => x.kind === "forecast").map((x) => ({ ...x, src: "grid" })));
+        } else seq = (rd.frames || []).map((x) => ({ ...x, src: "grid" }));
+        const nowI = Math.max(0, seq.reduce((a, x, i) => (x.t <= Date.now() ? i : a), 0));
+        idx = rd.animation ? 0 : nowI;
+        if (rd.animation && seq.length > 1) {
+          const tick = () => { idx = (idx + 1) % seq.length; draw(); timer = setTimeout(tick, idx === nowI ? 1600 : idx === seq.length - 1 ? 1400 : 700); };
+          timer = setTimeout(tick, 700);
+        }
+      }
+      requestAnimationFrame(draw);
+    }
+    function stop() { clearTimeout(timer); timer = null; }
+    return { start, stop };
+  })();
+  $("wx-report").addEventListener("click", () => { $("wx-report").hidden = true; clearTimeout(wxTimer); WxRadar.stop(); });
 
   // ------------------------------------------------------------------ MODE selector (AUTO / LIVE / VOD)
   function resetData() {
