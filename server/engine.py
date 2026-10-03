@@ -28,8 +28,9 @@ from .pitlane import (PitLaneCollector, Reconstruction, collect_from_events, dev
                       reconstruct, traversals_from_samples)
 from .pitlane_seed import seed_pitlane
 from .track import OutlineLearner, TrackGeometry, TrackProvider, outline_problem
-from .track_match import (MIN_SAMPLES, _Grid, _densify, check_outline, fit_reference, known_layouts,
-                          reference_id, reference_points)
+from .track_match import (MIN_SAMPLES, _Grid, _densify, check_outline, circuit_location, fit_reference,
+                          known_layouts, reference_id, reference_points)
+from .weather import SCENARIOS, WeatherReporter
 
 log = logging.getLogger("engine")
 
@@ -119,10 +120,15 @@ class Engine:
         self._rate = source.speed
         self._clock_sent: Optional[tuple] = None
         self._selected: Optional[str] = None
+        # weather report popup every N race laps (server/weather.py)
+        self.weather = WeatherReporter(cfg.get("weather"), source.mode)
+        self._wx_task: Optional[asyncio.Task] = None
+        self._last_state: Optional[dict] = None
 
     def close(self) -> None:
         """The data source is being switched (LIVE <-> VOD): stop this engine's background jobs."""
-        for t in (self._detect_task, self._track_task, self._ref_task, self._seed_task, self._pit_task):
+        for t in (self._detect_task, self._track_task, self._ref_task, self._seed_task, self._pit_task,
+                  self._wx_task):
             if t is not None and not t.done():
                 t.cancel()
 
@@ -1158,6 +1164,48 @@ class Engine:
                 "source": geo.source if geo else None, "info": dict(geo.info) if geo else {},
                 "note": self._ref_note, "layouts": known_layouts()}
 
+    # ------------------------------------------------------------------ weather report popup
+    def _shown_ms(self, state: dict) -> float:
+        now = (state.get("session") or {}).get("now_ms")
+        return float(now) if now is not None else self._target_dt().timestamp() * 1000
+
+    def _weather_tick(self, state: dict) -> None:
+        self._last_state = state
+        lap = self.weather.observe(state, self._shown_ms(state))
+        if lap is not None:
+            self._start_weather(state, f"after lap {lap}", "auto")
+
+    def _start_weather(self, state: dict, why: str, trigger: str, scenario: Optional[str] = None) -> bool:
+        if self._wx_task is not None and not self._wx_task.done():
+            return False
+        loc = circuit_location(self._ref_hint())
+
+        async def go() -> None:
+            try:
+                rep = await self.weather.report(state, self._shown_ms(state), loc, trigger, scenario)
+            except Exception:  # noqa: BLE001
+                log.exception("[WEATHER] Report failed (%s)", why)
+                return
+            if rep is not None:
+                self.hub.broadcast(rep)
+        self._wx_task = asyncio.get_event_loop().create_task(go())
+        return True
+
+    def request_weather_report(self, scenario: Optional[str] = None) -> str:
+        """Remote / dashboard: show a weather report now. A scenario (simulated forecast) only in TEST mode."""
+        if not self.weather.enabled:
+            return "Weather report is disabled ([weather] enabled = false)"
+        if scenario and self.source.mode != "test":
+            return "Simulated weather scenarios only in TEST mode"
+        if scenario and scenario not in SCENARIOS:
+            return f"Unknown scenario - one of: {', '.join(SCENARIOS)}"
+        state = self._last_state
+        if state is None:
+            return "No session data yet"
+        if not self._start_weather(state, "requested", "manual", scenario):
+            return "Weather report is being prepared"
+        return "Weather report" + (f" (simulated: {scenario})" if scenario else "")
+
     def track_report(self) -> str:
         """"Track map wrong": the first request arms it, a second one within 8 s rebuilds the
         outline of this circuit (cached outline deleted, the source shown rejected for it). The
@@ -1308,6 +1356,10 @@ class Engine:
                     self.hub.publish_state(state)
                 except Exception:  # noqa: BLE001 - never let one state end the publishing for good
                     self._parse_error("publish")
+                try:
+                    self._weather_tick(state)
+                except Exception:  # noqa: BLE001
+                    self._parse_error("weather")
             if self._tel_dirty and now - last_tel >= TEL_INTERVAL:
                 self._tel_dirty = False
                 last_tel = now

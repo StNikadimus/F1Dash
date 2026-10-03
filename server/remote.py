@@ -36,6 +36,8 @@ COMMANDS = {
     "SYNC_START", "SYNC_CONFIRM", "SYNC_CLEAR", "SYNC_PIN", "SYNC_MENU", "SYNC_KEEP_OLD", "SYNC_USE_NEW",
     # track map wrong: rebuild the outline of this circuit (pit lane kept)
     "TRACK_REPORT",
+    # weather report popup now (arg in TEST mode: a simulated scenario, see server/weather.py)
+    "WEATHER_REPORT",
     # LIVE / VOD mode selector (server/mode.py): AUTO detection or a manual override
     "SET_MODE", "CYCLE_MODE", "MODE_AUTO", "MODE_LIVE", "MODE_VOD",
 }
@@ -93,6 +95,7 @@ class RemoteController:
         if self.keymap:
             self.keymap.setdefault("KEY_G", "PITLANE_DEBUG")
             self.keymap.setdefault("KEY_E", "CYCLE_MODE")         # mode selector AUTO -> LIVE -> VOD
+            self.keymap.setdefault("KEY_U", "WEATHER_REPORT")     # weather report popup now
             self.keymap.setdefault("KEY_MENU", "CYCLE_MODE")      # (WD TV remote MENU)
         # active while a TV mode with video is shown (RACE_VIEW / VIDEO_FOCUS)
         self.keymap_video = _parse_keymap(cfg.get("keymap_video"), "keymap_video")
@@ -107,6 +110,7 @@ class RemoteController:
         # set by the app: executes SYNC_* commands, returns a toast text (or None if rejected)
         self.sync_hook: Optional[Callable[[str, Optional[str]], Optional[str]]] = None
         self.track_hook: Optional[Callable[[], str]] = None
+        self.weather_hook: Optional[Callable[[Optional[str]], str]] = None
         # set by the app: select AUTO / LIVE / VOD / NEXT, returns a toast text (switching may take a moment)
         self.mode_hook: Optional[Callable[[str], Awaitable[str]]] = None
         self._mode_task: Optional[asyncio.Task] = None
@@ -302,6 +306,10 @@ class RemoteController:
             text = self.track_hook()
             log.info("Track map: %s", text)
             self._toast(text)
+        elif name == "WEATHER_REPORT":
+            if self.weather_hook is None:
+                return False
+            self._toast(self.weather_hook((arg or "").lower() or None))
         elif name == "PITLANE_DEBUG":
             self.ui.pit_debug = not self.ui.pit_debug
         elif name in ("SYNC_MENU", "SYNC_DEBUG"):

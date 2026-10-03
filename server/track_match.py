@@ -75,6 +75,14 @@ def reference_id(*names: Optional[str]) -> Optional[str]:
     return None
 
 
+def circuit_location(ref_id: Optional[str]) -> Optional[tuple[float, float]]:
+    """(lat, lon) of a known layout (f1-locations.json) - for the weather forecast."""
+    for e in _index():
+        if e.get("id") == ref_id and e.get("lat") is not None and e.get("lon") is not None:
+            return float(e["lat"]), float(e["lon"])
+    return None
+
+
 def _index() -> list:
     try:
         return json.loads((REF_DIR / "f1-locations.json").read_text(encoding="utf-8"))
