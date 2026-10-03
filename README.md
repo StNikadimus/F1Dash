@@ -548,6 +548,31 @@ RACE VIEW over the leaderboard, never under the VOYO window).
   "TEST mode: simulated weather"). Log lines: `[WEATHER] Current: …`, `[WEATHER] Forecast: …`,
   `[WEATHER] Report generated for lap 15`.
 
+## 8b. Motion and race-event animations
+
+Short, state-driven animations (CSS transform / opacity, GPU-friendly; the dashboard stays fully
+interactive): micro 150 ms, normal 300 ms, events 600-900 ms, a flag takeover up to 1.1 s.
+
+* **Leaderboard:** rows glide to their new place (`[dashboard] reorder_ms`). A gain in a race =
+  overtake: green flash, an accent line sweeping under the row and a `▲1` chip for 0.9 s; the
+  passed car gets a faint red `▼1` (0.7 s); in practice / qualifying gains are blue. Several changes
+  in one update move together; a bulk re-order (seek, reconnect, new session: > 40 % of the rows) only
+  moves, without emphasis. The order is always exactly the server's.
+* **Other cells:** pit IN / OUT pops (0.7 s), a new compound fades in (0.6 s), a new overall fastest
+  lap glows purple (1.1 s), a new personal-best / overall-best sector pulses (0.65 s).
+* **Mini-map flag layers** (under the track, pit lane, cars and SC marker; a flag pill in the map's
+  title row): RED - deep red tint + red glow pulsing every 1.5 s (the red pulse also on race control);
+  SAFETY CAR - gold tint + glow every 1.8 s; VSC - faint tint, thin glow every 2.6 s; DOUBLE YELLOW -
+  hazard strip at the top + soft border pulse; YELLOW - thin strip; CHEQUERED - a black / white chequer
+  fades in under the map (1.1 s). Every change gets one short takeover (stronger for RED). A RED FLAG /
+  SAFETY CAR DEPLOYED / CHEQUERED FLAG race-control message (once per message) triggers it too.
+* **Safety car marker:** a soft halo - only on a real SC position (never invented).
+* **Reduced motion:** the system setting `prefers-reduced-motion` or `[dashboard] animations =
+  "reduced"`: no travel and no pulses, short fades only; `"off"`: no animation at all.
+* **TEST mode:** `SIM_EVENT:<green|yellow|dy|vsc|sc|red|chequered|overtake|pit|fastest>` (phone
+  remote: "TEST mode: simulate race event") makes the simulator send the real messages; the
+  simulator also cycles yellow / VSC / double yellow / SC / red flag every 620 s on its own.
+
 ## 9. Remote control and keyboard
 
 Everything goes through one abstraction: *input → key name → whitelisted

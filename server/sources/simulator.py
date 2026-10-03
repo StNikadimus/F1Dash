@@ -84,6 +84,66 @@ class SimulatorSource(Source):
         self._prepare_geometry()
         self.rng = random.Random(42)
         self._t0_wall = datetime.now(timezone.utc)
+        self.pending_events: list[str] = []       # TEST: events requested from the dashboard (SIM_EVENT)
+
+    EVENTS = ("green", "yellow", "dy", "vsc", "sc", "red", "chequered", "overtake", "pit", "fastest")
+
+    def inject(self, name: str) -> str:
+        """TEST mode only: emit the real F1-style messages for an event now (the dashboard animates
+        from them exactly as from a live feed)."""
+        name = (name or "").lower()
+        if name not in self.EVENTS:
+            return "Unknown event - one of: " + ", ".join(self.EVENTS)
+        self.pending_events.append(name)
+        return f"Simulated event: {name}"
+
+    async def _apply_events(self, sink: Sink) -> None:
+        while self.pending_events:
+            ev = self.pending_events.pop(0)
+            if ev == "green":
+                self.sector_flags.clear()
+                await self._track(sink, "1")
+                await self._emit(sink, "SessionStatus", {"Status": "Started"})
+                await self._rc(sink, {"Category": "Flag", "Flag": "GREEN", "Scope": "Track", "Message": "TRACK CLEAR"})
+            elif ev == "yellow":
+                self.sector_flags.add(7)
+                await self._rc(sink, {"Category": "Flag", "Flag": "YELLOW", "Scope": "Sector", "Sector": 7,
+                                      "Message": "YELLOW IN TRACK SECTOR 7"})
+                await self._track(sink, "2")
+            elif ev == "dy":
+                self.sector_flags.add(15)
+                await self._rc(sink, {"Category": "Flag", "Flag": "DOUBLE YELLOW", "Scope": "Sector", "Sector": 15,
+                                      "Message": "DOUBLE YELLOW IN TRACK SECTOR 15"})
+                await self._track(sink, "2")
+            elif ev == "vsc":
+                await self._track(sink, "6")
+                await self._rc(sink, {"Category": "SafetyCar", "Status": "DEPLOYED", "Mode": "VIRTUAL SAFETY CAR",
+                                      "Message": "VIRTUAL SAFETY CAR DEPLOYED"})
+            elif ev == "sc":
+                await self._track(sink, "4")
+                await self._rc(sink, {"Category": "SafetyCar", "Status": "DEPLOYED", "Mode": "SAFETY CAR",
+                                      "Message": "SAFETY CAR DEPLOYED"})
+            elif ev == "red":
+                await self._track(sink, "5")
+                await self._rc(sink, {"Category": "Flag", "Flag": "RED", "Scope": "Track", "Message": "RED FLAG"})
+                await self._emit(sink, "SessionStatus", {"Status": "Aborted"})
+            elif ev == "chequered":
+                await self._track(sink, "1")
+                await self._rc(sink, {"Category": "Flag", "Flag": "CHEQUERED", "Scope": "Track", "Message": "CHEQUERED FLAG"})
+                await self._emit(sink, "SessionStatus", {"Status": "Finished"})
+            elif ev in ("overtake", "pit", "fastest"):
+                running = sorted((c for c in self.cars if not c.retired), key=lambda c: -c.dist)
+                if len(running) < 5:
+                    continue
+                if ev == "overtake":                 # P5 passes P4 (a real gap change, timing follows)
+                    a, b = running[3], running[4]
+                    b.dist, a.dist = a.dist + 3.0, b.dist
+                elif ev == "pit":                   # P3 pits at the pit entry of this lap
+                    car = running[2]
+                    if car.pit_state is None:
+                        car.pit_plan = [int(car.dist // self.length) + 1] + car.pit_plan
+                else:                               # P2 sets the fastest lap at its next line crossing
+                    running[1].pace *= 1.02             # (higher pace = faster)
 
     # ------------------------------------------------------------------
     # geometry
@@ -228,6 +288,7 @@ class SimulatorSource(Source):
             await asyncio.sleep(tick / self.scale)
             self.sim_t += tick
             await self._script(sink)
+            await self._apply_events(sink)
             self._physics(tick)
             await self._lap_events(sink)
 

@@ -143,6 +143,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     remote.sync_hook = lambda name, arg: rt.engine.sync_command(name, arg) if rt.engine else None
     remote.track_hook = lambda: rt.engine.track_report() if rt.engine else "No data source running"
     remote.weather_hook = lambda arg: rt.engine.request_weather_report(arg) if rt.engine else "No data source running"
+    # TEST mode: simulated race events (the animations come from the resulting feed messages)
+    remote.sim_hook = lambda arg: (rt.source.inject(arg) if rt.source is not None and hasattr(rt.source, "inject")
+                                   else "Simulated events only in TEST mode")
     remote.auto_cycle_seconds = int(cfg["dashboard"].get("auto_cycle_seconds", 20))
     voyo_cfg = cfg.get("voyo") or {}
     if start_mode == "vod":

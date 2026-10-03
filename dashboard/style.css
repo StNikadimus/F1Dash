@@ -179,7 +179,7 @@ html, body {
 /* the map panel = title row + MINI_MAP_RECT (#map-area) + MESSAGE_RECT (#map-footer): they never overlap */
 #map-panel { display: flex; flex-direction: column; }
 #map-area { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
-#map { position: absolute; inset: 0; width: 100%; height: 100%; }
+#map { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; }
 .map-title { flex: 0 0 auto; padding: 8px 14px 0; font-size: 18px; font-weight: 800;
   letter-spacing: .1em; color: var(--text-2); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #map-footer { flex: 0 0 auto; border-top: 1px solid var(--line); padding: 4px 12px 6px; display: flex;
@@ -208,7 +208,8 @@ html, body {
 /* flag treatment of the whole dashboard */
 #stage.flag-RED .panel { border-color: var(--red); }
 #stage.flag-SC #map-panel, #stage.flag-VSC #map-panel, #stage.flag-VSC_ENDING #map-panel { border-color: var(--amber); }
-#stage.anim-full.flag-RED .panel { animation: pulse-red var(--pulse-ms) ease-in-out infinite; }
+/* the red pulse belongs to the mini-map and race control - the other panels only get the red border */
+#stage.anim-full.flag-RED #map-panel, #stage.anim-full.flag-RED #rc-panel { animation: pulse-red 1.5s ease-in-out infinite; }
 #stage.anim-full.flag-RED #track-status { animation: pulse-pill var(--pulse-ms) ease-in-out infinite; }
 #stage.anim-full.flag-SC #track-status, #stage.anim-full.flag-VSC #track-status { animation: pulse-pill var(--pulse-ms) ease-in-out infinite; }
 @keyframes pulse-red { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,45,61,0); } 50% { box-shadow: 0 0 22px 2px rgba(255,45,61,.55) inset; } }
@@ -229,7 +230,6 @@ html, body {
 .lb-row {
   position: absolute; left: 0; right: 0; height: var(--row-h);
   font-size: 22px; font-weight: 700; border-bottom: 1px solid rgba(31,42,54,.6);
-  transition: top var(--reorder-ms) ease;
   white-space: nowrap;
 }
 .lb-row:nth-child(odd) { background: rgba(255,255,255,.018); }
@@ -414,6 +414,92 @@ html, body {
 .wx-eta .v { color: var(--amber); }
 .wx-i-DRIZZLE .v, .wx-i-LIGHT .v { color: #7fb8ff; } .wx-i-MEDIUM .v { color: var(--blue); } .wx-i-HEAVY .v { color: var(--purple); }
 .conn p { font-size: 26px; font-weight: 800; color: #ffc7cc; }
+
+/* ------------------------------------------------------------------ motion system
+ * micro 150 ms · normal 300 ms · event 600-900 ms · major flag change up to 1200 ms.
+ * transform / opacity only (GPU); every animation is driven by a real timing / race-control change. */
+:root { --t-micro: 150ms; --t-normal: 300ms; --t-event: 700ms; --ease-out: cubic-bezier(.2, .8, .2, 1); }
+.panel { box-shadow: 0 1px 0 rgba(255,255,255,.035) inset, 0 8px 22px rgba(0,0,0,.28); transition: border-color var(--t-normal); }
+.tile { transition: background-color var(--t-normal); }
+#track-status { transition: background-color .5s, color .5s, border-color .5s; }
+button { transition: background-color var(--t-micro), border-color var(--t-micro), color var(--t-micro); }
+
+/* leaderboard rows glide (transform) - the order is always the server's */
+.lb-row { top: 0; will-change: transform; transition: transform var(--reorder-ms) var(--ease-out), background-color var(--t-normal); }
+/* the ▲n / ▼n chip is a flex item right after the TLA inside the driver cell - it never covers another column */
+.lb-row[class*="ev-"] .drv::after { content: attr(data-delta); flex: 0 0 auto; order: 1;
+  font: 900 15px var(--mono); line-height: 1.3; padding: 0 6px; border-radius: 3px; pointer-events: none; animation: ev-chip .9s var(--ease-out) forwards; }
+.lb-row .drv .tla { order: 0; } .lb-row .drv > :not(.tla) { order: 2; }
+.lb-row.ev-overtake { animation: ev-row-up .9s var(--ease-out); }
+.lb-row.ev-overtake::before { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--green);
+  transform-origin: left; animation: ev-sweep .9s var(--ease-out) forwards; pointer-events: none; }
+.lb-row.ev-overtake .drv::after, .lb-row.ev-gain .drv::after { color: #04130b; background: var(--green); }
+.lb-row.ev-gain { animation: ev-row-gain .8s var(--ease-out); }
+.lb-row.ev-loss { animation: ev-row-down .7s var(--ease-out); }
+.lb-row.ev-loss .drv::after { color: #fff; background: rgba(255,45,61,.85); }
+@keyframes ev-row-up { 0% { background-color: rgba(0,210,120,.30); } 100% { background-color: transparent; } }
+@keyframes ev-row-gain { 0% { background-color: rgba(61,139,255,.26); } 100% { background-color: transparent; } }
+@keyframes ev-row-down { 0% { background-color: rgba(255,45,61,.14); } 100% { background-color: transparent; } }
+@keyframes ev-sweep { 0% { transform: scaleX(0); opacity: 1; } 60% { transform: scaleX(1); opacity: 1; } 100% { transform: scaleX(1); opacity: 0; } }
+@keyframes ev-chip { 0% { opacity: 0; transform: translateX(-6px); } 20%, 75% { opacity: 1; transform: none; } 100% { opacity: 0; transform: none; } }
+.lb-row .pit.ev-pit { animation: ev-pop .7s var(--ease-out); }
+.lb-row .tyre.ev-tyre { animation: ev-in .6s var(--ease-out); }
+.lb-row .best.ev-fastest span { animation: ev-fastest 1.1s var(--ease-out); border-radius: 3px; }
+.lb-row .sect i.ev-sector { animation: ev-sector .65s var(--ease-out); }
+@keyframes ev-pop { 0% { transform: scale(.7); opacity: .3; } 60% { transform: scale(1.12); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes ev-in { 0% { opacity: 0; transform: translateY(-6px); } 100% { opacity: 1; transform: none; } }
+@keyframes ev-fastest { 0% { background: rgba(176,96,255,.55); box-shadow: 0 0 14px rgba(176,96,255,.8); } 100% { background: transparent; box-shadow: none; } }
+@keyframes ev-sector { 0% { transform: scaleY(1.9); filter: brightness(1.6); } 100% { transform: none; filter: none; } }
+
+/* mini-map flag layers: tint / chequer / warning strip / glow - all UNDER the canvas (z 0 < 1) */
+#map-flag { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+#map-flag i { position: absolute; inset: 0; opacity: 0; transition: opacity .5s ease; }
+.mf-strip { inset: 0 0 auto 0 !important; height: 8px; }
+.mf-cheq { background: repeating-conic-gradient(#e6eaef 0 25%, #07090c 0 50%) 0 0 / 56px 56px;
+  -webkit-mask-image: radial-gradient(ellipse at center, rgba(0,0,0,.55) 0%, #000 75%); mask-image: radial-gradient(ellipse at center, rgba(0,0,0,.55) 0%, #000 75%);
+  transition-duration: 1.1s !important; }
+#stage.flag-CHEQUERED .mf-cheq { opacity: .3; }
+#stage.flag-RED .mf-tint { opacity: 1; transition-duration: .35s; background: radial-gradient(ellipse at center, rgba(110,0,14,.22), rgba(180,0,22,.45)); }
+#stage.flag-RED .mf-glow { opacity: 1; box-shadow: inset 0 0 0 2px rgba(255,45,61,.95), inset 0 0 46px rgba(255,45,61,.5); }
+#stage.flag-SC .mf-tint { opacity: 1; background: radial-gradient(ellipse at center, rgba(255,176,0,.05), rgba(255,176,0,.17)); }
+#stage.flag-SC .mf-glow { opacity: 1; box-shadow: inset 0 0 0 2px rgba(255,176,0,.9), inset 0 0 34px rgba(255,176,0,.35); }
+#stage.flag-VSC .mf-tint, #stage.flag-VSC_ENDING .mf-tint { opacity: 1; background: rgba(255,176,0,.06); }
+#stage.flag-VSC .mf-glow, #stage.flag-VSC_ENDING .mf-glow { opacity: .8; box-shadow: inset 0 0 0 1px rgba(255,176,0,.7), inset 0 0 18px rgba(255,176,0,.22); }
+#stage.flag-YELLOW .mf-strip { opacity: 1; background: var(--yellow); height: 4px; }
+#stage.flag-DY .mf-strip { opacity: 1; height: 8px; background: repeating-linear-gradient(-45deg, var(--yellow) 0 12px, #111 12px 24px); }
+#stage.flag-DY .mf-glow { opacity: 1; box-shadow: inset 0 0 0 2px rgba(255,214,0,.8); }
+#stage.anim-full.flag-RED .mf-glow { animation: mf-pulse 1.5s ease-in-out infinite; }
+#stage.anim-full.flag-SC .mf-glow { animation: mf-pulse 1.8s ease-in-out infinite; }
+#stage.anim-full.flag-VSC .mf-glow, #stage.anim-full.flag-VSC_ENDING .mf-glow { animation: mf-pulse-soft 2.6s ease-in-out infinite; }
+#stage.anim-full.flag-DY .mf-glow { animation: mf-pulse-soft 1.6s ease-in-out infinite; }
+@keyframes mf-pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
+@keyframes mf-pulse-soft { 0%, 100% { opacity: .45; } 50% { opacity: .8; } }
+/* one short "takeover" when the state changes (stronger for RED), then the steady pulse */
+#map-flag.ev-flag .mf-tint { animation: mf-hit .8s ease-out; }
+#map-flag.ev-flag-red .mf-tint { animation: mf-hit-red 1.1s ease-out; }
+@keyframes mf-hit { 0% { filter: brightness(2); } 100% { filter: none; } }
+@keyframes mf-hit-red { 0% { filter: brightness(2.6); } 30% { filter: brightness(1.6); } 100% { filter: none; } }
+/* flag pill in the map title row (never over the map) */
+#map-panel { position: relative; }
+.map-flagpill { position: absolute; top: 9px; right: 12px; font-size: 13px; font-weight: 900; letter-spacing: .14em;
+  padding: 2px 9px; border-radius: 3px; animation: ev-in .4s var(--ease-out); }
+.map-flagpill.f-RED { background: var(--red); color: #fff; }
+.map-flagpill.f-SC { background: var(--amber); color: #111; }
+.map-flagpill.f-VSC, .map-flagpill.f-VSC_ENDING { background: transparent; color: var(--amber); box-shadow: inset 0 0 0 2px var(--amber); }
+.map-flagpill.f-DY { background: var(--yellow); color: #111; }
+.map-flagpill.f-CHEQUERED { color: #111; background: repeating-conic-gradient(#fff 0 25%, #cfd4da 0 50%) 0 0 / 14px 14px; }
+#stage.anim-full.flag-RED .map-flagpill, #stage.anim-full.flag-SC .map-flagpill { animation: pulse-pill 1.6s ease-in-out infinite; }
+
+/* reduced motion (system setting or [dashboard] animations = "reduced"): no travel, no pulses -
+ * short fades only; every state stays visible */
+@media (prefers-reduced-motion: reduce) {
+  .lb-row { transition: background-color var(--t-micro) !important; }
+  .lb-row[class*="ev-"], .lb-row[class*="ev-"]::before, .lb-row[class*="ev-"] .drv::after,
+  .ev-pit, .ev-tyre, .ev-fastest span, .ev-sector, #map-flag i, .map-flagpill, #map-panel, #rc-panel, #track-status { animation: none !important; }
+}
+#stage.anim-reduced .lb-row { transition: background-color var(--t-micro) !important; }
+#stage.anim-reduced .lb-row[class*="ev-"]::before, #stage.anim-reduced #map-flag i, #stage.anim-reduced .map-flagpill,
+#stage.anim-reduced #map-panel, #stage.anim-reduced #rc-panel { animation: none !important; }
 
 /* ------------------------------------------------------------------ reduced motion */
 #stage.anim-off *, #stage.anim-off *::before { animation: none !important; transition: none !important; }

@@ -38,6 +38,8 @@ COMMANDS = {
     "TRACK_REPORT",
     # weather report popup now (arg in TEST mode: a simulated scenario, see server/weather.py)
     "WEATHER_REPORT",
+    # TEST mode: make the simulator emit an event (flags, overtake, pit stop, fastest lap)
+    "SIM_EVENT",
     # LIVE / VOD mode selector (server/mode.py): AUTO detection or a manual override
     "SET_MODE", "CYCLE_MODE", "MODE_AUTO", "MODE_LIVE", "MODE_VOD",
 }
@@ -111,6 +113,7 @@ class RemoteController:
         self.sync_hook: Optional[Callable[[str, Optional[str]], Optional[str]]] = None
         self.track_hook: Optional[Callable[[], str]] = None
         self.weather_hook: Optional[Callable[[Optional[str]], str]] = None
+        self.sim_hook: Optional[Callable[[str], str]] = None
         # set by the app: select AUTO / LIVE / VOD / NEXT, returns a toast text (switching may take a moment)
         self.mode_hook: Optional[Callable[[str], Awaitable[str]]] = None
         self._mode_task: Optional[asyncio.Task] = None
@@ -306,6 +309,10 @@ class RemoteController:
             text = self.track_hook()
             log.info("Track map: %s", text)
             self._toast(text)
+        elif name == "SIM_EVENT":
+            if self.sim_hook is None:
+                return False
+            self._toast(self.sim_hook((arg or "").lower()))
         elif name == "WEATHER_REPORT":
             if self.weather_hook is None:
                 return False
