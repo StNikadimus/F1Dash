@@ -55,8 +55,11 @@
     <section id="left">
       <div id="map-panel" class="panel">
         <div id="map-title" class="map-title"></div>
+        <div id="map-flagpill" class="map-flagpill" hidden></div>
         <!-- MINI_MAP_RECT: only the map is drawn here (track, pit lane, cars, safety car) -->
         <div id="map-area">
+          <!-- flag state layer: under the canvas (track, pit lane, cars, SC stay on top) -->
+          <div id="map-flag" aria-hidden="true"><i class="mf-tint"></i><i class="mf-cheq"></i><i class="mf-strip"></i><i class="mf-glow"></i></div>
           <canvas id="map"></canvas>
           <div id="map-notice" class="map-notice" hidden></div>
         </div>

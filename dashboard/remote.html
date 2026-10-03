@@ -54,6 +54,14 @@
     <option value="heavyrain">radar: heavy rain</option><option value="radaroff">radar: unavailable</option></select>
 </div>
 <div class="grid">
+  <select id="simev" class="wide"><option value="">TEST mode: simulate race event…</option>
+    <option value="green">GREEN / track clear</option><option value="yellow">YELLOW (sector)</option>
+    <option value="dy">DOUBLE YELLOW</option><option value="vsc">VIRTUAL SAFETY CAR</option>
+    <option value="sc">SAFETY CAR</option><option value="red">RED FLAG</option><option value="chequered">CHEQUERED FLAG</option>
+    <option value="overtake">OVERTAKE (P5 passes P4)</option><option value="pit">PIT STOP (P3)</option>
+    <option value="fastest">FASTEST LAP (P2 speeds up)</option></select>
+</div>
+<div class="grid">
   <button data-mode="AUTO">MODE AUTO</button><button data-mode="LIVE">MODE LIVE</button><button data-mode="VOD">MODE VOD</button>
   <div class="wide" id="modest" style="text-align:center;font-size:13px"></div>
 </div>
@@ -110,6 +118,17 @@
         headers: Object.assign({ "Content-Type": "application/json" }, token ? { "X-Remote-Token": token } : {}),
         body: JSON.stringify({ command: "WEATHER_REPORT", arg: v }) });
       st.textContent = r.ok ? "WEATHER " + v : `WEATHER: HTTP ${r.status}`;
+    } catch (err) { st.textContent = "server unreachable"; }
+  });
+
+  document.getElementById("simev").addEventListener("change", async (e) => {
+    const v = e.target.value; e.target.value = "";
+    if (!v) return;
+    try {
+      const r = await fetch("/api/remote/command", { method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json" }, token ? { "X-Remote-Token": token } : {}),
+        body: JSON.stringify({ command: "SIM_EVENT", arg: v }) });
+      st.textContent = r.ok ? "SIM " + v : `SIM: HTTP ${r.status}`;
     } catch (err) { st.textContent = "server unreachable"; }
   });
 

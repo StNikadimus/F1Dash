@@ -310,8 +310,7 @@
     if (s.red_flag) sub = "SESSION SUSPENDED";
     if (ts.source === "RaceControl") sub = (sub ? sub + " · " : "") + "from race control";
     $("ts-sub").textContent = sub;
-    stage.classList.remove("flag-RED", "flag-SC", "flag-VSC", "flag-VSC_ENDING", "flag-YELLOW");
-    if (["RED", "SC", "VSC", "VSC_ENDING", "YELLOW"].includes(ts.status)) stage.classList.add("flag-" + ts.status);
+    setFlagState(ts);
 
     const chip = $("rule-chip");
     if (has(ts.overtake)) { chip.textContent = "OVERTAKE " + ts.overtake; chip.className = "rule-chip" + (ts.overtake === "ENABLED" ? " on" : ""); }
@@ -587,6 +586,26 @@
     send({ type: "mode", value: b.dataset.mode });
   });
 
+  // ---- session-wide flag state: stage classes (CSS layers under the mini-map), the map's flag pill and
+  // one short takeover animation per real change (RED > SC > VSC > DOUBLE YELLOW in intensity)
+  let flagNow = null;
+  const FLAG_PILL = { RED: "RED FLAG", SC: "SAFETY CAR", VSC: "VIRTUAL SAFETY CAR", VSC_ENDING: "VSC ENDING",
+    DY: "DOUBLE YELLOW", CHEQUERED: "CHEQUERED FLAG" };
+  function setFlagState(ts) {
+    const st = ts.status;
+    const f = ts.state === "DOUBLE_YELLOW" && st === "YELLOW" ? "DY" : st;
+    stage.classList.remove("flag-RED", "flag-SC", "flag-VSC", "flag-VSC_ENDING", "flag-YELLOW", "flag-DY", "flag-CHEQUERED");
+    if (["RED", "SC", "VSC", "VSC_ENDING", "YELLOW", "CHEQUERED"].includes(st)) stage.classList.add("flag-" + st);
+    if (f === "DY") stage.classList.add("flag-DY");
+    const pill = $("map-flagpill");
+    if (FLAG_PILL[f]) {
+      if (pill.dataset.f !== f) { pill.textContent = FLAG_PILL[f]; pill.className = "map-flagpill f-" + f; pill.dataset.f = f; }
+      pill.hidden = false;
+    } else { pill.hidden = true; pill.dataset.f = ""; }
+    if (flagNow !== null && f !== flagNow && f) flash($("map-flag"), f === "RED" ? "ev-flag-red" : "ev-flag", f === "RED" ? 1100 : 800);
+    flagNow = f || flagNow;
+  }
+
   function renderMode() {
     const b = $("mode-badge");
     const m = S.mode;
@@ -635,7 +654,7 @@
     rowH = Math.max(22, Math.min(44, Math.floor(avail / n)));
     stage.style.setProperty("--row-h", rowH + "px");
     rows.style.height = rowH * S.order.length + "px";
-    S.order.forEach((num, i) => { if (rowEls[num]) rowEls[num].el.style.top = i * rowH + "px"; });
+    S.order.forEach((num, i) => { if (rowEls[num]) rowEls[num].el.style.transform = `translate3d(0, ${i * rowH}px, 0)`; });
   }
   function renderBoardHead() {
     const kind = (S.session || {}).session_kind;
@@ -721,6 +740,29 @@
   function setCell(r, key, html) {
     if (r.cache[key] !== html) { r.cache[key] = html; r.cells[key].innerHTML = html; }
   }
+  // ---- leaderboard motion: rows glide (GPU transform), position changes are emphasised briefly.
+  // Driven only by the real order the server sends; a bulk re-order (seek, new session, reconnect)
+  // just moves without emphasis.
+  function flash(el, cls, ms) {
+    if (!el || stage.classList.contains("anim-off")) return;
+    el.classList.remove(cls); void el.offsetWidth;            // restart if it is already running
+    el.classList.add(cls);
+    clearTimeout(el["_t" + cls]);
+    el["_t" + cls] = setTimeout(() => el.classList.remove(cls), ms);
+  }
+  function animateMoves(moves) {
+    const changed = moves.filter((m) => m[2] !== undefined && m[2] !== m[3]);
+    if (!changed.length || changed.length > Math.max(6, moves.length * 0.4)) return;
+    const race = (S.session || {}).session_kind === "race";
+    for (const [, r, from, to] of changed) {
+      const up = to < from;
+      r.el.dataset.delta = (up ? "▲" : "▼") + Math.abs(from - to);
+      // the gainer travels above the others while the rows glide
+      r.el.style.zIndex = up ? 3 : 2;
+      clearTimeout(r.zt); r.zt = setTimeout(() => { r.el.style.zIndex = ""; }, 900);
+      flash(r.el, up ? (race ? "ev-overtake" : "ev-gain") : "ev-loss", up ? 900 : 700);
+    }
+  }
   function renderBoard() {
     const rows = $("lb-rows");
     const kind = (S.session || {}).session_kind;
@@ -730,6 +772,7 @@
     for (const num of Object.keys(rowEls)) {
       if (!S.drivers[num]) { rowEls[num].el.remove(); delete rowEls[num]; }
     }
+    const moves = [];
     S.order.forEach((num, i) => {
       const d = S.drivers[num];
       if (!d) return;
@@ -740,12 +783,14 @@
         const keys = ["pos", "bar", "num", "drv", "team", "gap", "int", "last", "best", "sect", "tyre", "pit"];
         const cells = {};
         for (const k of keys) { const c = document.createElement("div"); c.className = k; el.appendChild(c); cells[k] = c; }
-        el.style.top = i * rowH + "px";
+        el.style.transform = `translate3d(0, ${i * rowH}px, 0)`;
         el.addEventListener("click", () => send({ type: "command", command: "SELECT_DRIVER", arg: num }));
         rows.appendChild(el);
-        r = rowEls[num] = { el, cells, cache: {} };
+        r = rowEls[num] = { el, cells, cache: {}, idx: i };
       }
-      r.el.style.top = i * rowH + "px";
+      moves.push([num, r, r.idx, i]);
+      r.idx = i;
+      r.el.style.transform = `translate3d(0, ${i * rowH}px, 0)`;
       r.el.classList.toggle("selected", num === sel);
       r.el.classList.toggle("retired", !!(d.retired || d.stopped));
       r.el.classList.toggle("ko", !!d.knocked_out);
@@ -792,10 +837,25 @@
       const inLane = d.in_pit && !d.in_garage && !out;             // a pit stop in progress
       const leaving = d.pit_out && !out && !d.in_garage;            // (a car in the garage is not leaving)
       if (inLane) pit = "IN"; else if (leaving) pit = "OUT";
+      const pitCls = "pit" + (inLane ? " in" : leaving ? " out" : "");
       setCell(r, "pit", pit);
-      r.cells.pit.className = "pit" + (inLane ? " in" : leaving ? " out" : "");
+      if (r.cache.pitCls !== pitCls) {
+        r.cells.pit.className = pitCls;
+        if (r.cache.pitCls !== undefined && (inLane || leaving)) flash(r.cells.pit, "ev-pit", 700);
+        r.cache.pitCls = pitCls;
+      }
+      // meaningful changes only: a new compound (pit stop), a new overall fastest lap, a new PB / overall-best sector
+      if (r.cache.comp !== undefined && t.compound && r.cache.comp !== t.compound) flash(r.cells.tyre, "ev-tyre", 600);
+      r.cache.comp = t.compound;
+      const bl = d.best_lap || {};
+      if (bl.overall_best && has(bl.value) && r.cache.ob !== undefined && r.cache.ob !== bl.value) flash(r.cells.best, "ev-fastest", 1100);
+      r.cache.ob = bl.overall_best ? bl.value : null;
+      const sc = [0, 1, 2].map((k) => secClass((d.sectors || [])[k]));
+      if (r.cache.secs) sc.forEach((c, k) => { if ((c === "s-pb" || c === "s-ob") && r.cache.secs[k] !== c) flash(r.cells.sect.children[k], "ev-sector", 650); });
+      r.cache.secs = sc;
     });
     rows.style.height = rowH * S.order.length + "px";
+    animateMoves(moves);
     $("lb-empty").hidden = S.order.length > 0;
   }
 
@@ -811,7 +871,12 @@
     ul.innerHTML = list.length ? rcItems(list.slice(0, 6)) : '<li class="rc-item"><span></span><span></span><span class="m na">No race control messages</span></li>';
     const top = list[0] ? String(list[0].utc || "") + "|" + list[0].text : null;
     // highlight only a genuinely newer message - not the older one that is on top after a rewind
-    if (top && lastRcTop !== null && top !== lastRcTop && top > lastRcTop && ul.firstElementChild) ul.firstElementChild.classList.add("fresh");
+    if (top && lastRcTop !== null && top !== lastRcTop && top > lastRcTop && ul.firstElementChild) {
+      ul.firstElementChild.classList.add("fresh");
+      // a major race-control event (deduplicated by the check above): the mini-map reacts with it
+      const t = String(list[0].text || "").toUpperCase();
+      if (/RED FLAG|SAFETY CAR DEPLOYED|CHEQUERED FLAG/.test(t)) flash($("map-flag"), /RED FLAG/.test(t) ? "ev-flag-red" : "ev-flag", 1000);
+    }
     lastRcTop = top;
   }
 
@@ -1059,7 +1124,7 @@
       SYNC_KEEP_OLD: "Sync drift: keep the old sync", SYNC_USE_NEW: "Sync drift: use the new anchor",
       PITLANE_DEBUG: "Show pit lane reconstruction debug",
       CYCLE_MODE: "Mode: AUTO → LIVE → VOD", SET_MODE: "Mode", MODE_AUTO: "Mode AUTO", MODE_LIVE: "Mode LIVE",
-      MODE_VOD: "Mode VOD", WEATHER_REPORT: "Weather report now",
+      MODE_VOD: "Mode VOD", WEATHER_REPORT: "Weather report now", SIM_EVENT: "TEST: simulated race event",
     };
     const kb = { KEY_UP: "↑", KEY_DOWN: "↓", KEY_LEFT: "←", KEY_RIGHT: "→", KEY_ENTER: "Enter", KEY_ESC: "Esc", KEY_I: "I",
       KEY_SPACE: "Space", KEY_H: "H", KEY_1: "1", KEY_2: "2", KEY_3: "3", KEY_4: "4", KEY_5: "5", KEY_BACK: "Backspace",
@@ -2088,6 +2153,10 @@
         if (p) {
           const s = toScreen([p.x, p.y]);
           ctx.globalAlpha = p.stale ? 0.4 : 1;
+          if (!p.stale && !stage.classList.contains("anim-off")) {      // soft halo on the REAL safety car only
+            ctx.beginPath(); ctx.arc(s[0], s[1], 16 + 8 * pv, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255,176,0,${0.55 * (1 - pv)})`; ctx.lineWidth = 3; ctx.stroke();
+          }
           ctx.fillStyle = "#ffb000"; ctx.strokeStyle = "#05070a"; ctx.lineWidth = 2;
           ctx.fillRect(s[0] - 13, s[1] - 9, 26, 18); ctx.strokeRect(s[0] - 13, s[1] - 9, 26, 18);
           ctx.fillStyle = "#05070a"; ctx.font = `900 12px ${font}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
