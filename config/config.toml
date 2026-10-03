@@ -126,6 +126,9 @@ reorder_ms = 450
 auto_cycle_seconds = 20
 # Number of race-control messages kept on screen
 race_control_max = 60
+# race: CHASING counts consecutive laps (at the line) within this many seconds of the SAME car
+# ahead; ends on a bigger gap, another car ahead, a pit stop, or a safety car / VSC / red flag lap
+chase_gap_seconds = 1.5
 
 [remote]
 enabled = true

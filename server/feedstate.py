@@ -10,6 +10,7 @@ import copy
 import logging
 from typing import Any, Optional
 
+from .chase import track_chase
 from .laps import activity, track_laps
 
 log = logging.getLogger("feedstate")
@@ -133,6 +134,9 @@ class FeedState:
         if live and topic in ("TimingData", "LapSeries"):
             # lap / sector progress (derived topic, restored with checkpoints like the pit state)
             track_laps(self.topics, topic, data, t_ms, prev)
+        if live and topic == "TimingData":
+            # race: for how many laps each car has been close behind the same car (server/chase.py)
+            track_chase(self.topics, data, t_ms, prev)
 
     def _track_in_pit(self, data: Any, t_ms: float) -> None:
         """Since when (F1 time) each car is continuously InPit - a long stay = the garage.

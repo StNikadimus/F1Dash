@@ -153,6 +153,9 @@ class DriverState:
     # OUT LAP (lap began at the pit exit) | IN LAP (entered the pit lane from a lap on track) |
     # IN PIT (pit lane / garage, not coming from the track) | RETIRED | STOPPED | None = on a lap
     lap_phase: Optional[str] = None
+    # race: close behind the same car for this many consecutive completed laps (server/chase.py);
+    # {"laps": n, "ahead": number, "ahead_tla": "VER", "gap": 0.8, "why": ...}; None = no lap yet
+    chase: Optional[dict] = None
     sector_now: Optional[int] = None       # 1..3: sector being driven now
     sector_start_ms: Optional[float] = None
     last_sector: Optional[dict] = None     # last completed sector {"n": 2, "value": "41.066"}

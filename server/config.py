@@ -52,6 +52,7 @@ DEFAULTS: dict[str, Any] = {
         "interp_delay_ms": 1200, "map_fps": 30, "animations": "full",
         "pulse_period_ms": 2400, "reorder_ms": 450, "auto_cycle_seconds": 20,
         "race_control_max": 60,
+        "chase_gap_seconds": 1.5,
     },
     "remote": {"enabled": True, "token": "", "allow_get": True, "keymap": {},
                "keymap_video": {}, "keymap_video_focus": {}},
