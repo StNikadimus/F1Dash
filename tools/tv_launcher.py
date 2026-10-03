@@ -624,32 +624,24 @@ def follow_server_log(path: Path) -> None:
         pass
 
 
-LIVE_WINDOW_BEFORE_S = 90 * 60      # a session "is on" from 90 min before its start ...
-LIVE_WINDOW_AFTER_S = 60 * 60       # ... until 60 min after its scheduled end
-
-
 def choose_mode(now: Optional[float] = None, index: Optional[dict] = None) -> tuple[str, str]:
-    """No mode given: LIVE only while an F1 session is on (or about to start), otherwise VOD
-    (a VOYO recording). Live timing holds only the last minutes - a recording needs VOD."""
+    """What the dashboard's AUTO mode would pick now: LIVE while an F1 session is on (or about to
+    start), otherwise VOD (a VOYO recording). Same rule as server/mode.py (the running server
+    keeps re-checking it; the MODE selector on the dashboard overrides it)."""
     from datetime import datetime, timezone
-    from server.sources.f1_live import _local_to_utc
-    now_dt = datetime.fromtimestamp(now if now is not None else time.time(), timezone.utc)
+    from server.mode import detect_from_schedule
+    now_s = now if now is not None else time.time()
     if index is None:
         try:
-            req = urllib.request.Request(f"https://livetiming.formula1.com/static/{now_dt.year}/Index.json",
+            year = datetime.fromtimestamp(now_s, timezone.utc).year
+            req = urllib.request.Request(f"https://livetiming.formula1.com/static/{year}/Index.json",
                                          headers={"User-Agent": "f1-tv-dashboard/1.0"})
             with urllib.request.urlopen(req, timeout=8) as r:
                 index = json.loads(r.read().decode("utf-8-sig"))
         except Exception as exc:  # noqa: BLE001
             return "vod", f"F1 schedule not reachable ({type(exc).__name__}) - assuming a recording"
-    for m in index.get("Meetings") or []:
-        for s in m.get("Sessions") or []:
-            start = _local_to_utc(s.get("StartDate"), s.get("GmtOffset"))
-            end = _local_to_utc(s.get("EndDate"), s.get("GmtOffset")) or start
-            if start and (start.timestamp() - LIVE_WINDOW_BEFORE_S <= now_dt.timestamp()
-                          <= end.timestamp() + LIVE_WINDOW_AFTER_S):
-                return "live", f"{m.get('Name')} {s.get('Name')} is on now"
-    return "vod", "no F1 session is on now - VOYO shows a recording"
+    det, _sess, why = detect_from_schedule(index, now_s)
+    return det.lower(), why
 
 
 def _server_mode(url: str) -> Optional[str]:
@@ -665,9 +657,9 @@ def start_server(url: str, mode: Optional[str]) -> Optional[subprocess.Popen]:
     if _server_up(url):
         running = _server_mode(url)
         print(f"Dashboard server already running ({running} mode) - using it.")
-        if mode and running and running != mode:
-            print(f"  WARNING: it runs in {running.upper()} mode, not {mode.upper()} - close it (or its window) "
-                  "and start again, otherwise the data will not match the video.")
+        if mode and mode != "auto" and running and running != mode:
+            print(f"  WARNING: it runs in {running.upper()} mode, not {mode.upper()} - switch it with the MODE "
+                  "selector on the dashboard (no restart needed).")
         return None
     cmd = [sys.executable, str(ROOT / "main.py")] + ([f"--{mode}"] if mode else [])
     log_path = ROOT / "data" / "server.log"
@@ -697,7 +689,7 @@ def main() -> None:
     ap.add_argument("--server", default=f"http://127.0.0.1:{port}", help="dashboard URL")
     ap.add_argument("--start-server", action="store_true",
                     help="start the dashboard server (main.py) too, and stop it again at the end")
-    ap.add_argument("--mode", choices=["live", "test", "replay", "vod"],
+    ap.add_argument("--mode", choices=["auto", "live", "test", "replay", "vod"],
                     help="server mode for --start-server (vod = follow a VOYO recording)")
     ap.add_argument("--voyo-url", default=voyo.get("url") or "https://voyo.si/")
     ap.add_argument("--browser", help="path to Edge/Chrome executable")
@@ -710,7 +702,7 @@ def main() -> None:
     ap.add_argument("--titlebar", type=int, default=32,
                     help="height of VOYO's window title bar in DIP, hidden above the slot (0 = keep visible)")
     ap.add_argument("--title", default="VOYO", help="text in the VOYO window title used to find it")
-    ap.add_argument("--hotkeys", default="T,H,I,A,1,2,3,4,5,UP,DOWN,S,R,D,Y,L,C,O,N,G,EQUAL,MINUS",
+    ap.add_argument("--hotkeys", default="T,H,I,A,1,2,3,4,5,UP,DOWN,S,R,D,Y,L,C,O,N,G,E,EQUAL,MINUS",
                     help="keys forwarded to the dashboard while the VOYO window has the focus")
     ap.add_argument("--keep-taskbar", action="store_true", help="do not hide the Windows taskbar")
     sync = cfg.get("sync") or {}
@@ -749,9 +741,11 @@ def main() -> None:
 
     if args.start_server and not args.print:
         mode = args.mode
-        if mode is None and str((cfg.get("source") or {}).get("mode", "live")).lower() == "live":
-            mode, why = choose_mode()
-            print(f"Mode: {mode.upper()} ({why}). Force it with: launch.bat live / launch.bat vod")
+        if mode is None and str((cfg.get("source") or {}).get("mode", "auto")).lower() in ("live", "auto"):
+            det, why = choose_mode()
+            mode = "auto"
+            print(f"Mode: AUTO - detected {det.upper()} ({why}). The dashboard keeps detecting it; switch with "
+                  "the MODE selector (AUTO / LIVE / VOD) at the top right, or start with launch.bat live / vod")
         session.server_proc = start_server(args.server, mode)
 
     sw, sh = ops.screen_size()

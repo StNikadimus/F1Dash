@@ -98,6 +98,12 @@
 .ri-wx b { color: var(--text); }
 .ri-foot { margin-top: auto; font-size: 14px; font-weight: 800; color: var(--green); letter-spacing: .06em; line-height: 1.7; }
 .ri-foot .mode-badge { font-size: 14px; margin-right: 8px; }
+.ri-mode { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; min-width: 0; }
+.ri-mode .mode-sel button { font-size: 13px; padding: 1px 7px; }
+.ri-mode .mode-detected { font-size: 11px; }
+.fb-mode .mode-sel { margin-right: 8px; }
+.fb-mode .mode-sel .ms-label { display: none; }
+.fb-mode .mode-sel button { font-size: 12px; padding: 1px 6px; }
 .ri-video { color: var(--text-3); font-weight: 700; }
 
 /* ------------------------------------------------------------------ VIDEO_FOCUS */

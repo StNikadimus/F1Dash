@@ -18,6 +18,7 @@
     clockAt: 0,
     wsOpen: false,
     sync: null,
+    modeSel: null,          // MODE selector: selected / detected / effective (server/mode.py)
   };
   const $ = (id) => document.getElementById(id);
   const stage = $("stage");
@@ -68,6 +69,8 @@
   function handle(m) {
     switch (m.type) {
       case "hello":
+        // another data source now (MODE switched LIVE <-> VOD): nothing of the old one stays on screen
+        if (S.mode !== null && m.mode !== S.mode) resetData();
         S.mode = m.mode; S.keymap = m.keymap || {};
         S.keymapVideo = m.keymap_video || {}; S.keymapVideoFocus = m.keymap_video_focus || {};
         Object.assign(S.cfg, m.config || {});
@@ -89,6 +92,9 @@
         break;
       case "track":
         S.track = m.track; Map2D.setTrack(m.track); renderMapInfo();
+        break;
+      case "mode":
+        S.modeSel = m; renderModeSel();
         break;
       case "pitlane_debug":
         Map2D.setPitDebug(m);
@@ -148,6 +154,7 @@
     s: "KEY_S", S: "KEY_S", r: "KEY_R", R: "KEY_R", d: "KEY_D", D: "KEY_D",
     y: "KEY_Y", Y: "KEY_Y", l: "KEY_L", L: "KEY_L", c: "KEY_C", C: "KEY_C", x: "KEY_X", X: "KEY_X", k: "KEY_K", K: "KEY_K",
     o: "KEY_O", O: "KEY_O", n: "KEY_N", N: "KEY_N", g: "KEY_G", G: "KEY_G", w: "KEY_W", W: "KEY_W",
+    e: "KEY_E", E: "KEY_E",
     "+": "KEY_KPPLUS", "=": "KEY_EQUAL", "-": "KEY_MINUS", "_": "KEY_MINUS",
   };
   document.addEventListener("keydown", (e) => {
@@ -351,6 +358,52 @@
     if ((S.session || {}).state === "FINISHED") return "FINISHED";
     return "LIVE";
   }
+  // ------------------------------------------------------------------ MODE selector (AUTO / LIVE / VOD)
+  function resetData() {
+    Object.assign(S, { session: {}, track_status: {}, weather: {}, drivers: {}, order: [], race_control: [], radio: [],
+      availability: {}, timeline: null, map: {}, status: {}, tel: {}, sync: null, track: null });
+    Map2D.reset(); Map2D.setTrack(null);
+  }
+  function modeSelHTML(label) {
+    const m = S.modeSel;
+    if (!m) return "";
+    const eff = m.effective_mode;
+    const tip = `Selected: ${m.selected_mode} · detected: ${m.detected_mode} (${m.detected_reason || ""}) · running: ${eff}` +
+      " - AUTO follows the detection, LIVE / VOD override it (key E / remote MENU)";
+    return `<span class="mode-sel${m.switching ? " busy" : ""}" title="${esc(tip)}">` +
+      (label ? '<span class="ms-label">MODE</span>' : "") +
+      (m.options || ["AUTO", "LIVE", "VOD"]).map((o) =>
+        `<button type="button" data-mode="${esc(o)}" class="m-${esc(o)}${m.selected_mode === o ? " sel" : ""}` +
+        `${m.selected_mode === "AUTO" && eff === o ? " eff" : ""}">${esc(o)}</button>`).join("") + "</span>";
+  }
+  function modeDetail() {
+    const m = S.modeSel;
+    if (!m) return "";
+    if (m.switching) return `SWITCHING TO <b>${esc(m.effective_mode)}</b>…`;
+    // the selected button shows AUTO / LIVE / VOD; here: what the detection says (and MANUAL when overridden)
+    let t = m.selected_mode === "AUTO" ? `DETECTED: <b>${esc(m.detected_mode)}</b>`
+      : `<b>MANUAL</b> · DETECTED: ${esc(m.detected_mode)}`;
+    if (m.notice) t += ` · <span class="warn">NO LIVE SESSION</span>`;
+    if (m.error) t += ` · <span class="warn">${esc(m.error)}</span>`;
+    return t;
+  }
+  function renderModeSel() {
+    const tip = S.modeSel ? (S.modeSel.detected_reason || "") : "";
+    $("mode-sel").innerHTML = modeSelHTML(true);
+    $("mode-detected").innerHTML = modeDetail();
+    $("mode-detected").title = tip;
+    const ri = $("ri-mode");
+    if (ri) { ri.innerHTML = modeSelHTML(false) + `<span class="mode-detected">${modeDetail()}</span>`; ri.title = tip; }
+    const fb = $("fb-modesel");
+    if (fb) fb.innerHTML = modeSelHTML(false);
+  }
+  document.addEventListener("click", (e) => {
+    const b = e.target && e.target.closest && e.target.closest(".mode-sel button[data-mode]");
+    if (!b) return;
+    e.preventDefault();
+    send({ type: "mode", value: b.dataset.mode });
+  });
+
   function renderMode() {
     const b = $("mode-badge");
     const m = S.mode;
@@ -770,12 +823,15 @@
       SYNC_CLEAR: "Sync: clear", SYNC_PIN: "Sync: pin the shown time",
       SYNC_KEEP_OLD: "Sync drift: keep the old sync", SYNC_USE_NEW: "Sync drift: use the new anchor",
       PITLANE_DEBUG: "Show pit lane reconstruction debug",
+      CYCLE_MODE: "Mode: AUTO → LIVE → VOD", SET_MODE: "Mode", MODE_AUTO: "Mode AUTO", MODE_LIVE: "Mode LIVE",
+      MODE_VOD: "Mode VOD",
     };
     const kb = { KEY_UP: "↑", KEY_DOWN: "↓", KEY_LEFT: "←", KEY_RIGHT: "→", KEY_ENTER: "Enter", KEY_ESC: "Esc", KEY_I: "I",
       KEY_SPACE: "Space", KEY_H: "H", KEY_1: "1", KEY_2: "2", KEY_3: "3", KEY_4: "4", KEY_5: "5", KEY_BACK: "Backspace",
       KEY_P: "P", KEY_V: "V", KEY_M: "M", KEY_F: "F", KEY_A: "A", KEY_T: "T",
       KEY_S: "S", KEY_R: "R", KEY_D: "D", KEY_EQUAL: "+", KEY_MINUS: "−",
-      KEY_Y: "Y", KEY_L: "L", KEY_C: "C", KEY_X: "X", KEY_K: "K", KEY_O: "O", KEY_N: "N", KEY_G: "G" };
+      KEY_Y: "Y", KEY_L: "L", KEY_C: "C", KEY_X: "X", KEY_K: "K", KEY_O: "O", KEY_N: "N", KEY_G: "G", KEY_E: "E",
+      KEY_W: "W" };
     const rows = [];
     for (const [k, cmd] of Object.entries(S.keymap)) {
       if (!kb[k]) continue;
@@ -785,7 +841,7 @@
     }
     rows.push('<div><kbd>Click row</kbd><span>Select driver</span></div>');
     const remoteNames = { KEY_OK: "OK", KEY_BACK: "BACK", KEY_LEFT: "←", KEY_RIGHT: "→", KEY_UP: "↑", KEY_DOWN: "↓", KEY_ENTER: "Enter", KEY_ESC: "Esc" };
-    const irNames = { KEY_CHANNELUP: "CH+", KEY_CHANNELDOWN: "CH−", KEY_RED: "RED", KEY_GREEN: "GREEN", KEY_YELLOW: "YELLOW", KEY_BLUE: "BLUE" };
+    const irNames = { KEY_CHANNELUP: "CH+", KEY_CHANNELDOWN: "CH−", KEY_RED: "RED", KEY_GREEN: "GREEN", KEY_YELLOW: "YELLOW", KEY_BLUE: "BLUE", KEY_MENU: "MENU" };
     const ir = Object.entries(S.keymap).filter(([k]) => irNames[k]).map(([k, cmd]) => {
       const [c, arg] = cmd.split(":");
       return `<div><kbd>${esc(irNames[k])}</kbd><span>${esc((names[c] || c) + (arg ? " " + arg : ""))}</span></div>`;
@@ -949,7 +1005,7 @@
         <div class="ri-flagrow">${flag}<span class="ri-flagsub">${esc(flagSub)}</span></div>
         <div class="ri-wx">AIR <b>${na(w.air_temp, (v) => v.toFixed(1) + "°")}</b> · TRACK <b>${na(w.track_temp, (v) => v.toFixed(1) + "°")}</b><br>
           RAIN <b>${w.rainfall === null || w.rainfall === undefined ? NA : w.rainfall ? "YES" : "NO"}</b> · WIND <b>${na(w.wind_speed, (v) => v.toFixed(1) + " m/s")}</b></div>
-        <div class="ri-foot"><span class="mode-badge mode-${esc(S.mode || "live")}">${S.mode === "test" ? "TEST MODE" : S.mode === "replay" ? "REPLAY" : S.mode === "vod" ? "RECORDING" : "LIVE"}</span>
+        <div class="ri-foot"><div class="ri-mode" id="ri-mode"></div><span class="mode-badge mode-${esc(S.mode || "live")}">${S.mode === "test" ? "TEST MODE" : S.mode === "replay" ? "REPLAY" : S.mode === "vod" ? "RECORDING" : "LIVE"}</span>
           ${has(ts.overtake) ? "OVERTAKE " + esc(ts.overtake) : ""}<span id="ri-sync"></span><br><span class="ri-video">${vline}</span></div>`;
     } else {
       const leaderNum = S.order[0], lead = leaderNum ? S.drivers[leaderNum] : null;
@@ -961,10 +1017,11 @@
         <div class="fb-item"><span class="fb-k">LEADER</span><span class="fb-v">${lead ? `<i class="fb-bar" style="background:${esc(lead.team_color || "#555")}"></i>${esc(lead.tla || leaderNum)}` : NA}</span></div>
         <div class="fb-item fb-sel"><span class="fb-k">SELECTED</span><span class="fb-v">${d ? `<i class="fb-bar" style="background:${esc(d.team_color || "#555")}"></i>P${esc(d.position ?? "—")} ${esc(d.tla || sel)} <small>${esc(gapText(d, s.session_kind) || "")}</small> ${tyreDot(t.compound)} ${has(t.tyre_age) ? t.tyre_age : ""}` : NA}</span></div>
         <div class="fb-item"><span class="fb-k">REMAINING</span><span class="fb-v" id="fb-clock"></span></div>
-        <div class="fb-item fb-mode"><span id="fb-sync"></span><span class="mode-badge mode-${esc(S.mode || "live")}">${S.mode === "test" ? "TEST" : S.mode === "replay" ? "REPLAY" : S.mode === "vod" ? "REC" : "LIVE"}</span></div>`;
+        <div class="fb-item fb-mode"><span id="fb-sync"></span><span id="fb-modesel"></span><span class="mode-badge mode-${esc(S.mode || "live")}">${S.mode === "test" ? "TEST" : S.mode === "replay" ? "REPLAY" : S.mode === "vod" ? "REC" : "LIVE"}</span></div>`;
     }
     renderClock();
     renderSync();
+    renderModeSel();
   }
 
   // ------------------------------------------------------------------ VOYO <-> F1 sync: chip + SYNC menu

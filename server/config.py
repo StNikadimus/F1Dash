@@ -17,7 +17,7 @@ DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 
 DEFAULTS: dict[str, Any] = {
     "server": {"host": "0.0.0.0", "port": 8080, "log_level": "INFO"},
-    "source": {"mode": "live", "delay_seconds": 0.0},
+    "source": {"mode": "auto", "delay_seconds": 0.0},
     "f1_tv": {"subscription": True, "open_browser": True, "safety_car_position_keys": [],
               "auth_file": "data/auth/f1tv_auth.json"},
     "live": {

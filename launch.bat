@@ -1,6 +1,7 @@
 @echo off
 REM F1 TV: dashboard server + dashboard + VOYO window + TV agent.
-REM   launch.bat          automatic: LIVE while an F1 session is on, otherwise VOD (a VOYO recording)
+REM   launch.bat          AUTO: LIVE while an F1 session is on, otherwise VOD - switch any time with the
+REM                       MODE selector on the dashboard (AUTO / LIVE / VOD, key E), no restart
 REM   launch.bat test     simulator
 REM   launch.bat replay   replay
 REM   launch.bat vod      force VOYO recording (VOD): data of the session shown in VOYO
