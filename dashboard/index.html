@@ -49,12 +49,21 @@
   <main id="grid">
     <section id="left">
       <div id="map-panel" class="panel">
-        <canvas id="map"></canvas>
         <div id="map-title" class="map-title"></div>
-        <div id="map-legend" class="map-legend"></div>
-        <div id="map-notice" class="map-notice" hidden></div>
-        <div id="pit-box" class="pit-box" hidden></div>
-        <div id="test-watermark" class="test-watermark" hidden>TEST MODE · SIMULATED DATA</div>
+        <!-- MINI_MAP_RECT: only the map is drawn here (track, pit lane, cars, safety car) -->
+        <div id="map-area">
+          <canvas id="map"></canvas>
+          <div id="map-notice" class="map-notice" hidden></div>
+        </div>
+        <!-- MESSAGE_RECT: messages / status - below the map, never over it -->
+        <div id="map-footer">
+          <div id="map-status" class="map-status"></div>
+          <div class="map-footer-row">
+            <div id="map-legend" class="map-legend"></div>
+            <div id="pit-box" class="pit-box" hidden></div>
+            <div id="test-watermark" class="test-watermark" hidden>TEST MODE · SIMULATED DATA</div>
+          </div>
+        </div>
       </div>
 
       <div id="detail-panel" class="panel"></div>

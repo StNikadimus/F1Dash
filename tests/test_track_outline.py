@@ -225,6 +225,9 @@ class CheckAndChoiceTest(unittest.TestCase):
         src.t = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
         eng = make_engine(src)
         eng._track_id = (144, 2025)
+        # the circuit identity comes from the session metadata (never guessed from the shape)
+        eng.feed_state.apply("SessionInfo", {"Meeting": {"Name": "Azerbaijan Grand Prix", "Location": "Baku",
+                                                     "Circuit": {"Key": 144, "ShortName": "Baku"}}}, snapshot=True)
         return eng
 
     def test_half_multiviewer_outline_is_replaced(self):

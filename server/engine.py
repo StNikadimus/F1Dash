@@ -24,11 +24,12 @@ from .openf1 import OpenF1Client, OpenF1Error, RefEvents, match_session, parse_t
 from .sync import SyncManager, VoyoSample
 from .telemetry import POS_FRESH_MS, parse_utc
 from .timeline import INF, Timeline
-from .pitlane import (PitLaneCollector, Reconstruction, collect_from_events, needs_reconstruction, reconstruct,
-                      traversals_from_samples)
+from .pitlane import (PitLaneCollector, Reconstruction, collect_from_events, deviation_from, needs_reconstruction,
+                      reconstruct, traversals_from_samples)
+from .pitlane_seed import seed_pitlane
 from .track import OutlineLearner, TrackGeometry, TrackProvider, outline_problem
-from .track_match import (MIN_SAMPLES, check_outline, fit_reference, identify, known_layouts, reference_id,
-                          reference_points)
+from .track_match import (MIN_SAMPLES, _Grid, _densify, check_outline, fit_reference, known_layouts,
+                          reference_id, reference_points)
 
 log = logging.getLogger("engine")
 
@@ -38,7 +39,9 @@ TEL_INTERVAL = 0.25         # s, max rate of telemetry messages
 SYNC_INTERVAL = 0.5         # s, sync status messages
 SNAPSHOT_BACKDATE_MS = 1500  # a subscribe snapshot is older than the updates that follow it
 CLOCK_WARN_MS = 2000.0       # PC clock vs F1 timestamps (incl. latency) beyond this: warn in the log
-FEED_STALE_S = 25.0          # live socket open but silent this long (F1 sends a Heartbeat every 15 s): DELAYED
+FEED_STALE_S = 25.0
+PIT_VALIDATE_M = 8.0         # a live pit pass within this RMS distance (m) of the loaded pit lane confirms it
+MAP_REPORT_S = 300.0         # map validation summary in the log          # live socket open but silent this long (F1 sends a Heartbeat every 15 s): DELAYED
 
 
 class Engine:
@@ -83,6 +86,11 @@ class Engine:
         self._ref_note: Optional[str] = None
         self._report_armed = 0.0
         self._check_last = 0.0
+        self._seed_task: Optional[asyncio.Task] = None
+        self._seed_key: Optional[int] = None
+        self._pit_status: dict = {}
+        self._pit_validation: dict = {}
+        self._map_report_last = -1e9
         # pit lane (cache-first): live/replay learn incrementally, VOD from the loaded archive
         self.pit_collector: Optional[PitLaneCollector] = None
         self._pit_ctx: dict = {}
@@ -672,10 +680,15 @@ class Engine:
         # (a rebuild of the outline never restarts or resets the pit-lane learning)
         if geo is not None and not self.vod and not rebuild:
             self._pit_start_learning(geo, key, year, name)
+        if not self.vod and not rebuild:
+            # the pit lane is circuit geometry: load it now (cache, else the F1 archive) - live
+            # pit stops of this session only validate it
+            self._pit_seed_maybe(key, year, name or (geo.name if geo else ""), geo)
         last = getattr(self, "_pit_last", None)
         if geo is not None and self.vod and last and last[0] == key:
             geo.pitlane_info = {**(geo.pitlane_info or {}), **last[2], "state": last[1]}
         self.hub.set_track(geo.to_dict() if geo else None)
+        self._log_map_report("track loaded")
 
     # ------------------------------------------------------------------ pit lane (server/pitlane.py)
     def _pit_publish(self, key: Optional[int], state: str, rec: Optional[Reconstruction] = None,
@@ -818,8 +831,68 @@ class Engine:
         self._pit_task = asyncio.get_event_loop().create_task(self._pit_live_apply(list(col.traversals)))
         return self._pit_task
 
+    def _pit_seed_maybe(self, key: int, year: Optional[int], name: str, geo: Optional[TrackGeometry]) -> None:
+        if not self.tracks.learn_pitlane or self.source.mode == "test" or (geo is not None and geo.source == "test"):
+            return
+        cached = self.tracks.pitcache.lookup(key, year)
+        if cached is not None and cached.get("status") == "verified":
+            return                                  # drawn from the cache at once
+        if self._seed_task is not None and not self._seed_task.done() and self._seed_key == key:
+            return
+        self._seed_key = key
+        self._pit_meta = {"key": key, "name": name, "year": year}
+        self._seed_task = asyncio.get_event_loop().create_task(self._pit_seed(key, year, name, geo, cached))
+
+    async def _pit_seed(self, key: int, year: Optional[int], name: str, geo: Optional[TrackGeometry],
+                        cached: Optional[dict]) -> None:
+        si = self.feed_state.get("SessionInfo") or {}
+        self._pit_status = {"key": key, "state": "loading", "note": "loading the pit lane from the F1 archive"}
+        if cached is None:
+            self._pit_publish(key, "loading", None, [], None, None, "loading the pit lane from the F1 archive")
+
+        def progress(text: str) -> None:
+            self._pit_status = {"key": key, "state": "loading", "note": text}
+        try:
+            passes, sess, note = await seed_pitlane(key, year, geo.points if geo else None,
+                                                    DATA_DIR / "archive_cache", exclude_path=si.get("Path"),
+                                                    progress=progress)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            passes, sess, note = None, None, f"{type(exc).__name__}: {exc}"
+        if self._track_id is None or self._track_id[0] != key:
+            return                                  # another circuit meanwhile
+        if passes is None:
+            now = self.tracks.pitcache.lookup(key, year)
+            self._pit_status = {"key": key, "state": "cached" if now else "unavailable", "note": note}
+            if now is None:
+                log.warning("Pit lane geometry unavailable for circuit %s: %s", key, note)
+                self._pit_publish(key, "unavailable", None, [], None, None, f"unavailable: {note}")
+            return
+        await self._pit_apply(key, sess["year"], name, None, passes, cached, f"F1 archive: {sess['name']} {sess['year']}")
+        now = self.tracks.pitcache.lookup(key, year)
+        self._pit_status = {"key": key, "state": "cached" if now else "unavailable", "note": note}
+        if self._pit_ctx.get("key") == key:
+            self._pit_ctx["cached"] = now           # live passes now validate this one
+        self._log_map_report("pit lane loaded")
+
     async def _pit_live_apply(self, passes: list) -> None:
         ctx = self._pit_ctx
+        known = self.tracks.pitcache.lookup(ctx["key"], ctx.get("year"))
+        if known is not None and known.get("status") == "verified":
+            # a verified pit lane is circuit geometry: live passes only validate it, never replace it
+            new = [t for t in passes if t.accepted and t.num != "cache"][-5:]
+            for t in new:
+                dev = deviation_from(known, t)
+                ok = dev is not None and dev <= PIT_VALIDATE_M
+                self._pit_validation = {"passes": self._pit_validation.get("passes", 0) + 1,
+                                        "agree": self._pit_validation.get("agree", 0) + (1 if ok else 0),
+                                        "last_dev_m": None if dev is None else round(dev, 1)}
+                log.info("Pit lane circuit %s: live pass of car %s %s the loaded pit lane (deviation %s m)",
+                         ctx["key"], t.num, "matches" if ok else "does NOT match",
+                         "?" if dev is None else f"{dev:.1f}")
+            self.pit_collector.traversals.clear()
+            return
         si = self.feed_state.get("SessionInfo") or {}
         await self._pit_apply(ctx["key"], ctx.get("year"), ctx.get("name") or "", si.get("Key"), passes,
                               ctx.get("cached"), "F1 position data (live)", prior=ctx.get("prior"))
@@ -896,7 +969,10 @@ class Engine:
         elif geo is None or geo.source == "learned":
             if "reference" in self.tracks.rejected(key):
                 return
-            job = ("identify", self._ref_hint())
+            hint = self._ref_hint()
+            if hint is None:
+                return                              # the session does not say which layout: never guessed
+            job = ("identify", hint)
         elif geo.source in ("multiviewer", "reference"):
             if mono - self._check_last < 60:
                 return
@@ -921,9 +997,14 @@ class Engine:
                 if geo.info.get("check") != chk.reason and chk.ok:
                     geo.info = {**geo.info, "check": chk.reason}
                 return
-            log.warning("Track map of circuit %s (%s) does not match the cars: %s - looking for the known layout "
-                        "that does", key, geo.source, chk.reason)
-            rid, fit = await asyncio.to_thread(identify, samples, self._ref_hint())
+            hint = self._ref_hint()
+            log.warning("Track map of circuit %s (%s) does not match the cars: %s - %s", key, geo.source, chk.reason,
+                        f"fitting the known layout {hint} of this circuit" if hint else
+                        "no known layout for this circuit name (choose it with CHOOSE CIRCUIT)")
+            if hint is None:
+                self._ref_note = f"the drawn track does not match the cars: {chk.reason}"
+                return
+            rid, fit = hint, await asyncio.to_thread(fit_reference, reference_points(hint), samples)
             note = f"replaced the {geo.source} outline: {chk.reason}"
         elif kind == "choice":
             ref = reference_points(arg)
@@ -932,8 +1013,11 @@ class Engine:
             fit = await asyncio.to_thread(fit_reference, ref, samples)
             rid, note = arg, "the circuit you chose"
         else:
-            rid, fit = await asyncio.to_thread(identify, samples, arg)
-            note = "known layout of this circuit" if rid == arg else "identified from the car positions"
+            ref = reference_points(arg)
+            if ref is None:
+                return
+            rid, fit = arg, await asyncio.to_thread(fit_reference, ref, samples)
+            note = "known layout of this circuit (from the session's circuit name)"
         if self._track_id is None or self._track_id[0] != key:
             return                                  # another circuit meanwhile
         if not fit.ok or rid is None:
@@ -952,6 +1036,84 @@ class Engine:
         self._ref_note = None
         log.info("Track map of circuit %s: known layout %s (%s; %s)", key, rid, fit.reason, note)
         self.hub.set_track(self.geometry.to_dict())
+
+    def circuit_identity(self) -> dict:
+        """Which circuit this is - from the session's own metadata only (F1's Meeting.Circuit.Key,
+        circuit short name, location, season); ``layout`` = the matching known layout id."""
+        si = self.feed_state.get("SessionInfo") or {}
+        meeting = si.get("Meeting") or {}
+        circuit = meeting.get("Circuit") or {}
+        key, year = self._track_id if self._track_id else (circuit.get("Key"), None)
+        return {"circuit_key": key, "name": circuit.get("ShortName"), "meeting": meeting.get("Name"),
+                "location": meeting.get("Location"), "season": year, "layout": self._ref_hint(),
+                "chosen": self.tracks.choice(key) if key is not None else None}
+
+    def map_report(self) -> dict:
+        """Is the map right? Track and pit-lane geometry present, and do the live car positions
+        fall on them (same F1 coordinate system for track, pit lane, cars and safety car)."""
+        geo = self.geometry
+        ident = self.circuit_identity()
+        rep: dict = {"identity": ident}
+        if geo is None:
+            rep["track"] = {"ok": False, "detail": "NOT AVAILABLE" + (f" ({self._ref_note})" if self._ref_note else "")}
+        else:
+            src = {"multiviewer": f"MultiViewer {geo.year or ''}".strip(), "learned": "learned from one lap",
+                   "test": "test circuit"}.get(geo.source, f"known layout {(geo.info or {}).get('ref_id')} fitted to the cars")
+            rep["track"] = {"ok": True, "detail": f"{src} ({len(geo.points)} points)", "source": geo.source,
+                            "rotation_deg": geo.rotation}
+        pit = geo.pitlane if geo is not None else None
+        pinfo = (geo.pitlane_info or {}) if geo is not None else {}
+        status = self._pit_status if self._pit_status.get("key") == ident.get("circuit_key") else {}
+        if pit:
+            rep["pit_lane"] = {"ok": True, "detail": f"{pinfo.get('source') or 'cache'} - {pinfo.get('confidence')}, "
+                                                     f"{pinfo.get('traversals')} passes",
+                               "validation": dict(self._pit_validation)}
+        else:
+            rep["pit_lane"] = {"ok": False, "detail": "NOT AVAILABLE - " + (status.get("note") or pinfo.get("note")
+                                                                         or "no pit-lane geometry for this circuit yet")}
+        # positions vs geometry
+        drivers = self._driver_numbers()
+        now = self._now_pres_ms()
+        fresh = {k: v for k, v in self.positions.freshness(now).items() if v["fresh"] and k in drivers}
+        if geo is None or not fresh:
+            rep["positions"] = {"ok": None, "detail": "no geometry" if geo is None else "no fresh Position.z data",
+                                "mapped": 0, "with_position": len(fresh), "drivers": len(drivers)}
+        else:
+            pts = _densify(geo.points) + (_densify(pit) if pit else [])
+            grid = _Grid([tuple(p) for p in pts])
+            dist = {k: grid.nearest(*self.positions.latest[k][1:3])[0] / 10 for k in fresh}
+            mapped = [k for k, d in dist.items() if d <= 50]
+            off = sorted((d, k) for k, d in dist.items() if d > 50)
+            ds = sorted(dist.values())
+            ok = len(mapped) == len(dist)
+            rep["positions"] = {"ok": ok, "mapped": len(mapped), "with_position": len(dist), "drivers": len(drivers),
+                                "median_m": round(ds[len(ds) // 2], 1),
+                                "detail": (f"OK - median {ds[len(ds) // 2]:.1f} m from the track" if ok else
+                                           f"{len(off)} car(s) more than 50 m off the drawn track/pit lane: " +
+                                           ", ".join(f"#{k} {d:.0f} m" for d, k in off[:5]))}
+        sc = self.map_info()["safety_car"]
+        rep["safety_car"] = {"ok": sc.get("available"), "detail": "Position.z key " + str(sc.get("key"))
+                             if sc.get("available") else sc.get("reason")}
+        return rep
+
+    def _log_map_report(self, why: str = "") -> None:
+        try:
+            r = self.map_report()
+        except Exception:  # noqa: BLE001
+            self._parse_error("map-report")
+            return
+        i = r["identity"]
+        p = r["positions"]
+        lines = [f"Track: {i.get('meeting') or '?'} - {i.get('name') or '?'} (circuit_key {i.get('circuit_key')}, "
+                 f"season {i.get('season')}, layout {i.get('layout') or 'unknown'}"
+                 + (f", your choice {i['chosen']}" if i.get("chosen") else "") + ")" + (f" [{why}]" if why else ""),
+                 f"Track geometry: {'OK - ' if r['track']['ok'] else ''}{r['track']['detail']}",
+                 f"Pit lane geometry: {'OK - ' if r['pit_lane']['ok'] else ''}{r['pit_lane']['detail']}",
+                 f"Position mapping: {p['detail']}",
+                 f"Drivers mapped: {p['mapped']}/{p['with_position']} with a fresh position ({p['drivers']} drivers)",
+                 f"Safety car position: {'OK - ' if r['safety_car']['ok'] else 'not available - '}{r['safety_car']['detail']}"]
+        for line in lines:
+            log.info("%s", line)
 
     def set_track_choice(self, ref_id: Optional[str]) -> str:
         """Choose the circuit layout yourself (an id of known_layouts()) or "auto"."""
@@ -1155,6 +1317,9 @@ class Engine:
                     self._parse_error("telemetry")
             elif self.cardata.latest and now - last_tel >= 1.0:
                 self._tel_dirty = True
+            if self._track_id is not None and now - self._map_report_last >= MAP_REPORT_S and self.positions.latest:
+                self._map_report_last = now
+                self._log_map_report()
             if self.source.mode == "live" and self.diag.due(now):
                 self.diag.mark_reported(now)
                 try:
@@ -1269,6 +1434,7 @@ class Engine:
                          "fresh": sum(1 for k, v in car.items() if k in drivers and v["fresh"]),
                          "channels": chans, "source": self.availability.car_data_source},
             "safety_car_position": self.map_info()["safety_car"],
+            "map_validation": self.map_report(),
             "track_geometry": {"available": geo is not None,
                                "detail": f"{geo.name} ({geo.source})" if geo is not None else "not loaded"},
             "tyres": {"available": bool(stints or tss or fs.get("CurrentTyres")),

@@ -253,6 +253,16 @@ class TrackProvider:
                 geo = self._from_mv_file(cache, circuit_key, year)
             if geo is None:
                 geo = await self._download(circuit_key, year, cache)
+            if geo is None and year is not None:
+                # MultiViewer publishes a season's circuits during it: the previous seasons' outline
+                # of the same circuit (checked against the car positions afterwards by the engine)
+                for y in (year - 1, year - 2):
+                    p = self.dir / f"mv_{circuit_key}_{y}.json"
+                    geo = self._from_mv_file(p, circuit_key, y) if p.exists() else await self._download(circuit_key, y, p)
+                    if geo is not None:
+                        log.warning("No MultiViewer outline of circuit %s for %s - using its %s outline", circuit_key,
+                                    year, y)
+                        break
             if geo is None:
                 # any other cached year of the same circuit
                 others = sorted(self.dir.glob(f"mv_{circuit_key}_*.json"), reverse=True)
