@@ -22,6 +22,14 @@
 #stage.tv-RACE_VIEW #map-panel { position: absolute; left: 8px; top: 728px; width: 470px; height: 344px; }
 #stage.tv-RACE_VIEW #detail-panel { position: absolute; left: 486px; top: 728px; width: 440px; height: 344px; }
 #stage.tv-RACE_VIEW #view-panel { position: absolute; left: 8px; top: 728px; width: 918px; height: 344px; overflow: hidden; }
+/* weather report: over the leaderboard (the VOYO window covers the video slot) */
+#stage.tv-RACE_VIEW #wx-report { left: 1288px; top: 8px; width: 624px; height: 704px; inset: auto; align-items: flex-start; }
+#stage.tv-RACE_VIEW #wx-report.overlay { position: absolute; left: 1288px; top: 8px; }
+#stage.tv-RACE_VIEW .wx-box { width: 624px; padding: 14px 16px; }
+#stage.tv-RACE_VIEW .wx-box .wx-tiles .tile .v { font-size: 20px; }
+#stage.tv-RACE_VIEW .wx-box .wx-text { font-size: 16px; }
+#stage.tv-RACE_VIEW .wx-box h2 { font-size: 20px; white-space: nowrap; }
+#stage.tv-RACE_VIEW .wx-box h2 .wx-lap { font-size: 16px; }
 #stage.tv-RACE_VIEW #rc-panel { position: absolute; left: 934px; top: 728px; width: 560px; height: 344px; }
 #stage.tv-RACE_VIEW #race-info { display: flex; position: absolute; left: 1502px; top: 728px; width: 410px; height: 344px; }
 /* banners: stacked at the top of the right column (the VOYO window covers the left part); the

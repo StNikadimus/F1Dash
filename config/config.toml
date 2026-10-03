@@ -110,6 +110,28 @@ learn_pitlane = true
 # real position data.
 learn_outline = true
 
+# ---------------------------------------------------------------------------
+# Weather report popup (server/weather.py): current F1 WeatherData + forecast (Open-Meteo models
+# ECMWF / GFS / ICON and MET Norway, compared - no key needed) + race impact. Shown after every
+# `every_laps` completed race laps; key U / remote WEATHER_REPORT shows it now. TEST mode:
+# WEATHER_REPORT:<dry|drizzle|light|medium|heavy|stopping|noforecast|disagree> = simulated forecast.
+# ---------------------------------------------------------------------------
+[weather]
+enabled = true
+every_laps = 15
+display_seconds = 15
+forecast_cache_seconds = 600      # forecasts are fetched only for a report and cached this long
+horizon_hours = 3
+test_auto = false                 # TEST mode: no automatic popup unless true
+
+# mm/h -> NONE < drizzle <= DRIZZLE < light <= LIGHT < medium <= MEDIUM < heavy <= HEAVY
+# (usual rain-rate classes: light < 2.5 mm/h, moderate 2.5-7.6 mm/h, heavy > 7.6 mm/h)
+[weather.thresholds]
+drizzle_mm_h = 0.1
+light_mm_h = 0.5
+medium_mm_h = 2.5
+heavy_mm_h = 7.6
+
 [dashboard]
 # Frontend interpolation buffer for car movement (milliseconds). Position
 # data arrives in batches, so the map is drawn slightly in the past.
@@ -184,6 +206,7 @@ KEY_O = "SYNC_KEEP_OLD"           # after "possible sync drift": keep the curren
 KEY_N = "SYNC_USE_NEW"            # ... or use the new anchor (the old one stays in the history)
 KEY_R = "SYNC_RESYNC"
 KEY_W = "TRACK_REPORT"            # track map wrong: press twice within 8 s -> rebuild it (pit lane kept)
+KEY_U = "WEATHER_REPORT"          # weather report popup now
 KEY_E = "CYCLE_MODE"              # MODE selector: AUTO -> LIVE -> VOD (applied after 1.5 s without another press)
 KEY_MENU = "CYCLE_MODE"           # (WD TV remote MENU); also SET_MODE:AUTO|LIVE|VOD, MODE_AUTO, MODE_LIVE, MODE_VOD
 KEY_D = "SYNC_DEBUG"              # = SYNC menu

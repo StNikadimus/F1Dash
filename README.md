@@ -507,6 +507,33 @@ backwards - both are handled; every in-pit position of a real pass is drawn on t
 (≤ 1 px), cars on the main straight never are.
 `python tools/fetch_tracks.py --year 2026 --pitlane` fills the cache for a whole season.
 
+## 8a. Weather report popup
+
+During a race (and sprint), after every 15 completed laps (`[weather] every_laps`) a **WEATHER REPORT**
+panel appears for 15 s (`display_seconds`; click to close). **U** / remote `WEATHER_REPORT` / the
+phone remote shows it at any time. It uses the standard overlay box of the dashboard (centred; in
+RACE VIEW over the leaderboard, never under the VOYO window).
+
+* **CURRENT** - official F1 `WeatherData`: air / track temperature (with the trend of the last
+  ~15 min of the session), humidity, wind (m/s from F1, shown in km/h) and direction, rainfall.
+* **FORECAST** - the circuit's coordinates (bundled `f1-locations.json`) to **Open-Meteo**
+  (ECMWF IFS, GFS and ICON models - each one a source) and **MET Norway**, no keys. Each source
+  gives the first rain, its end and its peak rate; agreeing sources -> HIGH / MEDIUM confidence,
+  disagreeing ones -> "Rain possible laps 18-25" with LOW confidence. Rates -> NONE / DRIZZLE /
+  LIGHT / MEDIUM / HEAVY with the documented `[weather.thresholds]` (0.1 / 0.5 / 2.5 / 7.6 mm/h).
+  Times become laps only as an estimate (`~lap 22`) from the leader's recent lap times - never
+  presented as an F1 prediction; the forecast is hourly, so it is never more precise than that.
+  Fetched only for a report, cached 10 min. A recording (replay / VOD) gets no forecast.
+* **RACE IMPACT** - fixed rules on that data (slippery track / intermediate conditions possible /
+  drying line / track temperature up or down / no significant change). No LLM: the project has
+  none, and the text never contains a value that is not in the data.
+* Missing data stays **N/A** (never 0 °C / 0 % / NONE); without a forecast the current conditions
+  are still shown ("Weather forecast unavailable"). No popup when there is no weather data at all.
+* TEST mode: no automatic popup (`test_auto = true` enables it); simulated forecasts with
+  `WEATHER_REPORT:dry|drizzle|light|medium|heavy|stopping|noforecast|disagree` (phone remote:
+  "TEST mode: simulated weather"). Log lines: `[WEATHER] Current: …`, `[WEATHER] Forecast: …`,
+  `[WEATHER] Report generated for lap 15`.
+
 ## 9. Remote control and keyboard
 
 Everything goes through one abstraction: *input → key name → whitelisted

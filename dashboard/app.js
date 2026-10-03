@@ -96,6 +96,9 @@
       case "mode":
         S.modeSel = m; renderModeSel();
         break;
+      case "weather_report":
+        showWeatherReport(m);
+        break;
       case "pitlane_debug":
         Map2D.setPitDebug(m);
         break;
@@ -154,7 +157,7 @@
     s: "KEY_S", S: "KEY_S", r: "KEY_R", R: "KEY_R", d: "KEY_D", D: "KEY_D",
     y: "KEY_Y", Y: "KEY_Y", l: "KEY_L", L: "KEY_L", c: "KEY_C", C: "KEY_C", x: "KEY_X", X: "KEY_X", k: "KEY_K", K: "KEY_K",
     o: "KEY_O", O: "KEY_O", n: "KEY_N", N: "KEY_N", g: "KEY_G", G: "KEY_G", w: "KEY_W", W: "KEY_W",
-    e: "KEY_E", E: "KEY_E",
+    e: "KEY_E", E: "KEY_E", u: "KEY_U", U: "KEY_U",
     "+": "KEY_KPPLUS", "=": "KEY_EQUAL", "-": "KEY_MINUS", "_": "KEY_MINUS",
   };
   document.addEventListener("keydown", (e) => {
@@ -358,6 +361,49 @@
     if ((S.session || {}).state === "FINISHED") return "FINISHED";
     return "LIVE";
   }
+  // ------------------------------------------------------------------ weather report popup (server/weather.py)
+  let wxTimer = null;
+  function showWeatherReport(r) {
+    const c = r.current || {}, f = r.forecast || {}, ri = r.race_impact || {};
+    const u = (v, unit, dp = 1) => has(v) ? `${Number(v).toFixed(dp)}<small>${unit}</small>` : NA;
+    const tile = (k, v, cls) => `<div class="tile ${cls || ""}"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+    const tr = has(c.track_temp_trend_c) && Math.abs(c.track_temp_trend_c) >= 0.5
+      ? ` <small>${c.track_temp_trend_c > 0 ? "▲" : "▼"}${Math.abs(c.track_temp_trend_c).toFixed(1)}</small>` : "";
+    // wind arrow points where the wind blows TO (F1 gives where it comes from)
+    const arrow = has(c.wind_direction_deg) ? `<span style="display:inline-block;transform:rotate(${(c.wind_direction_deg + 180) % 360}deg)">↑</span> ` : "";
+    const rainCur = c.rainfall === true ? "YES" : c.rainfall === false ? "NO" : NA;
+    let rainF, inten = NA, dur = NA, conf = NA;
+    if (!f.available) rainF = '<span class="na">N/A</span>';
+    else if (f.rain_expected === false) rainF = "NOT EXPECTED";
+    else {
+      rainF = esc(f.expected_lap || f.expected_time || "LATER") + (f.rain_expected === "POSSIBLE" ? " <small>POSSIBLE</small>" : "");
+      inten = esc((f.intensity_range && f.intensity_range.length > 1) ? f.intensity_range.join("–") : f.intensity || "N/A");
+      dur = has(f.duration_min) ? `~${esc(f.duration_min)}<small> min</small>` : NA;
+    }
+    if (f.available) conf = esc(f.confidence || "N/A");
+    const lap = has(r.session_lap) ? `LAP ${esc(r.session_lap)}${has(r.total_laps) ? " / " + esc(r.total_laps) : ""}` : "";
+    $("wx-box").innerHTML =
+      `<h2>🌦 WEATHER REPORT ${r.simulated ? '<span class="wx-sim">SIMULATED</span>' : ""}<span class="wx-lap">${lap}</span></h2>` +
+      `<div class="wx-sec">CURRENT${c.available ? "" : " · F1 SESSION WEATHER UNAVAILABLE"}</div>` +
+      `<div class="wx-tiles">${tile("AIR", u(c.air_temperature, "°C"))}${tile("TRACK", u(c.track_temperature, "°C") + tr)}` +
+      `${tile("HUMIDITY", u(c.humidity, "%", 0))}${tile("WIND", has(c.wind_speed_kmh) ? arrow + u(c.wind_speed_kmh, " km/h", 0) + (c.wind_direction ? ` <small>${esc(c.wind_direction)}</small>` : "") : NA)}` +
+      `${tile("RAIN", rainCur, c.rainfall ? "wx-rain" : "")}${tile("CONDITION", c.condition ? esc(c.condition) : NA)}</div>` +
+      `<div class="wx-sec">FORECAST</div>` +
+      `<div class="wx-tiles f4">${tile("RAIN", rainF, f.rain_expected ? "wx-rain" : "")}${tile("INTENSITY", inten, "wx-i-" + esc(f.intensity || ""))}` +
+      `${tile("DURATION", dur)}${tile("CONFIDENCE", conf)}</div>` +
+      `<div class="wx-sec">EXPECTED</div><div class="wx-text">${esc(f.text || "Forecast unavailable.")}</div>` +
+      `<div class="wx-sec">RACE IMPACT</div><div class="wx-text">${esc(ri.summary || "")}</div>` +
+      (ri.details || []).map((x) => `<div class="wx-text dim">${esc(x)}</div>`).join("") +
+      `<div class="wx-foot">SOURCES: ${esc((r.sources || []).join(" · ") || "none")}` +
+      (f.available && f.rain_expected ? (f.lap_estimate ? ` · laps estimated from the leader's pace (${esc(f.lap_time_s)} s/lap), not an official F1 prediction` : " · no lap estimate (race pace unknown)") : "") +
+      (f.available ? " · hourly forecast models, compared" : "") + "</div>";
+    const box = $("wx-report");
+    box.hidden = false;
+    clearTimeout(wxTimer);
+    wxTimer = setTimeout(() => { box.hidden = true; }, Math.max(5, r.display_seconds || 15) * 1000);
+  }
+  $("wx-report").addEventListener("click", () => { $("wx-report").hidden = true; clearTimeout(wxTimer); });
+
   // ------------------------------------------------------------------ MODE selector (AUTO / LIVE / VOD)
   function resetData() {
     Object.assign(S, { session: {}, track_status: {}, weather: {}, drivers: {}, order: [], race_control: [], radio: [],
@@ -876,13 +922,13 @@
       SYNC_KEEP_OLD: "Sync drift: keep the old sync", SYNC_USE_NEW: "Sync drift: use the new anchor",
       PITLANE_DEBUG: "Show pit lane reconstruction debug",
       CYCLE_MODE: "Mode: AUTO → LIVE → VOD", SET_MODE: "Mode", MODE_AUTO: "Mode AUTO", MODE_LIVE: "Mode LIVE",
-      MODE_VOD: "Mode VOD",
+      MODE_VOD: "Mode VOD", WEATHER_REPORT: "Weather report now",
     };
     const kb = { KEY_UP: "↑", KEY_DOWN: "↓", KEY_LEFT: "←", KEY_RIGHT: "→", KEY_ENTER: "Enter", KEY_ESC: "Esc", KEY_I: "I",
       KEY_SPACE: "Space", KEY_H: "H", KEY_1: "1", KEY_2: "2", KEY_3: "3", KEY_4: "4", KEY_5: "5", KEY_BACK: "Backspace",
       KEY_P: "P", KEY_V: "V", KEY_M: "M", KEY_F: "F", KEY_A: "A", KEY_T: "T",
       KEY_S: "S", KEY_R: "R", KEY_D: "D", KEY_EQUAL: "+", KEY_MINUS: "−",
-      KEY_Y: "Y", KEY_L: "L", KEY_C: "C", KEY_X: "X", KEY_K: "K", KEY_O: "O", KEY_N: "N", KEY_G: "G", KEY_E: "E",
+      KEY_Y: "Y", KEY_L: "L", KEY_C: "C", KEY_X: "X", KEY_K: "K", KEY_O: "O", KEY_N: "N", KEY_G: "G", KEY_E: "E", KEY_U: "U",
       KEY_W: "W" };
     const rows = [];
     for (const [k, cmd] of Object.entries(S.keymap)) {

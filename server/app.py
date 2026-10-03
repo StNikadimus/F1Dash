@@ -142,6 +142,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     remote = RemoteController(cfg["remote"], lambda: rt.engine.order() if rt.engine else [], publish_ui)
     remote.sync_hook = lambda name, arg: rt.engine.sync_command(name, arg) if rt.engine else None
     remote.track_hook = lambda: rt.engine.track_report() if rt.engine else "No data source running"
+    remote.weather_hook = lambda arg: rt.engine.request_weather_report(arg) if rt.engine else "No data source running"
     remote.auto_cycle_seconds = int(cfg["dashboard"].get("auto_cycle_seconds", 20))
     voyo_cfg = cfg.get("voyo") or {}
     if start_mode == "vod":
