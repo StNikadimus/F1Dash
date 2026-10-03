@@ -15,8 +15,23 @@ SECTIONS = ("session", "track_status", "weather", "order", "race_control", "radi
 LOSSY = {"pos", "tel"}          # may be dropped for slow clients
 
 
+_bad_types: set = set()
+
+
+def _fallback(o: Any) -> Any:
+    """A value JSON cannot hold (a bug upstream): sent as text instead of breaking every
+    dashboard connection, and reported once per type with where it came from."""
+    t = type(o).__name__
+    if t not in _bad_types:
+        _bad_types.add(t)
+        log.error("Value of type %s in a dashboard message is not JSON - sent as text: %.200r", t, o)
+    if isinstance(o, (set, frozenset, tuple)):
+        return list(o)
+    return str(o)
+
+
 def _dumps(obj: Any) -> str:
-    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False, default=_fallback)
 
 
 class Client:
@@ -56,22 +71,17 @@ class Hub:
         self.clients.add(c)
         c.task = asyncio.create_task(c.writer())
         log.info("Dashboard client connected: %s (%d total)", addr, len(self.clients))
-        self._send(c, _dumps(self.hello))
-        self._send(c, _dumps(self._full_state()))
-        if self.track:
-            self._send(c, _dumps({"type": "track", "track": self.track}))
-        if self.status:
-            self._send(c, _dumps(self.status))
-        if self.video:
-            self._send(c, _dumps(self.video))
-        if self.pit_debug:
-            self._send(c, _dumps(self.pit_debug))
-        if self.ui:
-            self._send(c, _dumps(self.ui))
-        if self.clock:
-            self._send(c, _dumps(self.clock))
-        if self.sync:
-            self._send(c, _dumps(self.sync))
+        initial = [("hello", self.hello), ("state", self._full_state()),
+                   ("track", {"type": "track", "track": self.track} if self.track else None),
+                   ("status", self.status), ("video", self.video), ("pit_debug", self.pit_debug),
+                   ("ui", self.ui), ("clock", self.clock), ("sync", self.sync)]
+        for name, msg in initial:
+            if not msg:
+                continue
+            try:
+                self._send(c, _dumps(msg))
+            except Exception:  # noqa: BLE001 - one broken message must never refuse the connection
+                log.exception("Could not send the initial '%s' message to %s (skipped)", name, addr)
         return c
 
     def remove(self, c: Client) -> None:
@@ -97,7 +107,11 @@ class Hub:
             self.clock = msg
         if not self.clients:
             return
-        text = _dumps(msg)
+        try:
+            text = _dumps(msg)
+        except Exception:  # noqa: BLE001
+            log.exception("Message '%s' cannot be sent to the dashboards (dropped)", msg.get("type"))
+            return
         lossy = msg.get("type") in LOSSY
         for c in list(self.clients):
             if lossy and c.queue.qsize() > 150:
@@ -109,25 +123,35 @@ class Hub:
         return {"type": "state", "full": True, **self.state}
 
     def publish_state(self, state: dict[str, Any], force_full: bool = False) -> None:
-        self.state = state
         patch: dict[str, Any] = {"type": "state", "full": False}
         changed = False
         for key in SECTIONS:
-            s = _dumps(state.get(key))
+            try:
+                s = _dumps(state.get(key))
+            except Exception:  # noqa: BLE001 - e.g. a circular structure: keep the last good section
+                log.exception("State section '%s' cannot be sent (kept the previous one)", key)
+                state[key] = (self.state or {}).get(key)
+                continue
             if self._last.get(key) != s:
                 self._last[key] = s
                 patch[key] = state.get(key)
                 changed = True
         drivers = state.get("drivers") or {}
         dpatch = {}
-        for num, d in drivers.items():
-            s = _dumps(d)
+        for num, d in list(drivers.items()):
+            try:
+                s = _dumps(d)
+            except Exception:  # noqa: BLE001
+                log.exception("Driver %s cannot be sent (kept the previous state)", num)
+                drivers[num] = ((self.state or {}).get("drivers") or {}).get(num) or {}
+                continue
             if self._last.get(f"d:{num}") != s:
                 self._last[f"d:{num}"] = s
                 dpatch[num] = d
         removed = [k[2:] for k in list(self._last) if k.startswith("d:") and k[2:] not in drivers]
         for num in removed:
             self._last.pop(f"d:{num}", None)
+        self.state = state                       # (only sendable content from here on)
         if dpatch or removed:
             patch["drivers"] = dpatch
             patch["removed"] = removed
