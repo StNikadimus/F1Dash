@@ -761,11 +761,15 @@ the slot. The dashboard cannot start PiP for another site's player.
 **Mirroring to a TV (AirParrot, Miracast, OBS …) shows the VOYO video black** while the
 PC monitor shows it and the sound plays: Chromium hands hardware-decoded video to a GPU
 overlay plane that the monitor scans out but desktop capture does not contain (a short
-ALT+TAB makes it appear because the video is then composited normally). Start with
+ALT+TAB makes it appear because the video is then composited normally). Modes:
 `launch.bat capture1` (no video overlays; GPU and hardware decoding stay), if still black
 `capture2` (+ no hardware video decode), last resort `capture3` (no GPU). Close the VOYO
-window completely first – the flags apply on a fresh start. Make it permanent with
-`[voyo] capture_compat` in `config/config.toml`. Only the VOYO window's rendering
+window completely first – the flags apply on a fresh start.
+**Default: `[voyo] capture_compat = "no-gpu"` (= `capture3`)** in `config/config.toml`, so a
+plain `launch.bat` already starts the VOYO window with `--disable-gpu`: on the reference
+setup AirParrot showed the video only in this mode (`capture1` / `capture2` stayed black).
+`launch.bat capture1` / `capture2` still select the other modes for one start,
+`launch.bat capture0` the browser default; change the config value to switch permanently. Only the VOYO window's rendering
 changes; VOYO's player, login and DRM are untouched. If the video stays black even with
 `capture3`, the stream is protected from capture by design and no setting here changes that.
 

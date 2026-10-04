@@ -281,8 +281,10 @@ fallback_when_unreachable = true
 #   "no-overlays"  - --disable-direct-composition-video-overlays (GPU + hardware decode stay)
 #   "no-hw-decode" - also --disable-accelerated-video-decode
 #   "no-gpu"       - --disable-gpu (software rendering, most CPU)
-# Also selectable per start: launch.bat capture1 / capture2 / capture3
-capture_compat = "off"
+# Also selectable per start: launch.bat capture0 / capture1 / capture2 / capture3
+# Default "no-gpu" (= capture3): the only mode with which AirParrot shows the VOYO video
+# on the TV on this setup (capture1 / capture2 stayed black). "off" = browser default.
+capture_compat = "no-gpu"
 
 # ---------------------------------------------------------------------------
 # VOYO video <-> F1 data synchronisation. See README "VOYO sync".
