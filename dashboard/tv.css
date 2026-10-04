@@ -86,7 +86,10 @@
 #stage.tv-RACE_VIEW .test-watermark { font-size: 12px; }
 #stage.tv-RACE_VIEW .strat-row { height: 30px; font-size: 18px; }
 #stage.tv-RACE_VIEW .wx .v { font-size: 30px; }
-#stage.tv-RACE_VIEW .rc-item { font-size: 18px; }
+#stage.tv-RACE_VIEW .rc-item { font-size: 18px; align-items: start; }
+/* a long message wraps onto a second line; only beyond two lines it is cut (ellipsis on line 2) */
+#stage.tv-RACE_VIEW .rc-item .m { white-space: normal; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; line-clamp: 2; line-height: 1.22; overflow-wrap: anywhere; }
 
 /* session / flag / weather panel */
 #race-info { flex-direction: column; gap: 6px; padding: 12px 16px; }
@@ -107,6 +110,8 @@
 .ri-flag.ts-CHEQUERED { color: #111; background: repeating-conic-gradient(#fff 0 25%, #cfd4da 0 50%) 0 0 / 20px 20px; }
 #stage.anim-full.flag-RED .ri-flag, #stage.anim-full.flag-SC .ri-flag, #stage.anim-full.flag-VSC .ri-flag {
   animation: pulse-pill var(--pulse-ms) ease-in-out infinite; }
+.ri-flagrow .pitexit { margin-left: auto; font-size: 13px; }
+#stage.tv-RACE_VIEW #pitexit-chip { display: none; }      /* RACE VIEW: in the session panel instead */
 .ri-flagsub { font-size: 14px; font-weight: 800; color: var(--text-2); letter-spacing: .06em; text-transform: uppercase; }
 .ri-wx { font-size: 17px; font-weight: 700; color: var(--text-2); line-height: 1.5; }
 .ri-wx b { color: var(--text); }

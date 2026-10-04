@@ -312,6 +312,8 @@
     $("ts-sub").textContent = sub;
     setFlagState(ts);
 
+    const pe = $("pitexit-chip"), peHtml = pitExitHTML("pitexit-chip");
+    if (pe.dataset.h !== peHtml) { pe.outerHTML = peHtml; $("pitexit-chip").dataset.h = peHtml; }
     const chip = $("rule-chip");
     if (has(ts.overtake)) { chip.textContent = "OVERTAKE " + ts.overtake; chip.className = "rule-chip" + (ts.overtake === "ENABLED" ? " on" : ""); }
     else if (has(ts.drs)) { chip.textContent = "DRS " + ts.drs; chip.className = "rule-chip" + (ts.drs === "ENABLED" ? " on" : ""); }
@@ -604,6 +606,15 @@
     } else { pill.hidden = true; pill.dataset.f = ""; }
     if (flagNow !== null && f !== flagNow && f) flash($("map-flag"), f === "RED" ? "ev-flag-red" : "ev-flag", f === "RED" ? 1100 : 800);
     flagNow = f || flagNow;
+  }
+
+  // pit exit OPEN / CLOSED: race control's literal "PIT EXIT OPEN / CLOSED" (also "GREEN LIGHT - PIT
+  // EXIT OPEN", "PIT LANE CLOSED") up to the shown moment - server: race_control.py -> track_status.pit_exit.
+  // No such message yet: "PIT EXIT —" (never guessed)
+  function pitExitHTML(id) {
+    const v = (S.track_status || {}).pit_exit;
+    const cls = v === "OPEN" ? " open" : v === "CLOSED" ? " closed" : "";
+    return `<div${id ? ` id="${id}"` : ""} class="pitexit${cls}" title="from race control messages">PIT EXIT <b>${v === "OPEN" ? "OPEN" : v === "CLOSED" ? "CLOSED" : "—"}</b></div>`;
   }
 
   function renderMode() {
@@ -1302,7 +1313,7 @@
         <div class="ri-name">${esc(s.session_name || "WAITING FOR SESSION")}</div>
         <div class="ri-row"><div><div class="ri-k">${lapK}</div><div class="ri-v">${lap}</div></div>
           <div><div class="ri-k">REMAINING</div><div class="ri-v" id="ri-clock"></div></div></div>
-        <div class="ri-flagrow">${flag}<span class="ri-flagsub">${esc(flagSub)}</span></div>
+        <div class="ri-flagrow">${flag}<span class="ri-flagsub">${esc(flagSub)}</span>${pitExitHTML()}</div>
         <div class="ri-wx">AIR <b>${na(w.air_temp, (v) => v.toFixed(1) + "°")}</b> · TRACK <b>${na(w.track_temp, (v) => v.toFixed(1) + "°")}</b><br>
           RAIN <b>${w.rainfall === null || w.rainfall === undefined ? NA : w.rainfall ? "YES" : "NO"}</b> · WIND <b>${na(w.wind_speed, (v) => v.toFixed(1) + " m/s")}</b></div>
         <div class="ri-foot"><div class="ri-mode" id="ri-mode"></div><span class="mode-badge mode-${esc(S.mode || "live")}">${S.mode === "test" ? "TEST MODE" : S.mode === "replay" ? "REPLAY" : S.mode === "vod" ? "RECORDING" : "LIVE"}</span>

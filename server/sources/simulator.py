@@ -86,7 +86,7 @@ class SimulatorSource(Source):
         self._t0_wall = datetime.now(timezone.utc)
         self.pending_events: list[str] = []       # TEST: events requested from the dashboard (SIM_EVENT)
 
-    EVENTS = ("green", "yellow", "dy", "vsc", "sc", "red", "chequered", "overtake", "pit", "fastest")
+    EVENTS = ("green", "yellow", "dy", "vsc", "sc", "red", "chequered", "overtake", "pit", "fastest", "longrc")
 
     def inject(self, name: str) -> str:
         """TEST mode only: emit the real F1-style messages for an event now (the dashboard animates
@@ -104,7 +104,8 @@ class SimulatorSource(Source):
                 self.sector_flags.clear()
                 await self._track(sink, "1")
                 await self._emit(sink, "SessionStatus", {"Status": "Started"})
-                await self._rc(sink, {"Category": "Flag", "Flag": "GREEN", "Scope": "Track", "Message": "TRACK CLEAR"})
+                await self._rc(sink, {"Category": "Flag", "Flag": "GREEN", "Scope": "Track",
+                                      "Message": "GREEN LIGHT - PIT EXIT OPEN"})
             elif ev == "yellow":
                 self.sector_flags.add(7)
                 await self._rc(sink, {"Category": "Flag", "Flag": "YELLOW", "Scope": "Sector", "Sector": 7,
@@ -126,7 +127,11 @@ class SimulatorSource(Source):
             elif ev == "red":
                 await self._track(sink, "5")
                 await self._rc(sink, {"Category": "Flag", "Flag": "RED", "Scope": "Track", "Message": "RED FLAG"})
+                await self._rc(sink, {"Category": "Other", "Message": "PIT EXIT CLOSED"})
                 await self._emit(sink, "SessionStatus", {"Status": "Aborted"})
+            elif ev == "longrc":                      # a long message (two-line race control layout)
+                await self._rc(sink, {"Category": "Other", "Message": "FIA STEWARDS: TURN 4 INCIDENT INVOLVING CAR 44 (HAM) "
+                                      "WILL BE INVESTIGATED AFTER THE RACE - LEAVING THE TRACK AND GAINING AN ADVANTAGE"})
             elif ev == "chequered":
                 await self._track(sink, "1")
                 await self._rc(sink, {"Category": "Flag", "Flag": "CHEQUERED", "Scope": "Track", "Message": "CHEQUERED FLAG"})
@@ -461,6 +466,7 @@ class SimulatorSource(Source):
         if at(420):
             await self._track(sink, "5")
             await self._rc(sink, {"Category": "Flag", "Flag": "RED", "Scope": "Track", "Message": "RED FLAG"})
+            await self._rc(sink, {"Category": "Other", "Message": "PIT EXIT CLOSED"})
             await self._emit(sink, "SessionStatus", {"Status": "Aborted"})
         if at(470):
             await self._track(sink, "1")
