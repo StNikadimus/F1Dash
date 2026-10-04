@@ -8,7 +8,8 @@ REM   launch.bat vod      force VOYO recording (VOD): data of the session shown 
 REM   launch.bat live     force live timing
 REM   launch.bat capture1 VOYO video black on the TV when mirroring (AirParrot)? capture1 = no GPU
 REM                       video overlays, capture2 = + no hardware video decode, capture3 = no GPU
-REM                       (combine: launch.bat live capture1). Default: [voyo] capture_compat
+REM                       (combine: launch.bat live capture1), capture0 = browser default.
+REM                       Default: [voyo] capture_compat = "no-gpu" (same as capture3, needed for AirParrot)
 REM Closing this window (or the dashboard / VOYO window) closes everything and restores the taskbar.
 title F1 TV
 cd /d "%~dp0"

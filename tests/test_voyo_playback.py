@@ -106,8 +106,11 @@ class LaunchCommandTest(unittest.TestCase):
                                   "--browser", "browser.exe", *extra],
                                  capture_output=True, text=True, timeout=60, cwd=str(ROOT)).stdout
             return next(line for line in out.splitlines() if "voyo" in line.lower() and "--app=" in line)
-        self.assertNotIn("--disable-gpu", voyo_line())                         # default: browser unchanged
+        self.assertIn("--disable-gpu", voyo_line())                            # default = capture3 (AirParrot)
         self.assertNotIn("video-overlays", voyo_line())
+        off = voyo_line("--capture", "off")                                     # capture0: browser default
+        self.assertNotIn("--disable-gpu", off)
+        self.assertNotIn("video-overlays", off)
         self.assertIn("--disable-direct-composition-video-overlays", voyo_line("--capture", "1"))
         two = voyo_line("--capture", "no-hw-decode")
         self.assertIn("--disable-accelerated-video-decode", two)

@@ -65,7 +65,7 @@ DEFAULTS: dict[str, Any] = {
                "keymap_video": {}, "keymap_video_focus": {}},
     "voyo": {"enabled": False, "mode": "window", "url": "https://voyo.si/", "hls_url": "",
              "default_tv_mode": "RACE_VIEW", "check_reachability": True, "check_interval_seconds": 60,
-             "fallback_when_unreachable": True, "capture_compat": "off"},
+             "fallback_when_unreachable": True, "capture_compat": "no-gpu"},
     "sync": {"enabled": True, "mode": "AUTO", "buffer_seconds": 120.0, "broadcast_delay_seconds": 5.0,
              "adjustment_step": 0.25, "auto_drift_correction": True, "voyo_playback_clock": True,
              "drift_slew_seconds_per_second": 0.05, "mark_reaction_seconds": 0.2,
