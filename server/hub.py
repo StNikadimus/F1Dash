@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Optional
 
 from starlette.websockets import WebSocket
@@ -13,6 +14,10 @@ log = logging.getLogger("hub")
 SECTIONS = ("session", "track_status", "weather", "order", "race_control", "radio", "availability", "timeline",
             "map")
 LOSSY = {"pos", "tel"}          # may be dropped for slow clients
+# phone remotes (``/ws?client=remote``) get only what a remote needs - never positions, telemetry,
+# the full board, the track or diagnostics; sync at most once a second
+REMOTE_TYPES = {"hello", "ui", "mode", "remote", "sync", "sync_result"}
+REMOTE_SYNC_S = 1.0
 
 
 _bad_types: set = set()
@@ -35,9 +40,11 @@ def _dumps(obj: Any) -> str:
 
 
 class Client:
-    def __init__(self, ws: WebSocket, addr: str) -> None:
+    def __init__(self, ws: WebSocket, addr: str, kind: str = "dashboard") -> None:
         self.ws = ws
         self.addr = addr
+        self.kind = kind                         # "dashboard" | "remote" (phone)
+        self.last_sync = 0.0
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=400)
         self.task: Optional[asyncio.Task] = None
         self.needs_resync = False
@@ -65,13 +72,22 @@ class Hub:
         self.sync: dict[str, Any] = {}
         self.clock: dict[str, Any] = {}
         self.mode: dict[str, Any] = {}            # LIVE / VOD mode selector state (server/mode.py)
+        self.remote: dict[str, Any] = {}          # compact state for phone remotes (built from the board state)
 
     # ---- client management ---------------------------------------------
-    async def add(self, ws: WebSocket, addr: str) -> Client:
-        c = Client(ws, addr)
+    async def add(self, ws: WebSocket, addr: str, kind: str = "dashboard") -> Client:
+        c = Client(ws, addr, kind)
         self.clients.add(c)
         c.task = asyncio.create_task(c.writer())
-        log.info("Dashboard client connected: %s (%d total)", addr, len(self.clients))
+        log.info("%s connected: %s (%d total)", "Phone remote" if kind == "remote" else "Dashboard client", addr,
+                 len(self.clients))
+        if kind == "remote":
+            hello = {"type": "hello", "mode": self.hello.get("mode"), "remote": True,
+                     "config": {"remote_enabled": (self.hello.get("config") or {}).get("remote_enabled", True)}}
+            for msg in (hello, self.ui, self.mode, self.remote or self._remote_summary(), self.sync):
+                if msg:
+                    self._send(c, _dumps(msg))
+            return c
         initial = [("hello", self.hello), ("state", self._full_state()),
                    ("track", {"type": "track", "track": self.track} if self.track else None),
                    ("status", self.status), ("video", self.video), ("pit_debug", self.pit_debug),
@@ -94,7 +110,7 @@ class Hub:
 
     def _send(self, c: Client, text: str, lossy: bool = False) -> None:
         if c.queue.full():
-            if lossy:
+            if lossy or c.kind == "remote":
                 return
             # client is too slow: drop everything queued and resync with a full state
             while not c.queue.empty():
@@ -113,8 +129,18 @@ class Hub:
         except Exception:  # noqa: BLE001
             log.exception("Message '%s' cannot be sent to the dashboards (dropped)", msg.get("type"))
             return
-        lossy = msg.get("type") in LOSSY
+        kind = msg.get("type")
+        lossy = kind in LOSSY
+        now = None
         for c in list(self.clients):
+            if c.kind == "remote":
+                if kind not in REMOTE_TYPES:
+                    continue
+                if kind == "sync":
+                    now = now or time.monotonic()
+                    if now - c.last_sync < REMOTE_SYNC_S:
+                        continue
+                    c.last_sync = now
             if lossy and c.queue.qsize() > 150:
                 continue
             self._send(c, text, lossy)
@@ -161,6 +187,33 @@ class Hub:
             self.broadcast(self._full_state())
         elif changed:
             self.broadcast(patch)
+        if changed or force_full:
+            self._remote_update()
+
+    # ---- phone remote: a small summary of the board state (the board state stays the source) ----
+    def _remote_summary(self) -> dict:
+        st = self.state or {}
+        s, ts, drivers = st.get("session") or {}, st.get("track_status") or {}, st.get("drivers") or {}
+        sel = (self.ui or {}).get("selected")
+        d = drivers.get(sel) or {}
+        order = [[n, (drivers.get(n) or {}).get("tla") or n, (drivers.get(n) or {}).get("position")]
+                 for n in (st.get("order") or [])]
+        return {"type": "remote",
+                "session": {k: s.get(k) for k in ("meeting_name", "session_name", "session_kind", "lap", "total_laps",
+                                                  "live", "phase", "status")},
+                "flag": {k: ts.get(k) for k in ("status", "state", "sc_phase", "pit_exit")},
+                "selected": {"num": sel, "tla": d.get("tla"), "position": d.get("position"),
+                             "team_color": d.get("team_color")} if sel else None,
+                "order": order}
+
+    def _remote_update(self) -> None:
+        if not any(c.kind == "remote" for c in self.clients):
+            self.remote = {}
+            return
+        r = self._remote_summary()
+        if r != self.remote:
+            self.remote = r
+            self.broadcast(r)
 
     def reset_diff(self) -> None:
         self._last.clear()
@@ -185,6 +238,7 @@ class Hub:
     def set_ui(self, ui: dict) -> None:
         self.ui = ui
         self.broadcast(ui)
+        self._remote_update()                    # the selected driver is part of the remote summary
 
     def set_mode(self, mode: dict) -> None:
         self.mode = mode

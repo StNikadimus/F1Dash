@@ -601,6 +601,32 @@ all behave the same and all screens stay in sync. Mapping: `[remote.keymap]`.
 | H | help overlay |
 | mouse click on a row | SELECT_DRIVER |
 
+### Phone remote (`/remote`)
+
+The phone needs no app and nothing from this project: open **`http://<PC-IP>:8080/remote`** in
+Safari / Chrome (same Wi-Fi). The address is printed at start (`PHONE REMOTE: http://…/remote`), in
+`/api/diagnostics?format=text`, in `GET /api/remote/info`, and as a **QR code at the top of the HELP
+panel** (key **H** / HELP) - scan it with the phone camera. With Tailscale running, the
+`http://100.x.y.z:8080/remote` address is listed too (detected, nothing configured).
+
+* It is another client of the dashboard's own WebSocket (`/ws?client=remote`): every button sends the
+  same command as the IR remote (D-pad keys through the same keymaps; VIEW = `CHANGE_VIEW`, TV LAYOUT =
+  `SET_TV_MODE`, WEATHER REPORT = `WEATHER_REPORT`, MODE = the dashboard's mode selector, VOYO SYNC =
+  `SYNC_MINUS` / `SYNC_MARK` / `SYNC_PLUS` / `SYNC_START` / `SYNC_RESYNC` / `SYNC_MENU`, plus the
+  SYNC menu's actions under ADVANCED SYNC, video play / mute, driver selection). Several phones can
+  connect; the desktop and all phones show the same state - the server's.
+* The phone receives only the remote state: view, TV layout, mode, session / lap / flag / pit exit,
+  the selected driver and the order, sync status (≤ 1 per second). No positions, telemetry or
+  credentials.
+* Connection dot CONNECTED / DISCONNECTED, automatic reconnect; while disconnected the buttons are
+  dimmed and a tap says "not sent". SYNC ± and ▲ ▼ repeat while held. Portrait and landscape.
+* `[remote] token`: when set, the phone needs `?token=…` (the QR code contains it).
+* Network: `[server] host = "0.0.0.0"` (default) listens on the LAN. **Windows Firewall:** when
+  Windows asks on the first start, allow *Python* on **Private networks**; or add the rule
+  `New-NetFirewallRule -DisplayName "F1 Dashboard" -Direction Inbound -Protocol TCP -LocalPort 8080 -Profile Private -Action Allow`
+  (PowerShell as administrator). Nothing else is opened.
+* TEST mode: the TEST MODE TOOLS section sends simulated weather reports / race events.
+
 HTTP API (for any other remote):
 
 ```bash
