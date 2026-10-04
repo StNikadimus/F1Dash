@@ -273,6 +273,16 @@ default_tv_mode = "RACE_VIEW"
 check_reachability = true
 check_interval_seconds = 60
 fallback_when_unreachable = true
+# Screen mirroring (AirParrot, Miracast, OBS, ...) shows the VOYO video BLACK while the PC
+# monitor shows it fine? Chromium puts hardware-decoded video on a GPU overlay plane that
+# the monitor scans out but desktop capture does not include. Only the VOYO window's own
+# browser rendering is changed - not VOYO's player, login or DRM. Try in this order:
+#   "off"          - browser default
+#   "no-overlays"  - --disable-direct-composition-video-overlays (GPU + hardware decode stay)
+#   "no-hw-decode" - also --disable-accelerated-video-decode
+#   "no-gpu"       - --disable-gpu (software rendering, most CPU)
+# Also selectable per start: launch.bat capture1 / capture2 / capture3
+capture_compat = "off"
 
 # ---------------------------------------------------------------------------
 # VOYO video <-> F1 data synchronisation. See README "VOYO sync".
