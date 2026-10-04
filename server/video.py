@@ -9,7 +9,9 @@ Modes (config ``[voyo] mode``):
 
 * ``window`` - VOYO's own website/player runs in its own browser window that
   ``tools/tv_launcher.py`` places exactly over the dashboard's video slot.
-  Always possible, uses VOYO's official player, login and DRM unchanged.
+  Always possible, uses VOYO's official player, login and DRM unchanged. The
+  server's reachability check is informational only in this mode: it never
+  turns the video layer off (which would push the VOYO window away).
 * ``embed``  - iframe of ``voyo.url``. Only used if the page does not forbid
   framing (X-Frame-Options / CSP frame-ancestors are checked, never bypassed).
 * ``hls``    - ``<video>`` element for a stream URL that the provider officially
@@ -106,9 +108,15 @@ class VideoMonitor:
                 if self.mode == "embed" and embeddable is False:
                     available = False
                     notice = f"VOYO does not allow embedding ({detail}). Use [voyo] mode = \"window\"."
-                elif reachable is False and self.fallback:
+                elif reachable is False and self.fallback and self.mode != "window":
                     available = False
                     notice = f"VOYO not reachable ({detail}) - showing full dashboard"
+                elif reachable is False:
+                    # window mode: the official player runs in its own browser window with the
+                    # user's login, cookies and network. This server-side request (no browser, no
+                    # cookies) can be refused by bot protection or time out while that window
+                    # plays fine - so it only informs and never hides the VOYO window.
+                    notice = f"server-side VOYO check failed ({detail}) - VOYO window kept (informational)"
                 state = (available, notice, reachable, embeddable)
                 if state != last:
                     last = state

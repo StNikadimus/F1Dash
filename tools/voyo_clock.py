@@ -50,6 +50,15 @@ class VoyoClockBridge:
         self._last_sent: Optional[tuple] = None
         self.thread: Optional[threading.Thread] = None
         self.page_title: Optional[str] = None     # current title of the VOYO page (to find its window)
+        # a text field of the VOYO page has the focus (login, PIN, search): the TV agent
+        # leaves letter / digit keys to the page while this is True (fresh samples only)
+        self._typing = (False, 0.0)
+        self._page_diag: Optional[tuple] = None
+
+    @property
+    def typing(self) -> bool:
+        flag, at = self._typing
+        return flag and time.monotonic() - at < 2.0
 
     # ------------------------------------------------------------------
     def start(self) -> "VoyoClockBridge":
@@ -106,6 +115,25 @@ class VoyoClockBridge:
         if not dur and value["playback_time"] == 0 and not value.get("paused"):
             self.log("    (the player has not loaded the stream yet)")
 
+    def _page_state(self, value: dict) -> None:
+        """Diagnostics of the official player's own state (read-only): the page being
+        hidden (a minimized / hidden window: browsers pause muted or video-only
+        playback there, some players pause themselves) and the player's MediaError."""
+        err = value.get("error") or {}
+        key = (value.get("visibility"), err.get("code"))
+        if key == self._page_diag:
+            return
+        self._page_diag = key
+        if value.get("visibility") == "hidden":
+            self.log("  VOYO clock: the VOYO page is HIDDEN (window minimized or covered) - the browser may pause "
+                     "the video there. Bring the VOYO window back (TV mode VOYO + STATS / VIDEO FOCUS).")
+        if err.get("code"):
+            names = {1: "aborted", 2: "network", 3: "decode", 4: "source not supported / not allowed"}
+            self.log(f"  VOYO clock: the VOYO player reports a media error {err['code']} "
+                     f"({names.get(err['code'], '?')}): {err.get('message') or '-'} - this is the player's own "
+                     "error (login / subscription / region / browser DRM support); the dashboard does not touch "
+                     "the stream.")
+
     def _post(self, sample: dict) -> None:
         req = urllib.request.Request(self.server + "/api/sync/voyo", method="POST",
                                      data=json.dumps(sample).encode(),
@@ -144,6 +172,9 @@ class VoyoClockBridge:
         while not self.stop.is_set():
             t0 = time.monotonic()
             value = self._evaluate(ws)
+            if isinstance(value, dict):
+                self._typing = (bool(value.get("typing")), time.monotonic())
+                self._page_state(value)
             if not value or not value.get("found") or value.get("playback_time") is None:
                 if self.state != "no-video":
                     self.state = "no-video"
@@ -155,6 +186,8 @@ class VoyoClockBridge:
                 self.log(f"  VOYO clock: posting the video position to {self.server}/api/sync/voyo")
             self._diagnose(value)
             value.pop("found", None)
+            for k in ("typing", "visibility", "error"):       # local diagnostics, not part of the sample
+                value.pop(k, None)
             self.page_title = (value.get("page") or {}).get("title") or self.page_title
             moving = not value.get("paused") and not value.get("seeking")
             key = (round(value["playback_time"], 1), value.get("paused"), value.get("playback_rate"),
