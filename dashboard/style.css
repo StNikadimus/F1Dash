@@ -145,6 +145,11 @@ html, body {
 .tb-chips .sync-chip { font-size: 14px; flex: 0 0 auto; }
 .rule-chip { font-size: 13px; font-weight: 800; letter-spacing: .06em; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; }
 .rule-chip.on { color: var(--green); }
+.pitexit { flex: 0 0 auto; font-size: 12px; font-weight: 800; letter-spacing: .08em; color: var(--text-3); white-space: nowrap;
+  padding: 1px 6px; border-radius: 3px; box-shadow: inset 0 0 0 1px var(--line-2); transition: color .3s, box-shadow .3s, background-color .3s; }
+.pitexit b { font-weight: 900; }
+.pitexit.open { color: var(--green); box-shadow: inset 0 0 0 1px rgba(0,210,120,.6); }
+.pitexit.closed { color: #fff; background: rgba(255,45,61,.85); box-shadow: none; }
 #wallclock { font-size: 26px; font-weight: 800; color: var(--text-2); }
 
 /* ------------------------------------------------------------------ banners */
@@ -208,12 +213,27 @@ html, body {
 /* flag treatment of the whole dashboard */
 #stage.flag-RED .panel { border-color: var(--red); }
 #stage.flag-SC #map-panel, #stage.flag-VSC #map-panel, #stage.flag-VSC_ENDING #map-panel { border-color: var(--amber); }
-/* the red pulse belongs to the mini-map and race control - the other panels only get the red border */
-#stage.anim-full.flag-RED #map-panel, #stage.anim-full.flag-RED #rc-panel { animation: pulse-red 1.5s ease-in-out infinite; }
-#stage.anim-full.flag-RED #track-status { animation: pulse-pill var(--pulse-ms) ease-in-out infinite; }
-#stage.anim-full.flag-SC #track-status, #stage.anim-full.flag-VSC #track-status { animation: pulse-pill var(--pulse-ms) ease-in-out infinite; }
-@keyframes pulse-red { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,45,61,0); } 50% { box-shadow: 0 0 22px 2px rgba(255,45,61,.55) inset; } }
-@keyframes pulse-pill { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(.72); } }
+/* RED / SC / VSC panel glow: a glow layer that breathes continuously (opacity, sine-like easing,
+ * alternate - never off, never a jump); red on the mini-map and race control, gold / faint gold on the map */
+#rc-panel { position: relative; }
+#stage.flag-RED #map-panel::after, #stage.flag-RED #rc-panel::after,
+#stage.flag-SC #map-panel::after, #stage.flag-VSC #map-panel::after, #stage.flag-VSC_ENDING #map-panel::after {
+  content: ""; position: absolute; inset: -1px; border-radius: inherit; pointer-events: none; z-index: 4; opacity: .6;
+  transition: opacity .6s ease; }
+#stage.flag-RED #map-panel::after, #stage.flag-RED #rc-panel::after {
+  box-shadow: 0 0 0 1px rgba(255,60,74,.95), 0 0 22px 2px rgba(255,45,61,.55), inset 0 0 34px rgba(255,45,61,.38); }
+#stage.flag-SC #map-panel::after { box-shadow: 0 0 0 1px rgba(255,190,40,.9), 0 0 18px 1px rgba(255,176,0,.42), inset 0 0 26px rgba(255,176,0,.26); }
+#stage.flag-VSC #map-panel::after, #stage.flag-VSC_ENDING #map-panel::after {
+  box-shadow: 0 0 0 1px rgba(255,190,40,.6), 0 0 12px rgba(255,176,0,.22), inset 0 0 16px rgba(255,176,0,.14); }
+#stage.anim-full.flag-RED #map-panel::after, #stage.anim-full.flag-RED #rc-panel::after { animation: breathe-red 1.8s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+#stage.anim-full.flag-SC #map-panel::after { animation: breathe-sc 2.1s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+#stage.anim-full.flag-VSC #map-panel::after, #stage.anim-full.flag-VSC_ENDING #map-panel::after { animation: breathe-vsc 2.8s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+@keyframes breathe-red { 0% { opacity: .28; } 35% { opacity: .55; } 70% { opacity: .85; } 100% { opacity: 1; } }
+@keyframes breathe-sc { 0% { opacity: .22; } 40% { opacity: .5; } 75% { opacity: .75; } 100% { opacity: .9; } }
+@keyframes breathe-vsc { 0% { opacity: .15; } 50% { opacity: .35; } 100% { opacity: .55; } }
+#stage.anim-full.flag-RED #track-status { animation: pulse-pill 1.8s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+#stage.anim-full.flag-SC #track-status, #stage.anim-full.flag-VSC #track-status { animation: pulse-pill 2.1s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+@keyframes pulse-pill { 0% { filter: brightness(.78); } 50% { filter: brightness(.9); } 100% { filter: brightness(1.05); } }
 
 /* ------------------------------------------------------------------ leaderboard */
 .lb-head, .lb-row {
@@ -468,12 +488,16 @@ button { transition: background-color var(--t-micro), border-color var(--t-micro
 #stage.flag-YELLOW .mf-strip { opacity: 1; background: var(--yellow); height: 4px; }
 #stage.flag-DY .mf-strip { opacity: 1; height: 8px; background: repeating-linear-gradient(-45deg, var(--yellow) 0 12px, #111 12px 24px); }
 #stage.flag-DY .mf-glow { opacity: 1; box-shadow: inset 0 0 0 2px rgba(255,214,0,.8); }
-#stage.anim-full.flag-RED .mf-glow { animation: mf-pulse 1.5s ease-in-out infinite; }
-#stage.anim-full.flag-SC .mf-glow { animation: mf-pulse 1.8s ease-in-out infinite; }
-#stage.anim-full.flag-VSC .mf-glow, #stage.anim-full.flag-VSC_ENDING .mf-glow { animation: mf-pulse-soft 2.6s ease-in-out infinite; }
-#stage.anim-full.flag-DY .mf-glow { animation: mf-pulse-soft 1.6s ease-in-out infinite; }
-@keyframes mf-pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
-@keyframes mf-pulse-soft { 0%, 100% { opacity: .45; } 50% { opacity: .8; } }
+#stage.anim-full.flag-RED .mf-glow { animation: mf-breathe 1.8s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+#stage.anim-full.flag-RED .mf-tint { animation: mf-tint-breathe 1.8s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+#stage.anim-full.flag-SC .mf-glow { animation: mf-breathe-sc 2.1s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+#stage.anim-full.flag-SC .mf-tint { animation: mf-tint-breathe 2.1s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+#stage.anim-full.flag-VSC .mf-glow, #stage.anim-full.flag-VSC_ENDING .mf-glow { animation: mf-breathe-soft 2.8s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+#stage.anim-full.flag-DY .mf-glow { animation: mf-breathe-soft 1.8s cubic-bezier(.45, 0, .55, 1) infinite alternate; }
+@keyframes mf-breathe { 0% { opacity: .35; } 30% { opacity: .55; } 65% { opacity: .82; } 100% { opacity: 1; } }
+@keyframes mf-breathe-sc { 0% { opacity: .3; } 40% { opacity: .55; } 100% { opacity: .9; } }
+@keyframes mf-breathe-soft { 0% { opacity: .3; } 50% { opacity: .5; } 100% { opacity: .7; } }
+@keyframes mf-tint-breathe { 0% { opacity: .7; } 100% { opacity: 1; } }
 /* one short "takeover" when the state changes (stronger for RED), then the steady pulse */
 #map-flag.ev-flag .mf-tint { animation: mf-hit .8s ease-out; }
 #map-flag.ev-flag-red .mf-tint { animation: mf-hit-red 1.1s ease-out; }
@@ -495,11 +519,13 @@ button { transition: background-color var(--t-micro), border-color var(--t-micro
 @media (prefers-reduced-motion: reduce) {
   .lb-row { transition: background-color var(--t-micro) !important; }
   .lb-row[class*="ev-"], .lb-row[class*="ev-"]::before, .lb-row[class*="ev-"] .drv::after,
-  .ev-pit, .ev-tyre, .ev-fastest span, .ev-sector, #map-flag i, .map-flagpill, #map-panel, #rc-panel, #track-status { animation: none !important; }
+  .ev-pit, .ev-tyre, .ev-fastest span, .ev-sector, #map-flag i, .map-flagpill, #map-panel, #rc-panel, #track-status,
+  #map-panel::after, #rc-panel::after { animation: none !important; }
 }
 #stage.anim-reduced .lb-row { transition: background-color var(--t-micro) !important; }
 #stage.anim-reduced .lb-row[class*="ev-"]::before, #stage.anim-reduced #map-flag i, #stage.anim-reduced .map-flagpill,
-#stage.anim-reduced #map-panel, #stage.anim-reduced #rc-panel { animation: none !important; }
+#stage.anim-reduced #map-panel, #stage.anim-reduced #rc-panel,
+#stage.anim-reduced #map-panel::after, #stage.anim-reduced #rc-panel::after { animation: none !important; }
 
 /* ------------------------------------------------------------------ reduced motion */
 #stage.anim-off *, #stage.anim-off *::before { animation: none !important; transition: none !important; }
