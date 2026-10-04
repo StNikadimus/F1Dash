@@ -583,7 +583,7 @@ def _server_up(url: str) -> bool:
 
 
 SERVER_LOG_SHOW = ("AUTO MEDIA SYNC", "VOD", "SYNC CHECK", "Sync:", "VOYO playback clock", "ERROR", "Traceback",
-                   "RECORDING IN LIVE MODE")
+                   "RECORDING IN LIVE MODE", "PHONE REMOTE")
 SERVER_LOG_HIDE = ("Circuit geometry", "No geometry", "multiviewer")
 
 
@@ -642,6 +642,24 @@ def choose_mode(now: Optional[float] = None, index: Optional[dict] = None) -> tu
             return "vod", f"F1 schedule not reachable ({type(exc).__name__}) - assuming a recording"
     det, _sess, why = detect_from_schedule(index, now_s)
     return det.lower(), why
+
+
+def print_phone_remote(server: str) -> None:
+    """The phone remote's address on the LAN / Tailscale (the server detects it) - 127.0.0.1 is no use
+    on a phone."""
+    try:
+        with urllib.request.urlopen(server.rstrip("/") + "/api/remote/info", timeout=3) as r:
+            info = json.loads(r.read())
+    except Exception:  # noqa: BLE001
+        print(f"Phone remote: http://<this PC's IP>:{server.rsplit(':', 1)[-1]}/remote")
+        return
+    print("PHONE REMOTE (open on the phone, same Wi-Fi - or press H on the dashboard for the QR code):")
+    for u in (info.get("lan") or [info.get("url")])[:2]:
+        print(f"  {u}")
+    for u in info.get("tailscale") or []:
+        print(f"  {u}   (Tailscale)")
+    if info.get("local_only"):
+        print(f"  NOTE: {info.get('note')}")
 
 
 def _server_mode(url: str) -> Optional[str]:
@@ -778,8 +796,8 @@ def main() -> None:
         reset_window_placement(profiles / "voyo")
         voyo_pid = subprocess.Popen(voyo_cmd).pid
         session.browser_pids = [dash_pid, voyo_pid]
-        print("Browsers started. First time: log in to VOYO in its window and open the F1 stream.\n"
-              f"Phone remote: {args.server}/remote")
+        print("Browsers started. First time: log in to VOYO in its window and open the F1 stream.")
+        print_phone_remote(args.server)
 
     if args.no_agent:
         atexit.unregister(session.shutdown)
