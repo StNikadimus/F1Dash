@@ -127,6 +127,11 @@ def ref_events_from_archive(events: list[Event]) -> RefEvents:
                 ev.starts.append(_ms(e))
             elif st == "Finished":
                 ev.finishes.append(_ms(e))
+        elif e.topic == "RaceControlMessages":
+            msgs = d.get("Messages")
+            for m in (msgs.values() if isinstance(msgs, dict) else msgs if isinstance(msgs, list) else []):
+                if isinstance(m, dict) and isinstance(m.get("Message"), str):
+                    ev.add_notice(_ms(e), m["Message"].upper())
         elif e.topic in ("TimingData", "TimingDataF1") and isinstance(d.get("Lines"), dict):
             for num, line in d["Lines"].items():
                 if not isinstance(line, dict) or "NumberOfLaps" not in line:

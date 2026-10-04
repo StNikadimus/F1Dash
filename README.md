@@ -856,6 +856,23 @@ F1 time is known. Verified with OpenF1 (2026 Japanese GP race): OpenF1
 `SESSION STARTED` 05:14:02.078 = lights out, **14 min after the scheduled
 `date_start` 05:00** – the schedule is not the start.
 
+**Delayed starts.** The F1 race timeline is anchored to the **actual start**
+(the SessionStatus *Started* before the first completed lap – an aborted start
+or a restart after a red flag is not mistaken for it), never to the scheduled
+time. The sync tracks the start state: **PRE-START** → **DELAYED** (scheduled
+time + `race_start_grace_seconds` passed without a start, or race control
+announced a delay / suspended start procedure / "FORMATION LAP WILL START AT
+14:10") → **STARTED** → **RUNNING**. While DELAYED the scheduled start is not
+used for anything that anchors the race clock (VOYO Countdown in Auto, `L`).
+Two delays are shown separately in the SYNC menu and on the phone:
+**F1 START DELAY** = actual − scheduled start (the event was late) and
+**STREAM DELAY** = how far the video is behind the F1 events (the broadcast).
+Example: scheduled 15:00, lights out 15:04, the stream shows it at 15:08 →
+F1 start delay +4:00, stream delay +4:00 (not 8 minutes). The server log has
+`[SYNC]` lines for every step (stream start marked, VOYO position, actual /
+scheduled start, detected race delay, calculated stream delay, confidence,
+"scheduled start IGNORED as the race-time anchor").
+
 ### SYNC menu (button `SYNC` in the top bar, key `Y`, phone remote)
 
 Shows the session (detected from the VOYO title via OpenF1), the video
@@ -863,7 +880,8 @@ position and four methods:
 
 | Method | What you do | Result |
 |---|---|---|
-| **VOYO Countdown** (recommended before a session) | pause VOYO on the countdown to the start (or press *Capture* when you read it) and enter `23:47`, `00:23:47` or `23m 47s` | F1 time = OpenF1 `date_start` − countdown at that video moment. **MEDIUM**, ±2 s (whole seconds, the countdown graphic may lag the world feed). Also gives the "VOYO broadcast start". |
+| **Mark Stream Start** (also on the phone remote: MARK STREAM START / RESET STREAM START) | when the video shows the **actual start** (lights out / session start) press MARK STREAM START – best with VOYO paused exactly on it | the moment is matched to the start **event** in the F1 data (never the scheduled time). **HIGH**. Shows `STREAM DELAY` (live: how far the video is behind the F1 events) separately from the `F1 START DELAY` (actual − scheduled start). Pressing again replaces the mark; RESET removes it. Pressed before the start is in the data, it waits for it. |
+| **VOYO Countdown** (recommended before a session) | pause VOYO on the countdown to the start (or press *Capture* when you read it) and enter `23:47`, `00:23:47` or `23m 47s`; *Counts to*: Auto / Scheduled / Announced new start / Actual start | F1 time = start − countdown at that video moment. **MEDIUM**, ±2 s (whole seconds, the countdown graphic may lag the world feed). Auto = the scheduled `date_start`, **except when the start was delayed** (scheduled time passed without a start, or race control announced a delay / new start time): then it is refused and you choose – a delayed start is never counted against the schedule. Also gives the "VOYO broadcast start". |
 | **Manual Exact Time** | enter the time the video shows: **Slovenia** or **track** time, **24-hour** (`14:48:32`, `14.48.32`) or **12-hour** (`2:48:32` + AM/PM); a preview shows UTC / Slovenia / track before you apply | `anchorVideoTime = currentTime`, `anchorF1Time = your value` – **MANUAL** |
 | **Automatic** | nothing | uses only a sync saved for *this video and this session*. Otherwise it explains why it cannot sync (above) and changes nothing – never silently. It suggests a learned lead time for the estimate. |
 | **Session Start Estimate** | enter how long the video runs before the scheduled start (prefilled with a learned value, never assumed) | **LOW / ESTIMATED**, no exact time is shown anywhere |

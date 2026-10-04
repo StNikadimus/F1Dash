@@ -812,3 +812,4 @@ div.sm-keys { margin-top: 8px; }
 .track-menu select { background: #0b0e12; color: #e6ebf0; font: inherit; border: 1px solid #3a4452; }
 .track-menu .tm-row { display: flex; gap: 8px; }
 .track-menu button { background: #2f6fd6; color: #fff; border: 0; padding: 6px 14px; font: inherit; font-weight: 800; cursor: pointer; }
+.sm-lab { align-self: center; font-size: 13px; font-weight: 700; color: var(--text-2); white-space: nowrap; }

@@ -356,6 +356,14 @@ anchor_error_seconds = 0.25
 anchors_agree_seconds = 0.5
 drift_warning_seconds = 2.0
 outlier_seconds = 1.0              # with >= 3 anchors: further than this from the median = outlier
+# Delayed starts: the race timeline is anchored to the ACTUAL start event, never the schedule.
+# A race is DELAYED when the scheduled start passed this long without a start (formation lap
+# allowance; scheduled time = formation lap, SessionStatus Started = lights out) - other
+# sessions after start_delay_threshold_seconds - or when race control announces a delay.
+race_start_grace_seconds = 360
+start_delay_threshold_seconds = 60
+# MARK STREAM START pressed before the actual start is in the F1 data: wait this long for it
+stream_mark_wait_seconds = 1200
 
 [vod]
 # "auto" = detect the session from the VOYO page title (via OpenF1), or an

@@ -34,6 +34,8 @@ COMMANDS = {
     # VOYO <-> F1 synchronisation
     "SYNC_PLUS", "SYNC_MINUS", "SYNC_ADJUST", "SYNC_MARK", "SYNC_RESYNC", "SYNC_DEBUG", "PITLANE_DEBUG",
     "SYNC_START", "SYNC_CONFIRM", "SYNC_CLEAR", "SYNC_PIN", "SYNC_MENU", "SYNC_KEEP_OLD", "SYNC_USE_NEW",
+    # MARK STREAM START: the video shows the ACTUAL session start now / remove that mark
+    "SYNC_STREAM_START", "SYNC_STREAM_RESET",
     # track map wrong: rebuild the outline of this circuit (pit lane kept)
     "TRACK_REPORT",
     # weather report popup now (arg in TEST mode: a simulated scenario, see server/weather.py)
@@ -47,7 +49,8 @@ MODE_COMMANDS = {"SET_MODE": None, "CYCLE_MODE": "NEXT", "MODE_AUTO": "AUTO", "M
                  "MODE_VOD": "VOD"}
 MODE_ARG_RE = re.compile(r"^(AUTO|LIVE|VOD|NEXT)$")
 SYNC_ACTIONS = {"SYNC_PLUS", "SYNC_MINUS", "SYNC_ADJUST", "SYNC_MARK", "SYNC_RESYNC",
-                "SYNC_START", "SYNC_CONFIRM", "SYNC_CLEAR", "SYNC_PIN", "SYNC_KEEP_OLD", "SYNC_USE_NEW"}
+                "SYNC_START", "SYNC_CONFIRM", "SYNC_CLEAR", "SYNC_PIN", "SYNC_KEEP_OLD", "SYNC_USE_NEW",
+                "SYNC_STREAM_START", "SYNC_STREAM_RESET"}
 VIDEO_ACTIONS = {"VIDEO_PLAY_PAUSE": "play_pause", "VIDEO_MUTE": "mute", "VIDEO_VOLUME": "volume",
                  "VIDEO_SEEK": "seek", "VIDEO_FULLSCREEN": "fullscreen"}
 KEY_RE = re.compile(r"^[A-Z0-9_]{1,32}$")

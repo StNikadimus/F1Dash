@@ -155,6 +155,9 @@ class RefEvents:
     crossings: dict[str, list[tuple[float, int]]] = field(default_factory=dict)   # num -> [(ms, completed lap)]
     starts: list[float] = field(default_factory=list)       # SESSION STARTED (lights out / clock start)
     finishes: list[float] = field(default_factory=list)     # SESSION FINISHED
+    # race control messages about the START itself (delayed / postponed / suspended start
+    # procedure / "FORMATION LAP WILL START AT 14:10"): (ms, message) - see start_notice()
+    notices: list[tuple[float, str]] = field(default_factory=list)
     # session structure from the official timing (Q1/Q2/Q3, session clock, markers) - see
     # server/session_phases.py; None = not known (yet)
     timeline: Any = None
@@ -168,8 +171,52 @@ class RefEvents:
     def empty(self) -> bool:
         return not self.crossings and not self.starts and not self.finishes
 
+    def add_notice(self, ms: float, text: str) -> None:
+        if start_notice(text) and not any(abs(t - ms) < 1000 and m == text for t, m in self.notices):
+            self.notices.append((ms, text[:160]))
+            self.notices.sort()
+
+    def first_crossing(self) -> Optional[float]:
+        firsts = [lst[0][0] for lst in self.crossings.values() if lst]
+        return min(firsts) if firsts else None
+
     def count(self) -> int:
         return sum(len(v) for v in self.crossings.values()) + len(self.starts) + len(self.finishes)
+
+
+# A race control message that concerns the start of the session (not a mid-session event):
+# "START DELAYED", "RACE START POSTPONED", "START PROCEDURE SUSPENDED", "START ABORTED",
+# "FORMATION LAP WILL START AT 14:10", "EXTRA FORMATION LAP", "SESSION START DELAYED" ...
+_START_NOTICE = re.compile(r"(START|FORMATION LAP).*(DELAY|POSTPON|SUSPEND|ABORT|WILL START AT|\bAT \d{1,2}[:.]\d{2})"
+                           r"|(DELAY|POSTPON|SUSPEND|ABORT).*(START|FORMATION LAP)|EXTRA FORMATION LAP")
+_START_AT = re.compile(r"\bAT (\d{1,2})[:.](\d{2})\b")
+
+
+def start_notice(text: Any) -> bool:
+    return isinstance(text, str) and bool(_START_NOTICE.search(text.upper()))
+
+
+def announced_start_ms(text: str, notice_ms: float, gmt_offset: Any) -> Optional[float]:
+    """'FORMATION LAP WILL START AT 14:10' (track time) -> UTC ms (the next 14:10 after the notice).
+    None without a time or without the track's GMT offset."""
+    m = _START_AT.search((text or "").upper())
+    if not m or not isinstance(gmt_offset, str):
+        return None
+    sign = -1 if gmt_offset.strip().startswith("-") else 1
+    try:
+        parts = [int(x) for x in gmt_offset.strip().lstrip("+-").split(":")[:2]]
+    except ValueError:
+        return None
+    off_ms = sign * (parts[0] * 3600 + (parts[1] if len(parts) > 1 else 0) * 60) * 1000
+    hh, mm = int(m.group(1)), int(m.group(2))
+    if hh > 23 or mm > 59:
+        return None
+    local = notice_ms + off_ms
+    day = local - local % 86_400_000
+    t = day + (hh * 3600 + mm * 60) * 1000
+    if t < local - 3600_000:
+        t += 86_400_000
+    return t - off_ms
 
 
 def ref_events_from_openf1(laps: list[dict], race_control: list[dict]) -> RefEvents:
@@ -191,11 +238,14 @@ def ref_events_from_openf1(laps: list[dict], race_control: list[dict]) -> RefEve
             if i == len(lst) - 1 and t and isinstance(n, int) and lap.get("lap_duration"):
                 ev.add_crossing(num, t.timestamp() * 1000 + float(lap["lap_duration"]) * 1000, n)
     for rc in race_control:
-        if not isinstance(rc, dict) or rc.get("category") != "SessionStatus":
+        if not isinstance(rc, dict):
             continue
         t = parse_utc(rc.get("date"))
         msg = str(rc.get("message") or "").upper()
         if not t:
+            continue
+        if rc.get("category") != "SessionStatus":
+            ev.add_notice(t.timestamp() * 1000, msg)
             continue
         if "SESSION STARTED" in msg or "SESSION RESUMED" in msg:
             ev.starts.append(t.timestamp() * 1000)

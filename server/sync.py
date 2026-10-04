@@ -29,6 +29,19 @@ an *anchor* (a moment of the video whose F1 time is known):
                      reaching 0:00 (Q2 END / SESSION END) or starting (Q2 START)  (event anchor)
   Automatic          only a sync saved for the same video + session; otherwise
                      it says why it cannot sync and changes nothing.
+  MARK STREAM START  the video shows the ACTUAL start of the session now (lights out /
+                     session start): matched to the start event in the F1 data, never to
+                     the scheduled start. Repeatable (the new mark replaces the old one) and
+                     removable (RESET STREAM START).                              (HIGH)
+
+Scheduled vs actual start: ``sessions.date_start`` / ``SessionInfo.StartDate`` is only the
+schedule. Starts are delayed (weather, red flag before the start, aborted start procedure,
+"FORMATION LAP WILL START AT 14:10"), so the F1 race timeline is anchored to the ACTUAL
+start event (SessionStatus Started before the first lap is completed). While the start is
+delayed (scheduled time passed / a start delay announced, no start yet) the scheduled time
+is never used as the race-time anchor. Two different delays are reported separately:
+  F1 START DELAY  actual start - scheduled start            (the event was late)
+  STREAM DELAY    when the video shows the start - actual start   (the broadcast is behind)
 
 Confidence (descriptive, no invented score):
   HIGH     >= 2 independent anchors agree within their errors
@@ -51,7 +64,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Optional
 
-from .openf1 import RefEvents
+from .openf1 import RefEvents, announced_start_ms
 from .session_phases import SessionTimeline, build_timeline, fmt_clock, session_kind
 from .telemetry import parse_utc
 
@@ -293,9 +306,29 @@ class FeedRefCollector:
             self._tl_key = data.get("Key")
         if topic in self.TIMELINE_TOPICS and len(self._small) < 100_000:
             self._small.append((float(event_ms), topic, data))
+        if topic == "RaceControlMessages":
+            msgs = data.get("Messages")
+            for m in (msgs.values() if isinstance(msgs, dict) else msgs if isinstance(msgs, list) else []):
+                if isinstance(m, dict) and isinstance(m.get("Message"), str):
+                    u = parse_utc(m.get("Utc")) if m.get("Utc") else None
+                    self.ref.add_notice(u.timestamp() * 1000 if u else float(event_ms), m["Message"].upper())
+            return
+        if topic == "SessionData" and isinstance(data.get("StatusSeries"), (dict, list)):
+            # status history with its own Utc (also in the snapshot): the start is known even
+            # when the server joined after it
+            ser = data["StatusSeries"]
+            for e in (ser.values() if isinstance(ser, dict) else ser):
+                if isinstance(e, dict) and e.get("SessionStatus") == "Started" and e.get("Utc"):
+                    u = parse_utc(e.get("Utc"))
+                    if u and not any(abs(t - u.timestamp() * 1000) < 2000 for t in self.ref.starts):
+                        self.ref.starts.append(u.timestamp() * 1000)
+                        self.ref.starts.sort()
+            return
         if topic == "SessionStatus" and not snapshot:
             if data.get("Status") == "Started":
-                self.ref.starts.append(event_ms)
+                if not any(abs(t - event_ms) < 2000 for t in self.ref.starts):
+                    self.ref.starts.append(event_ms)
+                    self.ref.starts.sort()
             elif data.get("Status") == "Finished":
                 self.ref.finishes.append(event_ms)
             return
@@ -319,11 +352,12 @@ class FeedRefCollector:
 # Anchors and the mapping
 # ---------------------------------------------------------------------------
 CONFIDENCES = ("HIGH", "MEDIUM", "LOW", "MANUAL", "UNSYNCED")
-EVENT_KINDS = ("lap", "start", "finish", "marker")   # matched to OpenF1 / feed / timing clock timestamps (ms)
+EVENT_KINDS = ("lap", "start", "finish", "marker", "stream")   # matched to OpenF1 / feed / timing clock timestamps (ms)
 METHOD_LABEL = {"lap": "Line crossing (event anchor)", "start": "Session start (event anchor)",
                 "finish": "Session finish (event anchor)", "countdown": "VOYO Countdown",
                 "exact": "Manual Exact Time", "pin": "Manual pin", "estimate": "Session Start Estimate",
-                "marker": "Phase marker", "clock": "Session clock"}
+                "marker": "Phase marker", "clock": "Session clock",
+                "stream": "Stream start mark (actual F1 start)"}
 CLASS_ORDER = ("event", "clock", "countdown", "exact")      # most precise kind of anchor first
 
 
@@ -445,6 +479,11 @@ def fmt_hms(seconds: float) -> str:
     return (f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}")
 
 
+def fmt_signed(seconds: float) -> str:
+    """+4:32 / -0:03 (minutes:seconds, signed)."""
+    return ("+" if seconds >= 0 else "-") + fmt_hms(seconds)
+
+
 def parse_countdown(text: str) -> Optional[float]:
     """'23:47', '00:23:47', '1:02:03', '23m 47s', '47s', '23m', '1h 2m' -> seconds (0 .. 6 h)."""
     import re
@@ -495,6 +534,12 @@ class SyncManager:
         self.drift_warn_s = float(s.get("drift_warning_seconds", 2.0))     # beyond: ask before using
         self.outlier_s = float(s.get("outlier_seconds", 1.0))              # with a majority: outlier
         self.disagree_s = self.drift_warn_s
+        # scheduled start passed this long without a start (or a start delay announced): the
+        # session is DELAYED and the scheduled time is never the race-time anchor. Races allow
+        # for the formation lap (scheduled time = formation lap, SessionStatus Started = lights out)
+        self.start_grace_s = max(0.0, float(s.get("start_delay_threshold_seconds", 60)))
+        self.start_grace_race_s = max(self.start_grace_s, float(s.get("race_start_grace_seconds", 360)))
+        self.stream_wait_s = max(60.0, float(s.get("stream_mark_wait_seconds", 1200)))
         lead = s.get("broadcast_lead_seconds", "")
         self.lead_cfg: Optional[float] = None if lead in ("", None) else float(lead)
         self.lead_uncertainty = max(10.0, float(s.get("lead_uncertainty_seconds", 1200)))
@@ -536,6 +581,9 @@ class SyncManager:
         self._last_mono: Optional[float] = None
         self._pending_jump = False
         self._clock_lost_logged = False
+        self.stream_pending: Optional[dict] = None   # MARK STREAM START before the start was in the data
+        self.stream_mark: Optional[dict] = None      # the applied mark (display / diagnostics)
+        self._start_key: Optional[tuple] = None      # last logged start state
         self._solve()
 
     # ------------------------------------------------------------------ context
@@ -556,6 +604,8 @@ class SyncManager:
         if session is None or session.get("session_key") != old:
             self.anchors = []
             self.history = []
+            self.stream_pending = self.stream_mark = None
+            self._start_key = None
             self.pending = None
             self.deviation_note = None
             self.trim = 0.0
@@ -608,6 +658,7 @@ class SyncManager:
         self.edge.observe(s)
         self.anchors = []
         self.history = []
+        self.stream_pending = self.stream_mark = None
         self.pending = None
         self.deviation_note = None
         self.trim = 0.0
@@ -651,6 +702,9 @@ class SyncManager:
                 continue
         if restored:
             self.anchors = restored
+            sm = next((a for a in reversed(restored) if a.kind == "stream"), None)
+            self.stream_mark = None if sm is None else {
+                "video_time": sm.video_time, "actual_ms": sm.f1_ms, "stream_delay": None, "restored": True}
             self.trim = float(saved.get("trim") or 0.0)
             self.note = f"sync restored for this video and session ({len(restored)} anchor(s))"
             log.info("Sync: %s", self.note)
@@ -844,6 +898,12 @@ class SyncManager:
                 reason += " A fixed delay cannot follow pause/seek."
             return Mapping(med, err, conf, src, reason, **{**common, "health": health, "health_error": health_err})
         a = groups[pkeys[-1]][0]
+        if any(x.kind == "stream" for x in groups[pkeys[-1]]):
+            reason = ("Stream start marked: the video moment you marked is matched to the ACTUAL F1 start "
+                      f"({a.ref_source or 'reference'} millisecond timestamp) - not the scheduled start. The error is "
+                      f"your key press ({'video paused on the start' if a.paused else 'reaction time'}).")
+            return Mapping(med, err, "HIGH" if video else "MEDIUM", src, reason,
+                           **{**common, "health": health, "health_error": health_err})
         if a.kind == "countdown":
             reason = ("The VOYO countdown was provided by you and matched to the official OpenF1 session start; "
                       "not yet verified independently (add L at the start or S at a line crossing).")
@@ -870,6 +930,192 @@ class SyncManager:
         if a.kind in ("start", "finish"):
             return f"session {a.kind} at {utc_str(a.f1_ms)} UTC"
         return utc_str(a.f1_ms) or ""
+
+    # ------------------------------------------------------------------ scheduled vs actual start
+    def start_info(self, at_ms: Optional[float] = None) -> dict:
+        """Where the session start stands at F1 time ``at_ms`` (None = with everything known,
+        e.g. a recording). Never invents a start: the ACTUAL start is an event in the F1 data.
+
+        PRE_START  before the scheduled start, no start delay announced
+        DELAYED    the scheduled start has passed without a start (beyond the grace for the
+                   formation lap), or a start delay was announced - waiting for the real start
+        STARTED    the actual start happened (first 2 minutes)
+        RUNNING    the session is running (or over)"""
+        sched = self._session_start_ms()
+        ref = self.ref
+        starts = sorted(ref.starts) if ref else []
+        first = ref.first_crossing() if ref else None
+        known = [t for t in starts if at_ms is None or t <= at_ms]
+        # the start is the last Started BEFORE the first completed lap: an aborted start is followed
+        # by another Started; a restart after a red flag later in the session comes after laps
+        before = [t for t in known if first is None or t <= first + 1000]
+        actual = before[-1] if before else None     # only restarts known: the start itself is unknown
+        notices = [(t, m) for t, m in (getattr(ref, "notices", None) or [])
+                   if (at_ms is None or t <= at_ms) and (actual is None or t <= actual)]
+        gmt = (self.session or {}).get("gmt_offset")
+        announced, delay_notice, last_notice = None, False, None
+        for t, m in notices:
+            a = announced_start_ms(m, t, gmt)
+            if a is not None:
+                announced = a
+            if any(w in m for w in ("DELAY", "POSTPON", "SUSPEND", "ABORT", "EXTRA FORMATION")) or \
+                    (a is not None and sched is not None and a - sched > self.start_grace_s * 1000):
+                delay_notice, last_notice = True, m
+        sess = self.session or {}
+        # from the session name / type only (cheap: this runs on every tick)
+        race = session_kind(sess.get("session_type"), sess.get("session_name")) in ("race", "unknown")
+        grace = (self.start_grace_race_s if race else self.start_grace_s) * 1000
+        if actual is not None:
+            state = "RUNNING" if at_ms is None or at_ms - actual > 120_000 else "STARTED"
+        elif delay_notice or (sched is not None and at_ms is not None and at_ms > sched + grace):
+            state = "DELAYED"
+        elif sched is None:
+            state = "UNKNOWN"
+        else:
+            state = "PRE_START"
+        f1_delay = (actual - sched) / 1000 if actual is not None and sched is not None else None
+        waited = (at_ms - sched) / 1000 if state == "DELAYED" and sched is not None and at_ms is not None else None
+        delayed = state == "DELAYED" or delay_notice or (f1_delay is not None and f1_delay * 1000 > grace)
+        return {"state": state, "scheduled": sched, "actual": actual, "announced": announced,
+                "f1_delay": f1_delay, "waited": waited, "delayed": delayed, "notice": last_notice,
+                "race": race}
+
+    def _start_at(self) -> Optional[float]:
+        """F1 time the start state is evaluated at: live = the feed's now; recording = the time shown."""
+        if not self.vod:
+            return self._last_src_now or None
+        t = self._last_target
+        return t if t is not None and math.isfinite(t) else None
+
+    def _track_start(self, at_ms: Optional[float]) -> None:
+        """[SYNC] log lines when the start state changes (delayed start detected, actual start)."""
+        if self.session is None or at_ms is None:
+            return
+        info = self.start_info(at_ms)
+        key = (info["state"] in ("STARTED", "RUNNING"), info["state"] == "DELAYED", info["actual"],
+               info["notice"])
+        if key == self._start_key:
+            return
+        self._start_key = key
+        sched = info["scheduled"]
+        if info["state"] == "DELAYED":
+            why = info["notice"] or (f"scheduled start {utc_str(sched)} UTC passed {fmt_hms(info['waited'] or 0)} "
+                                     "ago without a session start")
+            log.warning("[SYNC] Delayed start detected: %s", why)
+            if info["announced"] is not None:
+                log.info("[SYNC] Announced start: %s UTC", utc_str(info["announced"]))
+            log.warning("[SYNC] Scheduled start %s UTC is IGNORED as the race-time anchor - waiting for the "
+                        "actual start event", utc_str(sched))
+        elif info["actual"] is not None:
+            log.info("[SYNC] F1 actual event start: %s UTC", utc_str(info["actual"]))
+            log.info("[SYNC] Scheduled start: %s UTC", utc_str(sched) if sched is not None else "unknown")
+            if info["f1_delay"] is not None:
+                log.info("[SYNC] Detected race delay: %s (actual start - scheduled start)%s",
+                         fmt_signed(info["f1_delay"]),
+                         " - the scheduled start is ignored as the race-time anchor" if info["delayed"] else "")
+
+    def mark_stream_start(self, mono: float, src_now_ms: float) -> str:
+        """MARK STREAM START: the video shows the ACTUAL start of the session now. The moment is
+        matched to the start event in the F1 data (never the scheduled time). Pressing again
+        replaces the previous mark; RESET STREAM START removes it."""
+        err = self._need_clock(mono)
+        if err:
+            return err
+        video, pb, press_b = self._now_point(mono, src_now_ms, reaction=True)
+        # video playing: the marked frame is the reaction time before the press (pb is corrected
+        # for it) - so is the moment the stream showed the start
+        react = self.reaction * max(self.clock.rate_now(), 0.0) if video and not self.clock.last.paused else 0.0
+        info = self.start_info(None if self.vod else src_now_ms)
+        log.info("[SYNC] Stream start marked")
+        log.info("[SYNC] VOYO playback position: %s%s", "no VOYO clock (fixed-delay mode)" if pb is None
+                 else f"{pb:.3f} s ({fmt_hms(pb)})",
+                 "" if not video else (" (paused)" if self.clock.last and self.clock.last.paused else
+                                       f" (minus {self.reaction:.2f} s reaction)"))
+        if not self.vod:
+            log.info("[SYNC] Receive time (F1 clock B) at the mark: %s UTC", utc_str(press_b))
+        if info["actual"] is None:
+            self.stream_pending = {"video": video, "pb": pb, "press_b": press_b - react * 1000, "wall": time.time(),
+                                   "asset": self.asset}
+            log.info("[SYNC] F1 actual event start: not in the F1 data yet (start state %s) - the mark waits for "
+                     "it; the scheduled start (%s UTC) is not used", info["state"],
+                     utc_str(info["scheduled"]) if info["scheduled"] is not None else "unknown")
+            txt = ("STREAM START MARKED - waiting for the actual F1 start in the data "
+                   f"({info['state'].replace('_', '-')}; the scheduled start is not used)")
+            self.last_result = txt
+            return txt
+        return self._apply_stream_mark(video, pb, press_b - react * 1000, info)
+
+    def _apply_stream_mark(self, video: bool, pb: Optional[float], press_b: float, info: dict) -> str:
+        actual = info["actual"]
+        for x in self.anchors:
+            if x.kind == "stream":
+                x.status = "replaced"
+                self.history.append(x)
+        del self.history[:-30]
+        self.anchors = [x for x in self.anchors if x.kind != "stream"]
+        self.stream_pending = None
+        # press_b = F1 receive clock (B) at the moment the video showed the start
+        offset = actual / 1000 - pb if video else (press_b - actual) / 1000
+        stream_delay = None if self.vod else (press_b - actual) / 1000
+        detail = f"video shows the actual start ({utc_str(actual)} UTC)"
+        if stream_delay is not None:
+            detail += f" · stream delay {fmt_signed(stream_delay)}"
+        a = Anchor("stream", offset, actual, pb, time.time(), grounded=True,
+                   ref_source=self.ref.source if self.ref else "", error=self.anchor_error,
+                   paused=bool(video and self.clock.last and self.clock.last.paused),
+                   label="Stream start", detail=detail)
+        m = self._add(a, explicit=True)
+        self.stream_mark = {"video_time": pb, "press_b": press_b, "wall": a.wall, "actual_ms": actual,
+                            "scheduled_ms": info["scheduled"], "f1_delay": info["f1_delay"],
+                            "stream_delay": stream_delay, "restored": False}
+        log.info("[SYNC] F1 actual event start: %s UTC", utc_str(actual))
+        log.info("[SYNC] Scheduled start: %s UTC", utc_str(info["scheduled"]) if info["scheduled"] is not None
+                 else "unknown")
+        if info["f1_delay"] is not None:
+            log.info("[SYNC] Detected race delay: %s (actual - scheduled)%s", fmt_signed(info["f1_delay"]),
+                     " - scheduled start ignored as the race-time anchor" if info["delayed"] else "")
+        if stream_delay is not None:
+            log.info("[SYNC] Calculated stream delay: %s (video behind the actual F1 start)", fmt_signed(stream_delay))
+        else:
+            log.info("[SYNC] Actual start is at video position %s (recording)", fmt_hms(pb or 0))
+        log.info("[SYNC] Sync confidence: %s", m.confidence)
+        head = "STREAM START" + (f" · STREAM DELAY {fmt_signed(stream_delay)}" if stream_delay is not None else
+                                 f" at video {fmt_hms(pb or 0)}")
+        return self._anchor_result(m, a, head)
+
+    def _resolve_stream_pending(self, src_now_ms: float) -> None:
+        p = self.stream_pending
+        if p is None:
+            return
+        if p["asset"] != self.asset or time.time() - p["wall"] > self.stream_wait_s:
+            log.warning("[SYNC] Stream start mark dropped: %s", "another video" if p["asset"] != self.asset else
+                        f"no actual F1 start in the data within {self.stream_wait_s / 60:.0f} min")
+            self.stream_pending = None
+            return
+        info = self.start_info(None if self.vod else src_now_ms)
+        if info["actual"] is not None:
+            log.info("[SYNC] Actual F1 start arrived - applying the waiting stream start mark")
+            self.last_result = self._apply_stream_mark(p["video"], p["pb"], p["press_b"], info)
+
+    def reset_stream_start(self) -> str:
+        marks = [x for x in self.anchors if x.kind == "stream"]
+        if not marks and self.stream_pending is None:
+            return "SYNC: no stream start mark to reset"
+        for x in marks:
+            x.status = "replaced"
+            self.history.append(x)
+        del self.history[:-30]
+        self.anchors = [x for x in self.anchors if x.kind != "stream"]
+        self.stream_pending = self.stream_mark = None
+        self.pending = None
+        self.deviation_note = None
+        self.trim = 0.0
+        m = self._solve()
+        self.K = m.offset
+        self._pending_jump = True
+        self._save_asset()
+        log.info("[SYNC] Stream start mark reset - sync from the remaining anchors / estimate (%s)", m.confidence)
+        return self._result(m, "STREAM START RESET")
 
     # ------------------------------------------------------------------ qualifying / practice
     def timeline(self) -> Optional[SessionTimeline]:
@@ -1005,6 +1251,9 @@ class SyncManager:
             self._last_target = None
         self._last_src_now = src_now_ms
         self._last_mono = mono
+        if self.stream_pending is not None:
+            self._resolve_stream_pending(src_now_ms)
+        self._track_start(self._start_at())
         return tgt
 
     def _do_slew(self, mono: float) -> None:
@@ -1155,20 +1404,58 @@ class SyncManager:
             return video, c[0], c[1], "captured"
         return video, pb, now_b, "now"
 
-    def add_countdown_anchor(self, countdown_s: float, mono: float, src_now_ms: float, text: str = "") -> str:
-        """VOYO shows 'countdown_s' until the session start now -> F1 time now = start - countdown."""
+    def add_countdown_anchor(self, countdown_s: float, mono: float, src_now_ms: float, text: str = "",
+                             target: str = "auto") -> str:
+        """VOYO shows 'countdown_s' until the start now -> F1 time now = start - countdown.
+
+        ``target`` = what the countdown counts to: "scheduled" (the schedule), "announced" (a start
+        time race control announced, e.g. "FORMATION LAP WILL START AT 14:10"), "actual" (the actual
+        start event in the data) or "auto" = the scheduled start, unless the start was delayed -
+        then it is refused (the schedule is no anchor for a delayed start) and you choose."""
         err = self._need_clock(mono)
         if err:
             return err
-        start = self._session_start_ms()
-        if start is None:
+        sched = self._session_start_ms()
+        if sched is None:
             return "SYNC: the session start is not known yet (session not identified)"
         video, pb, now_b, _ = self._typed_point(mono, src_now_ms)
+        target = (target or "auto").strip().lower()
+        info = self.start_info(None if self.vod else src_now_ms)
+        if target == "auto":
+            # a delay announced BEFORE the counted-down moment (the countdown may count to the new
+            # time), or - live - the scheduled time passed without a start: ambiguous -> refuse
+            moment = sched - countdown_s * 1000
+            before = self.start_info(moment if self.vod else src_now_ms)
+            if before["state"] == "DELAYED" or (not self.vod and info["state"] == "DELAYED"):
+                why = before["notice"] or info["notice"] or "the scheduled start passed without a start"
+                log.warning("[SYNC] Countdown not applied: start delayed (%s) - the scheduled start is ignored as "
+                            "the race-time anchor", why)
+                return ("SYNC: the start was delayed (" + why.capitalize() + ") - a countdown cannot be anchored to the "
+                        "scheduled start. Choose what it counts to (announced / actual start), or press MARK STREAM "
+                        "START when the video shows the start.")
+            target = "scheduled"
+        if target == "scheduled":
+            ref_ms, what, src = sched, "scheduled start", "openf1-schedule"
+        elif target == "announced":
+            if info["announced"] is None:
+                return "SYNC: no announced start time in the race control messages - choose scheduled / actual"
+            ref_ms, what, src = info["announced"], "announced start", "race-control"
+        elif target == "actual":
+            if info["actual"] is None:
+                return ("SYNC: the actual start is not in the F1 data yet - use MARK STREAM START when the video "
+                        "shows the start")
+            ref_ms, what, src = info["actual"], "actual start", self.ref.source if self.ref else "feed"
+        else:
+            return "SYNC: countdown target must be auto / scheduled / announced / actual"
         self.captured = None
-        f1 = start - countdown_s * 1000
+        f1 = ref_ms - countdown_s * 1000
         offset = f1 / 1000 - pb if video else (now_b - f1) / 1000
-        detail = f"{text or fmt_hms(countdown_s)} before session start ({utc_str(start)[:8]} UTC)"
-        a = Anchor("countdown", offset, f1, pb, time.time(), grounded=True, ref_source="openf1-schedule",
+        detail = (f"{text or fmt_hms(countdown_s)} before session start ({utc_str(ref_ms)[:8]} UTC)" if what ==
+                  "scheduled start" else f"{text or fmt_hms(countdown_s)} before the {what} ({utc_str(ref_ms)[:8]} UTC)")
+        if what != "scheduled start":
+            log.info("[SYNC] Countdown anchored to the %s %s UTC (scheduled %s UTC ignored)", what,
+                     utc_str(ref_ms), utc_str(sched))
+        a = Anchor("countdown", offset, f1, pb, time.time(), grounded=True, ref_source=src,
                    error=self.countdown_error, detail=detail)
         m = self._add(a, explicit=True)
         return self._anchor_result(m, a, f"COUNTDOWN {text or fmt_hms(countdown_s)}")
@@ -1250,9 +1537,10 @@ class SyncManager:
         if est is None and len(cands) == 1:
             est = cands[0][0]
         if est is None and len(cands) > 1:
-            sched = self._session_start_ms()
-            after = [c for c in cands if sched is None or c[0] >= sched - 600_000]
-            est = (after or cands)[0][0]
+            # several Started events (aborted start, restart after a red flag): the actual start is
+            # the last one before the first completed lap - never "the first one after the schedule"
+            actual = self.start_info(None if self.vod else src_now_ms)["actual"] if kind == "start" else None
+            est = actual if actual is not None else cands[0][0]
         if prior.offset is None or (kind != "lap" and len(cands) == 1):
             window = INF                                   # a unique event needs no prior
         elif prior.error is None:
@@ -1451,6 +1739,18 @@ class SyncManager:
         video_mode = m.offset is not None and (self.vod or self.active == "VOYO")
         lead = round(start / 1000 - m.offset, 1) if (video_mode and start is not None) else None
         learned, n_learned = self.learned_lead()
+        info = self.start_info(self._start_at() if self.vod else src_now_ms) if self.session else None
+        actual_video = None
+        if info and info["actual"] is not None and video_mode and m.offset is not None:
+            actual_video = round(info["actual"] / 1000 - m.offset, 2)
+        sm_ = self.stream_mark
+        stream_delay = None                         # how far the video is behind the F1 events now
+        if not self.vod and m.offset is not None and m.confidence in ("HIGH", "MEDIUM", "MANUAL"):
+            if self.active == "VOYO" and pb is not None:
+                k = self.K if self.K is not None else m.offset
+                stream_delay = src_now_ms / 1000 - (pb + k)
+            elif self.active == "DELAY":
+                stream_delay = m.offset
         return {
             "type": "sync",
             # --- the state of the spec -----------------------------------------
@@ -1493,7 +1793,23 @@ class SyncManager:
             "anchorsValid": m.n_valid, "anchorsOutliers": m.n_outlier, "anchorsIndependent": m.independent,
             "deviationSeconds": None if m.deviation is None else round(m.deviation, 2),
             "offsetDisplay": self._disp(m.offset, start),
-            "offsetDisplayLabel": "session start at video" if start is not None else "offset",
+            "offsetDisplayLabel": "scheduled start at video" if start is not None else "offset",
+            # --- scheduled vs ACTUAL start, and the two delays (never mixed) ----------------
+            "startInfo": None if info is None else {
+                "state": info["state"], "scheduledUtc": utc_str(info["scheduled"]),
+                "actualUtc": utc_str(info["actual"]), "announcedUtc": utc_str(info["announced"]),
+                "f1DelaySeconds": None if info["f1_delay"] is None else round(info["f1_delay"], 1),
+                "waitingSeconds": None if info["waited"] is None else round(info["waited"]),
+                "delayed": info["delayed"], "notice": info["notice"],
+                "scheduledIgnored": bool(info["delayed"]),
+                "actualStartVideo": actual_video},
+            "streamDelaySeconds": None if stream_delay is None else round(stream_delay, 1),
+            "streamStart": {"pending": True} if self.stream_pending is not None else None if sm_ is None else {
+                "pending": False, "videoTime": None if sm_.get("video_time") is None else round(sm_["video_time"], 2),
+                "actualUtc": utc_str(sm_.get("actual_ms")),
+                "streamDelaySeconds": None if sm_.get("stream_delay") is None else round(sm_["stream_delay"], 1),
+                "f1DelaySeconds": None if sm_.get("f1_delay") is None else round(sm_["f1_delay"], 1),
+                "restored": bool(sm_.get("restored"))},
             "deviationNote": self.deviation_note,
             "drift": None if not self.pending else {
                 "current": self._disp(self.pending["old"], start),
@@ -1544,6 +1860,7 @@ class SyncManager:
         if m.offset is not None and a.kind != "pin" and not a.status:
             shift = round(self._shift(a.video_time is not None, a.offset, m.offset), 2)
         label = a.label or {"lap": f"S lap {a.lap}" if a.lap is not None else "S", "start": "L", "finish": "Finish",
+                            "stream": "Stream start",
                             "countdown": "Countdown", "exact": "Exact time", "pin": "Pin"}.get(a.kind, a.kind)
         return {"kind": a.kind, "label": label, "method": METHOD_LABEL.get(a.kind, a.kind),
                 "text": self._anchor_text(a), "driver": a.driver, "lap": a.lap, "state": state,
