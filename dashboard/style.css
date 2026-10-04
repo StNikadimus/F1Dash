@@ -401,6 +401,15 @@ html, body {
 #help-body kbd { font-family: var(--mono); color: var(--amber); font-weight: 800; }
 .help-foot { color: var(--text-3); font-size: 16px; margin: 14px 0 0; }
 .conn .overlay-box { border-color: var(--red); text-align: center; }
+.help-remote { display: flex; gap: 18px; align-items: center; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+#help .overlay-box { max-height: 1040px; overflow: hidden; }
+.help-remote:empty { display: none; }
+.help-remote .qr { background: #fff; padding: 8px; border-radius: 6px; line-height: 0; }
+.help-remote .qr svg { width: 140px; height: 140px; display: block; }
+.help-remote h3 { margin: 0 0 6px; font-size: 16px; letter-spacing: .14em; color: var(--text-3); }
+.help-remote .url { font: 800 22px var(--mono); color: var(--text); word-break: break-all; }
+.help-remote .alt { font-size: 14px; color: var(--text-2); margin-top: 4px; font-family: var(--mono); }
+.help-remote .note { font-size: 13px; color: var(--text-3); margin-top: 8px; }
 /* weather report popup: standard overlay box, no dimming (the race stays visible around it) */
 .overlay.wx { background: transparent; pointer-events: none; }
 .wx-box { pointer-events: auto; width: 1060px; min-width: 0; padding: 18px 24px; box-shadow: 0 10px 40px rgba(0,0,0,.6);

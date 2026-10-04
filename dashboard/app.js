@@ -617,6 +617,26 @@
     return `<div${id ? ` id="${id}"` : ""} class="pitexit${cls}" title="from race control messages">PIT EXIT <b>${v === "OPEN" ? "OPEN" : v === "CLOSED" ? "CLOSED" : "—"}</b></div>`;
   }
 
+  // phone remote: its URL (LAN / Tailscale, from the server) and a QR code in the HELP panel
+  let phoneRemote = null;
+  function renderPhoneRemote() {
+    const box = $("help-remote");
+    if (!phoneRemote) {
+      fetch("/api/remote/info").then((r) => r.json()).then((j) => { phoneRemote = j; renderPhoneRemote(); }).catch(() => {});
+      return;
+    }
+    const u = phoneRemote.url;
+    let qr = "";
+    try {
+      if (window.qrcode) { const q = qrcode(0, "M"); q.addData(u); q.make(); qr = q.createSvgTag({ cellSize: 4, margin: 0, scalable: true }); }
+    } catch (e) { qr = ""; }
+    const alt = (phoneRemote.lan || []).slice(1).concat(phoneRemote.tailscale || []).map((x) => x.split("?")[0]);
+    box.innerHTML = (qr ? `<div class="qr">${qr}</div>` : "") +
+      `<div><h3>PHONE REMOTE</h3><div class="url">${esc(u.split("?")[0])}</div>` +
+      (alt.length ? `<div class="alt">${alt.map(esc).join("<br>")}${(phoneRemote.tailscale || []).length ? " (Tailscale)" : ""}</div>` : "") +
+      `<div class="note">Scan with the phone camera (same Wi-Fi). ${esc(phoneRemote.note || "")}</div></div>`;
+  }
+
   function renderMode() {
     const b = $("mode-badge");
     const m = S.mode;
@@ -1135,7 +1155,7 @@
       SYNC_KEEP_OLD: "Sync drift: keep the old sync", SYNC_USE_NEW: "Sync drift: use the new anchor",
       PITLANE_DEBUG: "Show pit lane reconstruction debug",
       CYCLE_MODE: "Mode: AUTO → LIVE → VOD", SET_MODE: "Mode", MODE_AUTO: "Mode AUTO", MODE_LIVE: "Mode LIVE",
-      MODE_VOD: "Mode VOD", WEATHER_REPORT: "Weather report now", SIM_EVENT: "TEST: simulated race event",
+      MODE_VOD: "Mode VOD", WEATHER_REPORT: "Weather report now", TRACK_REPORT: "Track map wrong (press twice)", SIM_EVENT: "TEST: simulated race event",
     };
     const kb = { KEY_UP: "↑", KEY_DOWN: "↓", KEY_LEFT: "←", KEY_RIGHT: "→", KEY_ENTER: "Enter", KEY_ESC: "Esc", KEY_I: "I",
       KEY_SPACE: "Space", KEY_H: "H", KEY_1: "1", KEY_2: "2", KEY_3: "3", KEY_4: "4", KEY_5: "5", KEY_BACK: "Backspace",
@@ -1164,6 +1184,7 @@
       });
       return items.length ? `<div class="help-sub">${title}</div>` + items.join("") : "";
     };
+    renderPhoneRemote();
     $("help-body").innerHTML = rows.join("") + (ir.length ? '<div class="help-sub">REMOTE (IR)</div>' + ir.join("") : "") +
       layer("WITH VIDEO (RACE VIEW / VIDEO FOCUS)", S.keymapVideo) +
       layer("WHILE THE VIDEO HAS FOCUS", S.keymapVideoFocus);

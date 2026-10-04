@@ -20,6 +20,7 @@ from .engine import Engine
 from .f1tv_auth import AuthManager, AuthStore, login_page, result_page
 from .hub import Hub
 from .mode import SELECTABLE, ModeController
+from .netinfo import remote_info
 from .recorder import Recorder
 from .remote import RemoteController
 from .sources.base import Source
@@ -218,6 +219,15 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                  st["detected_reason"], st["effective_mode"])
         await mode.apply()
         tasks.append(asyncio.create_task(mode.run(), name="mode"))
+        try:
+            pr = phone_remote()
+            log.info("PHONE REMOTE: %s", pr["url"].split("?")[0] + (" (+ ?token=...)" if pr["token_required"] else ""))
+            for u in pr["tailscale"]:
+                log.info("PHONE REMOTE (Tailscale): %s", u.split("?")[0])
+            if pr["local_only"]:
+                log.warning("PHONE REMOTE: %s", pr["note"])
+        except Exception:  # noqa: BLE001 - only a hint
+            log.debug("phone remote address not determined", exc_info=True)
         tasks.append(asyncio.create_task(remote.auto_cycle_loop(), name="autocycle"))
         tasks.append(asyncio.create_task(video.run(), name="video"))  # independent of the F1 data pipeline
         yield
@@ -301,8 +311,10 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         if request.query_params.get("format") == "text":
             from .diagnostics import format_report
             st = mode.state()
+            pr = phone_remote()
             head = (f"Mode: selected {st['selected_mode']} · detected {st['detected_mode']} "
-                    f"({st['detected_reason']}) · effective {st['effective_mode']}\n")
+                    f"({st['detected_reason']}) · effective {st['effective_mode']}\n"
+                    f"PHONE REMOTE: {', '.join(u.split('?')[0] for u in pr['lan'] + pr['tailscale']) or pr['note']}\n")
             return Response(head + format_report(rt.engine.diagnostics()), media_type="text/plain; charset=utf-8")
         return JSONResponse({**rt.engine.diagnostics(), "mode": mode.state()}, headers={"Cache-Control": "no-store"})
 
@@ -325,6 +337,13 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
 
     async def api_state(request: Request) -> Response:
         return JSONResponse(rt.engine.snapshot())
+
+    def phone_remote() -> dict:
+        return remote_info(str(cfg["server"]["host"]), port, remote.token)
+
+    async def api_remote_info(request: Request) -> Response:
+        """URLs of the phone remote (LAN / Tailscale) for the QR code on the dashboard."""
+        return JSONResponse(phone_remote(), headers={"Cache-Control": "no-store"})
 
     async def api_ui(request: Request) -> Response:
         # read-only UI state (TV mode, focus); polled by tools/tv_launcher.py
@@ -470,10 +489,16 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
 
     # ---------------------------------------------------------------- WebSocket
     async def ws_endpoint(ws: WebSocket) -> None:
+        # ?client=remote: a phone remote (served by /remote) - the same endpoint and commands, but only
+        # the small remote state is sent to it; the remote token ([remote] token) is required when set
+        kind = "remote" if ws.query_params.get("client") == "remote" else "dashboard"
+        if kind == "remote" and not remote.check_token(ws.query_params.get("token")):
+            await ws.close(code=4401)
+            return
         await ws.accept()
         addr = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
         try:
-            client = await hub.add(ws, addr)
+            client = await hub.add(ws, addr, kind)
         except Exception:  # noqa: BLE001 - log it once in full, then keep the dashboard connected
             log.exception("Dashboard connection setup failed for %s", addr)
             raise
@@ -545,6 +570,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/f1tv/callback", f1tv_callback, methods=["POST"]),
         Route("/f1tv/status", f1tv_status),
         Route("/api/ui", api_ui),
+        Route("/api/remote/info", api_remote_info),
         Route("/api/remote/key", remote_key, methods=["GET", "POST"]),
         Route("/api/remote/command", remote_command, methods=["POST"]),
         Route("/api/sync", api_sync),
