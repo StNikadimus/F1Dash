@@ -487,6 +487,10 @@ class Engine:
             return self.sync.confirm(mono)
         if name == "SYNC_CLEAR":
             return self.sync.clear_anchor()
+        if name == "SYNC_STREAM_START":
+            return self.sync.mark_stream_start(mono, now)
+        if name == "SYNC_STREAM_RESET":
+            return self.sync.reset_stream_start()
         if name == "SYNC_PIN":
             return self.sync.add_manual_anchor(None, mono, now)
         if name == "SYNC_KEEP_OLD":
@@ -504,11 +508,17 @@ class Engine:
             extra = sm.capture(mono, now)
             text = "captured"
         elif action == "countdown":
+            # "23:47" or "23:47|actual" - what the countdown counts to: auto (default) / scheduled /
+            # announced / actual (a delayed start is never counted against the schedule silently)
             from .sync import parse_countdown
-            secs = parse_countdown(str(value or ""))
+            raw, _, target = str(value or "").partition("|")
+            secs = parse_countdown(raw)
             if secs is None:
                 return {"ok": False, "error": "countdown format: 23:47, 00:23:47 or 23m 47s"}
-            text = sm.add_countdown_anchor(secs, mono, now, str(value).strip()[:12])
+            target = target.strip().lower() or "auto"
+            if target not in ("auto", "scheduled", "announced", "actual"):
+                return {"ok": False, "error": "countdown target: auto / scheduled / announced / actual"}
+            text = sm.add_countdown_anchor(secs, mono, now, raw.strip()[:12], target=target)
         elif action == "exact":
             dt = parse_utc(str(value or ""))
             if dt is None:
@@ -543,6 +553,10 @@ class Engine:
                 text = sm.set_estimate(lead)
         elif action == "clear":
             text = sm.clear_anchor()
+        elif action == "stream_start":
+            text = sm.mark_stream_start(mono, now)
+        elif action == "stream_reset":
+            text = sm.reset_stream_start()
         elif action == "keep_old":
             text = sm.keep_old()
         elif action == "use_new":
@@ -561,7 +575,8 @@ class Engine:
         else:
             return {"ok": False, "error": "unknown action"}
         failed = text.startswith("SYNC:") if isinstance(text, str) else False
-        if self.vod and action in ("countdown", "exact", "estimate", "use_new", "resync", "clock", "marker"):
+        if self.vod and action in ("countdown", "exact", "estimate", "use_new", "resync", "clock", "marker",
+                                   "stream_start", "stream_reset"):
             self._log_data_check(action, text)
         self.hub.set_sync(self.sync_status())
         return {"ok": not failed, "result": text, **extra, "state": self.sync_status()}

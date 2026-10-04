@@ -250,7 +250,7 @@ class VodSyncTest(unittest.TestCase):
         s = self.make()
         pb = self.at(s, self.sched - (23 * 60 + 47) * 1000)          # VOYO shows 23:47 to the start
         s.capture(self.mono, T0)
-        msg = s.add_countdown_anchor(23 * 60 + 47, self.mono, T0, "23:47")
+        msg = s.add_countdown_anchor(23 * 60 + 47, self.mono, T0, "23:47", target="scheduled")
         self.assertIn("MEDIUM", msg)
         s.target(self.mono, T0)
         st = s.get_state(self.mono, T0, None)
@@ -265,7 +265,7 @@ class VodSyncTest(unittest.TestCase):
     def test_countdown_plus_line_crossings_is_high(self):
         s = self.make()
         self.at(s, self.sched - 600_000)
-        s.add_countdown_anchor(600, self.mono, T0, "10:00")
+        s.add_countdown_anchor(600, self.mono, T0, "10:00", target="scheduled")
         for t, lap in self.ref.crossings["12"][2:4]:
             self.at(s, t, paused=True)                               # paused exactly on the line
             self.assertIn("LAP", s.add_event_anchor("lap", self.mono, T0, "12", "ANT"))
@@ -299,7 +299,7 @@ class VodSyncTest(unittest.TestCase):
     def test_big_difference_is_not_applied_silently(self):
         s = self.make()
         self.at(s, self.sched - 600_000)
-        s.add_countdown_anchor(600, self.mono, T0)
+        s.add_countdown_anchor(600, self.mono, T0, target="scheduled")
         k_before = s.K
         self.at(s, START_MS + 5000)                                    # L pressed 5 s after lights out
         msg = s.add_event_anchor("start", self.mono, T0, None, "L")
@@ -320,7 +320,7 @@ class VodSyncTest(unittest.TestCase):
     def test_typed_time_replaces_a_different_sync_and_says_so(self):
         s = self.make()
         self.at(s, self.sched - 600_000)
-        s.add_countdown_anchor(600, self.mono, T0)
+        s.add_countdown_anchor(600, self.mono, T0, target="scheduled")
         self.at(s, START_MS)
         msg = s.add_manual_anchor(START_MS + 9000, self.mono, T0, text="07:14:11")   # you typed another time
         self.assertIn("previous sync replaced", msg)
@@ -339,7 +339,7 @@ class VodSyncTest(unittest.TestCase):
     def test_consistent_anchor_is_confirmed_minor_one_moves_slowly(self):
         s = self.make()
         self.at(s, self.sched - 600_000)
-        s.add_countdown_anchor(600, self.mono, T0)
+        s.add_countdown_anchor(600, self.mono, T0, target="scheduled")
         self.at(s, START_MS)
         s.add_event_anchor("start", self.mono, T0, None, "L")          # exact: consistent
         st = s.get_state(self.mono, T0, None)
@@ -364,7 +364,7 @@ class VodSyncTest(unittest.TestCase):
     def test_several_anchors_median_outlier_and_measured_error(self):
         s = self.make()
         self.at(s, self.sched - 600_000)
-        s.add_countdown_anchor(600, self.mono, T0)
+        s.add_countdown_anchor(600, self.mono, T0, target="scheduled")
         self.at(s, START_MS + 100)
         s.add_event_anchor("start", self.mono, T0, None, "L")          # +0.10 s
         for i, err in ((4, -0.05), (5, 0.08), (6, 1.4)):                # lap 7 pressed 1.4 s late
@@ -396,7 +396,7 @@ class VodSyncTest(unittest.TestCase):
         self.at(s, START_MS)
         st = s.get_state(self.mono, T0, None)
         self.assertEqual((st["health"], st["healthError"]), ("UNSYNCED", None))
-        s.add_countdown_anchor((self.sched - START_MS) / 1000, self.mono, T0)
+        s.add_countdown_anchor((self.sched - START_MS) / 1000, self.mono, T0, target="scheduled")
         s.target(self.mono, T0)
         st = s.get_state(self.mono, T0, None)
         self.assertEqual((st["health"], st["healthError"], st["errorMeasured"]), ("MEDIUM", "±1–2 s", False))
@@ -425,7 +425,7 @@ class VodSyncTest(unittest.TestCase):
         pb_capture = s.captured[0]
         self.mono += 8                                                # typing takes 8 s, video plays on
         s.update(sample(pb_capture + 8, ts=self.mono), T0)
-        s.add_countdown_anchor(600, self.mono, T0)
+        s.add_countdown_anchor(600, self.mono, T0, target="scheduled")
         self.assertAlmostEqual(s.mapping.offset, self.K, places=2)
 
     def test_estimate_is_labelled_and_learned_lead_not_applied_silently(self):

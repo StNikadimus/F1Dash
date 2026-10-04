@@ -423,7 +423,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
 
     SYNC_ACTIONS = {"capture": None, "countdown": "countdown", "exact": "f1_time", "auto": None,
                     "estimate": "lead_seconds", "clear": None, "keep_old": None, "use_new": None,
-                    "resync": None, "select_session": "session_key", "clock": "clock", "marker": "marker"}
+                    "resync": None, "select_session": "session_key", "clock": "clock", "marker": "marker",
+                    "stream_start": None, "stream_reset": None}
 
     async def api_media_catalog(request: Request) -> Response:
         """SELECT SESSION: Grands Prix + sessions of a season (public data, read-only)."""
@@ -441,6 +442,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         """SYNC menu: POST /api/sync/{capture|countdown|exact|auto|estimate|clear}.
 
         countdown {"countdown": "23:47"}   - VOYO countdown to the session start at the captured moment
+                  {"countdown": "4:00|actual"} - ... counting to: auto | scheduled | announced | actual start
+        stream_start {}                    - MARK STREAM START: the video shows the ACTUAL session start now
+        stream_reset {}                    - remove the stream start mark
         exact     {"f1_time": ISO UTC}     - what time the video shows (Manual Exact Time, = S concept)
         estimate  {"lead_seconds": 1427}   - video starts this long before the scheduled start (null = remove)
         clock     {"clock": "Q2|remaining|07:32"} - qualifying / practice session clock at the captured moment

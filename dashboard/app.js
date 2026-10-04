@@ -1152,6 +1152,8 @@
       SYNC_RESYNC: "Force resync", SYNC_DEBUG: "SYNC menu", SYNC_MENU: "SYNC menu",
       SYNC_START: "Sync: lights out / session start now", SYNC_CONFIRM: "Sync: dashboard lap matches the TV",
       SYNC_CLEAR: "Sync: clear", SYNC_PIN: "Sync: pin the shown time",
+      SYNC_STREAM_START: "Sync: MARK STREAM START (the video shows the actual start now)",
+      SYNC_STREAM_RESET: "Sync: reset the stream start mark",
       SYNC_KEEP_OLD: "Sync drift: keep the old sync", SYNC_USE_NEW: "Sync drift: use the new anchor",
       PITLANE_DEBUG: "Show pit lane reconstruction debug",
       CYCLE_MODE: "Mode: AUTO → LIVE → VOD", SET_MODE: "Mode", MODE_AUTO: "Mode AUTO", MODE_LIVE: "Mode LIVE",
@@ -1473,6 +1475,7 @@
       <div class="sm-methods">
         <button data-m="clock">Session Clock<small>time remaining / elapsed</small></button>
         <button data-m="marker">Phase Marker<small>SYNC HERE · most precise</small></button>
+        <button data-m="stream">Mark Stream Start<small>video shows the actual start · HIGH</small></button>
         <button data-m="countdown">VOYO Countdown<small>recommended</small></button>
         <button data-m="exact">Manual Exact Time<small>time shown in the video</small></button>
         <button data-m="auto">Restore Saved Sync<small>automatic · only if reliable</small></button>
@@ -1491,9 +1494,23 @@
         <p>Pause VOYO <b>exactly</b> on the moment (e.g. the session clock turning to 0:00) and press <b>SYNC HERE</b> - the dashboard uses the official F1 timing of that moment.</p>
         <div class="sm-markers" id="sm-markers"></div>
       </div>
+      <div class="sm-panel" id="sm-p-stream" hidden>
+        <p>When the video shows the <b>actual start</b> of the session (lights out / session start) press
+          <b>MARK STREAM START</b> - pause VOYO exactly on it for the best result. The moment is matched to the
+          start event in the F1 data, <b>never to the scheduled start</b>, so a delayed race and a delayed stream
+          are not mixed up. Marked the wrong moment? Press it again on the right one, or reset it.</p>
+        <div class="sm-row"><button class="pri" data-apply="stream_start">MARK STREAM START</button>
+          <button data-apply="stream_reset">RESET STREAM START</button></div>
+        <div class="sm-hint" id="sm-stream-hint"></div>
+      </div>
       <div class="sm-panel" id="sm-p-countdown" hidden>
         <p>Pause VOYO on a frame that shows the countdown to the start of <b id="sm-sess-cd">this session</b> (or read it the moment you press <b>Capture</b>). How long is it until the start?</p>
         <div class="sm-cap" id="sm-cap-countdown"></div>
+        <div class="sm-row"><label class="sm-lab">Counts to</label><select id="sm-cd-target">
+          <option value="auto">Auto (scheduled start; asks if the start was delayed)</option>
+          <option value="scheduled">Scheduled start</option>
+          <option value="announced">Announced new start (race control)</option>
+          <option value="actual">Actual start (lights out)</option></select></div>
         <div class="sm-row"><input id="sm-in-countdown" placeholder="23:47  ·  00:23:47  ·  23m 47s" autocomplete="off">
           <button data-cap>Capture</button><button class="pri" data-apply="countdown">Apply</button></div>
       </div>
@@ -1561,7 +1578,11 @@
       if (b.dataset.marker) { syncAction("marker", b.dataset.marker); return; }
       const a = b.dataset.apply;
       if (!a) return;
-      if (a === "countdown") syncAction("countdown", $("sm-in-countdown").value.trim());
+      if (a === "countdown") {
+        const tgt = $("sm-cd-target").value;
+        syncAction("countdown", $("sm-in-countdown").value.trim() + (tgt && tgt !== "auto" ? "|" + tgt : ""));
+      }
+      else if (a === "stream_start" || a === "stream_reset") syncAction(a);
       else if (a === "clock") {
         const v = $("sm-in-clock").value.trim();
         if (parseDur(v) === null) { syncMsg = { ok: false, text: "Enter the clock as MM:SS (e.g. 07:32) or H:MM:SS." }; renderSyncMenu(); return; }
@@ -1659,6 +1680,35 @@
     el.textContent = r.error || (r.preview + (r.warn ? "  ·  " + r.warn : ""));
     el.classList.toggle("bad", !!(r.error || r.warn));
   }
+  // scheduled vs ACTUAL start and the two delays - never mixed: the F1 START DELAY is how late the
+  // event started; the STREAM DELAY is how far the video is behind the F1 events
+  const START_STATE = { PRE_START: "PRE-START", DELAYED: "DELAYED START", STARTED: "STARTED", RUNNING: "RUNNING", UNKNOWN: "—" };
+  function fmtSigned(v) { return (v >= 0 ? "+" : "−") + fmtVid(Math.abs(v)); }
+  function startRows(sy, row) {
+    const si = sy.startInfo;
+    if (!si) return "";
+    const hm = (u) => u ? esc(u.slice(0, 8)) + " UTC" : "—";
+    let st = `<b class="${si.state === "DELAYED" ? "sm-warn" : ""}">${esc(START_STATE[si.state] || si.state)}</b>`;
+    if (si.state === "DELAYED") st += ` <small>${si.notice ? esc(si.notice) : has(si.waitingSeconds) ? "scheduled start passed " + fmtVid(si.waitingSeconds) + " ago" : ""} · scheduled start NOT used as the race-time anchor</small>`;
+    let out = row("F1 start", st) +
+      row("Scheduled → actual", `${hm(si.scheduledUtc)} → ${si.actualUtc ? hm(si.actualUtc) : "<small>waiting for the actual start</small>"}` +
+        (si.announcedUtc && !si.actualUtc ? ` <small>announced ${hm(si.announcedUtc)}</small>` : ""));
+    if (has(si.f1DelaySeconds)) out += row("F1 start delay", `${fmtSigned(si.f1DelaySeconds)} <small>actual start − scheduled start (the event)</small>`);
+    if (has(sy.streamDelaySeconds)) out += row("Stream delay", `${fmtSigned(sy.streamDelaySeconds)} <small>video behind the F1 events (the broadcast)</small>`);
+    else if (has(si.actualStartVideo)) out += row("Actual start in video", `${fmtVid(si.actualStartVideo)} <small>recording position of lights out / session start</small>`);
+    const ss = sy.streamStart;
+    if (ss) out += row("Stream start mark", ss.pending ? `<span class="sm-warn">waiting for the actual start in the F1 data</span>` :
+      `${has(ss.videoTime) ? "video " + fmtVid(ss.videoTime) + " = " : "at "}${hm(ss.actualUtc)}${has(ss.streamDelaySeconds) ? ` <small>stream delay ${fmtSigned(ss.streamDelaySeconds)}</small>` : ""}${ss.restored ? " <small>saved</small>" : ""}`);
+    return out;
+  }
+  function streamHint(sy) {
+    if (!sy) return "";
+    const ss = sy.streamStart, si = sy.startInfo || {};
+    if (ss && ss.pending) return "Marked - waiting for the actual start to appear in the F1 data (the scheduled start is not used).";
+    if (ss) return `Marked: STREAM DELAY ${has(ss.streamDelaySeconds) ? fmtSigned(ss.streamDelaySeconds) : "—"} · CONFIDENCE ${esc(sy.confidence)}` +
+      (has(ss.f1DelaySeconds) ? ` · F1 start delay ${fmtSigned(ss.f1DelaySeconds)}` : "");
+    return si.state === "DELAYED" ? "The start is DELAYED - mark the moment the video shows the actual start." : "No stream start marked.";
+  }
   function renderSyncMenu() {
     const sy = S.sync;
     const el = $("sync-menu");
@@ -1710,10 +1760,10 @@
     const kind = (sy && sy.sessionKind) || (S.session || {}).session_kind || "unknown";
     const tl = sy && sy.sessionTimeline;
     const timedK = kind === "qualifying" || kind === "practice";
-    const offer = timedK ? ["clock", "marker", "exact", "auto"] :
-      ["countdown", "exact", "auto", "estimate"].concat(tl && (tl.phases || []).length ? ["clock", "marker"] : []);
+    const offer = timedK ? ["clock", "marker", "stream", "exact", "auto"] :
+      ["stream", "countdown", "exact", "auto", "estimate"].concat(tl && (tl.phases || []).length ? ["clock", "marker"] : []);
     if (syncMethod && !offer.includes(syncMethod)) syncMethod = null;
-    for (const m of ["clock", "marker", "countdown", "exact", "auto", "estimate"]) {
+    for (const m of ["clock", "marker", "stream", "countdown", "exact", "auto", "estimate"]) {
       $("sm-p-" + m).hidden = syncMethod !== m;
       const b = $("sync-menu").querySelector(`[data-m="${m}"]`);
       if (b) { b.classList.toggle("on", syncMethod === m); b.hidden = !offer.includes(m); b.style.order = offer.indexOf(m); }
@@ -1727,6 +1777,7 @@
     for (const id of ["sm-cap-countdown", "sm-cap-exact", "sm-cap-clock"]) {
       $(id).innerHTML = syncCapture ? `Captured video position <b>${fmtVid(syncCapture.video_time)}</b>${syncCapture.paused ? " (paused)" : " - the value you enter must be what VOYO showed at that moment"}` : "Capturing…";
     }
+    $("sm-stream-hint").innerHTML = streamHint(sy);
     $("sm-est-hint").innerHTML = sy && has(sy.learnedLead) ? `Learned from ${sy.learnedLeadCount} earlier sync(s): ${fmtVid(sy.learnedLead)} (not applied automatically).` : "No learned value yet.";
     const msg = $("sm-msg");
     msg.hidden = !syncMsg;
@@ -1762,6 +1813,7 @@
       ${row("Method", esc(sy.method || "—"))}
       ${sy.anchor ? row("Anchor", esc(sy.anchor)) : ""}
       ${row("Offset", offset)}
+      ${startRows(sy, row)}
       ${row("Anchors", counts)}
       <div class="sm-reason">${esc(sy.reason || "")}</div>
       ${sy.deviationNote ? `<div class="sm-warnbox">MINOR DEVIATION<br><span>${esc(sy.deviationNote)}</span></div>` : ""}

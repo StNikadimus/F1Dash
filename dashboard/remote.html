@@ -144,7 +144,12 @@
         <button data-c="SYNC_RESYNC">RESYNC</button>
         <button data-c="SYNC_MENU">MENU<small>ON TV</small></button>
       </div>
+      <div class="g g2">
+        <button data-c="SYNC_STREAM_START">MARK STREAM START<small>VIDEO SHOWS THE ACTUAL START</small></button>
+        <button data-c="SYNC_STREAM_RESET">RESET STREAM START</button>
+      </div>
       <div class="info" id="syncinfo"></div>
+      <div class="info" id="startinfo"></div>
     </section>
     <section>
       <h2>VIDEO</h2>
@@ -208,6 +213,8 @@
   "use strict";
   const $ = (id) => document.getElementById(id);
   const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const mmss = (v) => { const t = Math.round(v), h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), x = t % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0"); };
   const token = new URLSearchParams(location.search).get("token");
   const R = { ui: {}, mode: {}, remote: {}, sync: null, hello: {} };     // only what the server sent
 
@@ -286,6 +293,17 @@
     $("syncinfo").innerHTML = y.mode ? `SYNC <b>${esc(y.confidence || "—")}</b> · ${esc(y.mode)}` +
       (y.offsetDisplay !== undefined && y.offsetDisplay !== null ? ` · ${esc((y.offsetDisplayLabel || "offset").toLowerCase())} <b>${Number.isFinite(+y.offsetDisplay) ? (+y.offsetDisplay).toFixed(1) + " s" : esc(y.offsetDisplay)}</b>` : "") +
       (y.health ? ` · health ${esc(y.health)}` : "") : "Sync status not available";
+    // the two delays, never mixed: F1 START DELAY = the event was late; STREAM DELAY = the video is behind
+    const si = y.startInfo, ss = y.streamStart;
+    const sg = (v) => (v >= 0 ? "+" : "−") + mmss(Math.abs(v));
+    $("startinfo").innerHTML = si ? [
+      `F1 START <b${si.state === "DELAYED" ? ' style="color:var(--amber)"' : ""}>${esc((si.state || "").replace("_", "-"))}</b>` +
+        (si.state === "DELAYED" ? " · scheduled start not used" : ""),
+      si.f1DelaySeconds !== null && si.f1DelaySeconds !== undefined ? `F1 START DELAY <b>${sg(si.f1DelaySeconds)}</b>` : "",
+      y.streamDelaySeconds !== null && y.streamDelaySeconds !== undefined ? `STREAM DELAY <b>${sg(y.streamDelaySeconds)}</b>` :
+        ss && ss.streamDelaySeconds !== null && ss.streamDelaySeconds !== undefined ? `STREAM DELAY <b>${sg(ss.streamDelaySeconds)}</b>` : "",
+      ss ? (ss.pending ? "STREAM START <b>waiting for the actual start</b>" : `STREAM START <b>marked</b> · CONFIDENCE <b>${esc(y.confidence || "—")}</b>`) : "",
+    ].filter(Boolean).join(" · ") : "";
     renderDrivers();
     renderAdvSync();
   }
