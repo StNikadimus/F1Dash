@@ -100,6 +100,24 @@ class LaunchCommandTest(unittest.TestCase):
             self.assertNotIn(bad.lower(), voyo.lower(), bad)
 
 
+    def test_capture_compat_levels(self):
+        def voyo_line(*extra):
+            out = subprocess.run([sys.executable, str(ROOT / "tools" / "tv_launcher.py"), "--print",
+                                  "--browser", "browser.exe", *extra],
+                                 capture_output=True, text=True, timeout=60, cwd=str(ROOT)).stdout
+            return next(line for line in out.splitlines() if "voyo" in line.lower() and "--app=" in line)
+        self.assertNotIn("--disable-gpu", voyo_line())                         # default: browser unchanged
+        self.assertNotIn("video-overlays", voyo_line())
+        self.assertIn("--disable-direct-composition-video-overlays", voyo_line("--capture", "1"))
+        two = voyo_line("--capture", "no-hw-decode")
+        self.assertIn("--disable-accelerated-video-decode", two)
+        self.assertIn("--disable-gpu", voyo_line("--capture", "3"))
+        out = subprocess.run([sys.executable, str(ROOT / "tools" / "tv_launcher.py"), "--print", "--browser", "b",
+                              "--capture", "3"], capture_output=True, text=True, timeout=60, cwd=str(ROOT)).stdout
+        dash = next(line for line in out.splitlines() if "--app=http://127.0.0.1" in line)
+        self.assertNotIn("--disable-gpu", dash)                                 # only the VOYO window
+
+
 class ReachabilityTest(unittest.TestCase):
     def run_monitor(self, mode, status=None):
         def handler(request):

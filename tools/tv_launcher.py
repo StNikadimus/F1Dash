@@ -532,6 +532,26 @@ def reset_window_placement(profile: Path) -> None:
         pass
 
 
+# Screen-capture compatibility of the VOYO window (AirParrot / Miracast / OBS mirroring shows
+# the video black while the monitor shows it). Each level only changes how THIS browser window
+# renders: the video is composited into the normal window image instead of a GPU overlay
+# plane. VOYO's player, login, DRM and stream are untouched.
+CAPTURE_LEVELS = {
+    "off": [],
+    "no-overlays": ["--disable-direct-composition-video-overlays"],
+    "no-hw-decode": ["--disable-direct-composition-video-overlays", "--disable-accelerated-video-decode"],
+    "no-gpu": ["--disable-gpu"],
+}
+CAPTURE_ALIASES = {"0": "off", "1": "no-overlays", "2": "no-hw-decode", "3": "no-gpu"}
+
+
+def capture_flags(level: str) -> list[str]:
+    level = CAPTURE_ALIASES.get(str(level).strip().lower(), str(level).strip().lower() or "off")
+    if level not in CAPTURE_LEVELS:
+        raise SystemExit(f"--capture must be one of {', '.join(CAPTURE_LEVELS)} (or 0-3), not {level!r}")
+    return CAPTURE_LEVELS[level]
+
+
 def make_ops(hotkeys: list[str]):
     system = platform.system()
     if system == "Windows":
@@ -762,6 +782,9 @@ def main() -> None:
                     help="local DevTools port of the VOYO window (127.0.0.1 only)")
     ap.add_argument("--restore-taskbar", action="store_true",
                     help="only show the Windows taskbar again (if the agent was killed) and exit")
+    ap.add_argument("--capture", default=str(voyo.get("capture_compat") or "off"),
+                    help="screen-capture compatibility of the VOYO window for AirParrot / Miracast mirroring: "
+                         "off | no-overlays | no-hw-decode | no-gpu (or 0-3); default from [voyo] capture_compat")
     ap.add_argument("--print", action="store_true", help="print the browser commands and exit")
     args = ap.parse_args()
     args.server = args.server.rstrip("/").replace("://localhost", "://127.0.0.1")
@@ -819,7 +842,10 @@ def main() -> None:
         # own background throttling - nothing of VOYO's player, login or DRM.
         voyo_cmd = [browser, f"--user-data-dir={profiles / 'voyo'}", f"--app={args.voyo_url}",
                     f"--window-position={x},{y}", f"--window-size={w},{h}",
-                    "--disable-backgrounding-occluded-windows", *common]
+                    "--disable-backgrounding-occluded-windows", *capture_flags(args.capture), *common]
+        if capture_flags(args.capture):
+            print(f"VOYO window screen-capture mode: {args.capture} ({' '.join(capture_flags(args.capture))}). "
+                  "Close the VOYO window completely before switching modes - flags apply on a fresh start.")
         if use_clock:
             # local DevTools port of the dedicated VOYO profile: only used to READ the
             # <video> element's currentTime / paused / playbackRate (tools/voyo_clock_probe.js)

@@ -758,6 +758,17 @@ Alternative: in the VOYO page use the browser's **Picture-in-Picture** (Edge/
 Chrome media controls, if VOYO's player permits it) and drag the PiP window over
 the slot. The dashboard cannot start PiP for another site's player.
 
+**Mirroring to a TV (AirParrot, Miracast, OBS …) shows the VOYO video black** while the
+PC monitor shows it and the sound plays: Chromium hands hardware-decoded video to a GPU
+overlay plane that the monitor scans out but desktop capture does not contain (a short
+ALT+TAB makes it appear because the video is then composited normally). Start with
+`launch.bat capture1` (no video overlays; GPU and hardware decoding stay), if still black
+`capture2` (+ no hardware video decode), last resort `capture3` (no GPU). Close the VOYO
+window completely first – the flags apply on a fresh start. Make it permanent with
+`[voyo] capture_compat` in `config/config.toml`. Only the VOYO window's rendering
+changes; VOYO's player, login and DRM are untouched. If the video stays black even with
+`capture3`, the stream is protected from capture by design and no setting here changes that.
+
 Note: the VOYO window uses one of your 2 simultaneous VOYO streams.
 
 ### Other video modes (only for officially permitted sources)
