@@ -10,11 +10,14 @@ opens both windows and then keeps running as a small *TV agent* that:
 * follows the dashboard's TV mode and moves/resizes the VOYO window:
       RACE_VIEW      -> video slot 1280x720 (top-left of the 1920x1080 stage)
       VIDEO_FOCUS    -> 1920x990 (bottom 90 px = dashboard info bar)
-      FULL_DASHBOARD -> VOYO window minimized
+      FULL_DASHBOARD -> VOYO window sent BEHIND the dashboard (never minimized: a
+                        minimized / hidden page makes the browser pause muted or
+                        video-only playback, and some players pause themselves)
 * while the VOYO window has the keyboard focus, forwards the dashboard keys
   (T, H, I, A, 1-5, Up, Down, S, R, D, =, - by default) to the dashboard server,
   so e.g. T switches the TV mode without clicking anything. Left/Right, Space,
-  F, M etc. stay with VOYO's own player.
+  F, M etc. stay with VOYO's own player. While a text field of the VOYO page has
+  the focus (login, PIN, search) no key is taken away from the page.
 * runs the VOYO playback clock bridge (tools/voyo_clock.py): reads the player's
   HTMLVideoElement.currentTime through the VOYO window's local DevTools port
   and sends it to the server, which shows the F1 data for exactly the moment
@@ -22,7 +25,7 @@ opens both windows and then keeps running as a small *TV agent* that:
   with --no-clock.
 
 Windows: full support (Win32 via ctypes, no extra packages).
-Linux (X11): window placement via `wmctrl` (+ `xdotool` for minimize); no hotkeys.
+Linux (X11): window placement via `wmctrl`; no hotkeys.
 
     python tools/tv_launcher.py                              # launch both + run agent
     python tools/tv_launcher.py --server http://192.168.1.10:8080
@@ -85,6 +88,7 @@ class NullOps:
     def is_valid(self, win) -> bool: return False
     def place(self, win, rect, topmost: bool) -> None: pass
     def minimize(self, win) -> None: pass
+    def send_back(self, win) -> None: pass
     def foreground_is(self, win) -> bool: return False
     def poll_hotkeys(self, active: bool) -> list[str]: return []
     def set_taskbar_hidden(self, hidden: bool) -> None: pass
@@ -232,6 +236,16 @@ class WinOps(NullOps):
         u.SetWindowPos(win, self.wt.HWND(-2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # NOTOPMOST, keep size/pos
         u.ShowWindow(win, 6)                           # SW_MINIMIZE
 
+    def send_back(self, win) -> None:
+        """Behind every other window, but NOT minimized: the page stays a shown page for
+        the browser, so VOYO's playback is not paused (minimized = hidden page)."""
+        u = self.user32
+        if u.IsIconic(win):
+            u.ShowWindow(win, 4)                       # SW_SHOWNOACTIVATE
+        keep = 0x0001 | 0x0002 | 0x0010                # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+        u.SetWindowPos(win, self.wt.HWND(-2), 0, 0, 0, 0, keep)   # HWND_NOTOPMOST
+        u.SetWindowPos(win, self.wt.HWND(1), 0, 0, 0, 0, keep)    # HWND_BOTTOM
+
     def foreground_is(self, win) -> bool:
         fg = self.user32.GetForegroundWindow()
         if not fg:
@@ -261,7 +275,7 @@ class WinOps(NullOps):
 
 
 class WmctrlOps(NullOps):
-    """Linux/X11 fallback: wmctrl for placement, xdotool for minimize. No hotkeys."""
+    """Linux/X11 fallback: wmctrl for placement. No hotkeys."""
     name = "wmctrl"
 
     def screen_size(self) -> tuple[int, int]:
@@ -313,7 +327,12 @@ class WmctrlOps(NullOps):
         x, y, w, h = rect
         subprocess.run(["wmctrl", "-i", "-r", win, "-b", "remove,hidden"], timeout=5)
         subprocess.run(["wmctrl", "-i", "-r", win, "-e", f"0,{x},{y},{w},{h}"], timeout=5)
+        subprocess.run(["wmctrl", "-i", "-r", win, "-b", "remove,below"], timeout=5)
         subprocess.run(["wmctrl", "-i", "-r", win, "-b", ("add" if topmost else "remove") + ",above"], timeout=5)
+
+    def send_back(self, win) -> None:
+        subprocess.run(["wmctrl", "-i", "-r", win, "-b", "remove,above,hidden"], timeout=5)
+        subprocess.run(["wmctrl", "-i", "-r", win, "-b", "add,below"], timeout=5)
 
     def minimize(self, win) -> None:
         subprocess.run(["wmctrl", "-i", "-r", win, "-b", "remove,above"], timeout=5)
@@ -357,6 +376,10 @@ class TvAgent:
         self.title_hints: Callable[[], list[str]] = lambda: []
         self._search_since: Optional[float] = None
         self._search_warned = False
+        # True while a text field of the VOYO page has the focus (clock bridge): the
+        # hotkeys are released so login / PIN / search typing reaches VOYO
+        self.typing: Callable[[], bool] = lambda: False
+        self._typing_said = False
 
     # -- server ---------------------------------------------------------------
     def _http_get(self, path: str) -> dict:
@@ -432,10 +455,19 @@ class TvAgent:
                     self.ops.place(self.win, self.window_rect(mode), topmost=True)
                     print(f"  TV mode {mode}: VOYO window -> {self.window_rect(mode)} (always on top)")
                 else:
-                    self.ops.minimize(self.win)
-                    print(f"  TV mode {mode}: VOYO window minimized")
+                    # never minimize: a minimized window is a hidden page and the browser
+                    # (or the player itself) pauses the video - keep it shown, behind the dashboard
+                    self.ops.send_back(self.win)
+                    print(f"  TV mode {mode}: VOYO window behind the dashboard (keeps playing)")
                 self.applied = mode
         active = bool(self.win) and self.applied in self.rects and self.ops.foreground_is(self.win)
+        if active and self.typing():
+            active = False
+            if not self._typing_said:
+                self._typing_said = True
+                print("  typing in the VOYO page - dashboard keys paused until the text field loses the focus")
+        elif not self.typing():
+            self._typing_said = False
         for key in self.ops.poll_hotkeys(active):
             print(f"  key {key} (VOYO window) -> dashboard")
             self._key("KEY_" + key)
@@ -720,7 +752,7 @@ def main() -> None:
     ap.add_argument("--titlebar", type=int, default=32,
                     help="height of VOYO's window title bar in DIP, hidden above the slot (0 = keep visible)")
     ap.add_argument("--title", default="VOYO", help="text in the VOYO window title used to find it")
-    ap.add_argument("--hotkeys", default="T,H,I,A,1,2,3,4,5,UP,DOWN,S,R,D,Y,L,C,O,N,G,E,EQUAL,MINUS",
+    ap.add_argument("--hotkeys", default="T,H,I,A,1,2,3,4,5,UP,DOWN,S,R,D,Y,L,C,O,N,G,EQUAL,MINUS",
                     help="keys forwarded to the dashboard while the VOYO window has the focus")
     ap.add_argument("--keep-taskbar", action="store_true", help="do not hide the Windows taskbar")
     sync = cfg.get("sync") or {}
@@ -781,8 +813,13 @@ def main() -> None:
                     "--autoplay-policy=no-user-gesture-required", *common]
         if not args.windowed:
             dash_cmd.append("--start-fullscreen")
+        # --disable-backgrounding-occluded-windows: Windows' occlusion tracking would treat
+        # the VOYO window as hidden while the full-screen dashboard covers it (FULL_DASHBOARD)
+        # and the browser would then pause muted / video-only playback. Only the browser's
+        # own background throttling - nothing of VOYO's player, login or DRM.
         voyo_cmd = [browser, f"--user-data-dir={profiles / 'voyo'}", f"--app={args.voyo_url}",
-                    f"--window-position={x},{y}", f"--window-size={w},{h}", *common]
+                    f"--window-position={x},{y}", f"--window-size={w},{h}",
+                    "--disable-backgrounding-occluded-windows", *common]
         if use_clock:
             # local DevTools port of the dedicated VOYO profile: only used to READ the
             # <video> element's currentTime / paused / playbackRate (tools/voyo_clock_probe.js)
@@ -815,6 +852,7 @@ def main() -> None:
         session.clock = VoyoClockBridge(args.server, args.cdp_port, args.token,
                                         float(sync.get("clock_poll_hz", 5.0))).start()
         agent.title_hints = lambda: [session.clock.page_title] if session.clock and session.clock.page_title else []
+        agent.typing = lambda: bool(session.clock and session.clock.typing)
     reason = "Ctrl+C"
     try:
         agent.run()

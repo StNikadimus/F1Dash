@@ -264,6 +264,7 @@ class TvAgentTest(unittest.TestCase):
             def is_valid(self, w): return w == 42
             def place(self, w, rect, topmost): self.calls.append(("place", rect, topmost))
             def minimize(self, w): self.calls.append(("min",))
+            def send_back(self, w): self.calls.append(("back",))
             def foreground_is(self, w): return self.fg
             def poll_hotkeys(self, active):
                 self.calls.append(("hk", active))
@@ -280,8 +281,9 @@ class TvAgentTest(unittest.TestCase):
         agent.step({"tv_mode_effective": "VIDEO_FOCUS"})
         self.assertEqual(sent, ["KEY_T"])
         agent.step({"tv_mode_effective": "FULL_DASHBOARD"})
-        self.assertIn(("min",), ops.calls)
-        self.assertEqual(ops.calls[-1], ("hk", False))                          # no hotkeys when minimized
+        self.assertIn(("back",), ops.calls)                                     # behind the dashboard,
+        self.assertNotIn(("min",), ops.calls)                                   # never minimized (pauses video)
+        self.assertEqual(ops.calls[-1], ("hk", False))                          # no hotkeys in FULL_DASHBOARD
 
 
 if __name__ == "__main__":

@@ -720,30 +720,39 @@ The server log is in `data\server.log`. Details of the individual parts:
      mode is shown – you can click the dashboard to give it the keyboard
      without hiding the video;
    * it **follows the TV mode**: RACE_VIEW → 1280×720 slot, VIDEO_FOCUS →
-     1920×990, FULL_DASHBOARD → VOYO minimized (sound keeps playing), back
-     again on the next mode change. Positions are computed for your screen
+     1920×990, FULL_DASHBOARD → VOYO sent **behind** the dashboard (never
+     minimized: a minimized window is a hidden page, and the browser pauses
+     muted / video-only playback there – some players pause themselves), back
+     on top on the next mode change. Positions are computed for your screen
      resolution and Windows scaling; the window's title bar is pushed just above
      the slot (`--titlebar 32`, use a different value if a strip of it remains
      visible or the video is cut, `0` to keep it);
    * while the **VOYO window has the keyboard focus**, the keys
      `T, H, I, A, 1–5, ↑, ↓, S, R, D, =, −` are forwarded to the dashboard (e.g.
      T switches the TV mode, S sets a sync mark). ←/→, Space, F, M etc. stay with VOYO's player. The keys are only
-     captured while VOYO is in the foreground – every other program keeps them.
-     Change the list with `--hotkeys`.
+     captured while VOYO is in the foreground – every other program keeps them –
+     and **not while a text field of the VOYO page has the focus** (login, PIN,
+     search: the keys go to VOYO). Change the list with `--hotkeys`.
    * the **Windows taskbar is hidden** while the agent runs (Windows would show
      it whenever the VOYO window is active) and shown again when the agent
      stops (Ctrl+C or closing its console). `--keep-taskbar` disables this;
      `python tools/tv_launcher.py --restore-taskbar` brings it back if the agent
      was killed.
    * it reads VOYO's **playback clock** for the sync (§9b); `--no-clock` disables it.
+     The console also shows when the VOYO page is hidden or VOYO's player reports
+     its own media error (login / subscription / region / browser DRM support –
+     those are VOYO's checks, the dashboard never touches them).
+   * the server's VOYO reachability check is only informational in window mode:
+     a request from the server (no browser login, no cookies) may be refused by
+     the site while the VOYO window plays normally, so it never hides the window.
    The first time, log in to VOYO in its window and open the F1 live stream; the
    login is kept. If the windows are already open, run `python tools/tv_launcher.py --attach`.
 4. Play/pause, volume and seeking are done in VOYO's player itself.
 5. You can also control everything with the IR remote, or from your phone:
    **`http://<server-ip>:8080/remote`**.
 
-Windows: full support. Linux/X11: placement and always-on-top via `wmctrl`
-(+ `xdotool` for minimizing), no key forwarding. macOS: launcher only.
+Windows: full support. Linux/X11: placement and always-on-top via `wmctrl`,
+no key forwarding. macOS: launcher only.
 
 Alternative: in the VOYO page use the browser's **Picture-in-Picture** (Edge/
 Chrome media controls, if VOYO's player permits it) and drag the PiP window over
