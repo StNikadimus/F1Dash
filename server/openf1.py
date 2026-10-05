@@ -159,6 +159,11 @@ class RefEvents:
     start_src: dict[float, str] = field(default_factory=dict)
     approx_starts: set = field(default_factory=set)
     parse_errors: int = 0                                   # start / status messages that could not be read
+    # other timestamped events for EVENT SYNC: (ms, label, precise, source) - track status changes
+    # (SessionData.StatusSeries / TrackStatus, ms) and race control messages (whole seconds)
+    events: list[tuple[float, str, bool, str]] = field(default_factory=list)
+    # raw track status points (ms, code, from StatusSeries?, source); events derived in all_events()
+    ts_points: list[tuple[float, str, bool, str]] = field(default_factory=list)
     finishes: list[float] = field(default_factory=list)     # SESSION FINISHED
     # race control messages about the START itself (delayed / postponed / suspended start
     # procedure / "FORMATION LAP WILL START AT 14:10"): (ms, message) - see start_notice()
@@ -194,6 +199,46 @@ class RefEvents:
         self.start_src[ms] = src
         if approx:
             self.approx_starts.add(ms)
+
+    def add_event(self, ms: float, label: str, precise: bool, source: str) -> None:
+        """One event; the same event from two sources (within 2.5 s) is kept once, the precise one wins."""
+        for i, (t, lab, pr, _src) in enumerate(self.events):
+            if lab == label and abs(t - ms) < 2500:
+                if precise and not pr:
+                    self.events[i] = (ms, label, True, source)
+                return
+        self.events.append((ms, label, precise, source))
+        self.events.sort(key=lambda e: e[0])
+
+    def track_status(self, ms: float, status: Any, source: str, series: bool = False) -> None:
+        """A track status (code "4" or name "SCDeployed") at ms (StatusSeries entries are change
+        records with their own Utc; the TrackStatus topic repeats states)."""
+        code = TRACK_STATUS_CODE.get(str(status), str(status))
+        if code in TRACK_STATUS_EVENT and not any(abs(t - ms) < 50 and c == code and sr == series
+                                                  for t, c, sr, _ in self.ts_points):
+            self.ts_points.append((ms, code, series, source))
+
+    def all_events(self) -> list[tuple[float, str, bool, str]]:
+        """Race control events + track status changes (time order, one per moment)."""
+        out = RefEvents()
+        for t, lab, pr, src in self.events:
+            out.add_event(t, lab, pr, src)
+        for series in (True, False):
+            pts = sorted(p for p in self.ts_points if p[2] == series)
+            prev = None
+            for t, code, _sr, src in pts:
+                # StatusSeries: every entry is a change (a clear only after something to clear);
+                # TrackStatus topic: a change of the repeated state (the first state is none)
+                change = (code != "1" or prev not in (None, "1")) if series else (prev is not None and code != prev)
+                prev = code
+                if change:
+                    out.add_event(t, TRACK_STATUS_EVENT[code], True, src)
+        return out.events
+
+    def race_control(self, ms: float, message: str, category: Any) -> None:
+        label = rc_event_label(message, category)
+        if label:
+            self.add_event(ms, label, False, "RaceControlMessages")
 
     def add_notice(self, ms: float, text: str) -> None:
         if start_notice(text) and not any(abs(t - ms) < 1000 and m == text for t, m in self.notices):
@@ -280,6 +325,52 @@ def status_series_starts(series: Any) -> list[tuple[Optional[float], str]]:
     return out
 
 
+# track status -> event label (TrackStatus "Status" codes and SessionData.StatusSeries names)
+TRACK_STATUS_CODE = {"AllClear": "1", "Yellow": "2", "SCDeployed": "4", "Red": "5", "VSCDeployed": "6",
+                     "VSCEnding": "7"}
+TRACK_STATUS_EVENT = {"1": "TRACK CLEAR", "2": "TRACK YELLOW", "4": "SAFETY CAR DEPLOYED", "5": "RED FLAG",
+                      "6": "VSC DEPLOYED", "7": "VSC ENDING"}
+
+
+def rc_event_label(message: Any, category: Any) -> Optional[str]:
+    """Race control messages that mark a moment visible on the TV (whole-second Utc)."""
+    m, c = str(message or "").upper(), str(category or "").upper()
+    if "VIRTUAL SAFETY CAR DEPLOYED" in m:
+        return "VSC DEPLOYED"
+    if "VIRTUAL SAFETY CAR ENDING" in m:
+        return "VSC ENDING"
+    if "SAFETY CAR DEPLOYED" in m:
+        return "SAFETY CAR DEPLOYED"
+    if "SAFETY CAR IN THIS LAP" in m:
+        return "SAFETY CAR ENDING"
+    if m.startswith("GREEN LIGHT - PIT EXIT OPEN"):
+        return "PIT EXIT OPEN"
+    if m.startswith("PIT EXIT CLOSED"):
+        return "PIT EXIT CLOSED"
+    if m == "RED FLAG" or (c == "FLAG" and m.startswith("RED FLAG")):
+        return "RED FLAG"
+    if m.startswith("CHEQUERED FLAG"):
+        return "CHEQUERED FLAG"
+    if m == "TRACK CLEAR":
+        return "TRACK CLEAR"
+    if "SESSION SUSPENDED" in m:
+        return "SESSION SUSPENDED"
+    if "SESSION RESUMED" in m:
+        return "SESSION RESUMED"
+    return None
+
+
+def status_series_track(series: Any) -> list[tuple[Optional[float], str]]:
+    """SessionData.StatusSeries TrackStatus entries -> [(utc ms or None, status name)]."""
+    out = []
+    items = series.values() if isinstance(series, dict) else series if isinstance(series, list) else []
+    for e in items:
+        if isinstance(e, dict) and isinstance(e.get("TrackStatus"), str):
+            u = parse_utc(e.get("Utc")) if e.get("Utc") else None
+            out.append((u.timestamp() * 1000 if u else None, e["TrackStatus"]))
+    return out
+
+
 def merge_refs(primary: Optional[RefEvents], other: Optional[RefEvents]) -> RefEvents:
     """OpenF1 + F1 archive: lap crossings from the primary (OpenF1) when it has them, start /
     finish / start-delay notices from both - one missing source never hides the other's events."""
@@ -297,6 +388,9 @@ def merge_refs(primary: Optional[RefEvents], other: Optional[RefEvents]) -> RefE
                 out.finishes.append(t)
         for t, m in ref.notices:
             out.add_notice(t, m)
+        for t, lab, pr, src in ref.events:
+            out.add_event(t, lab, pr, src)
+        out.ts_points += [p for p in ref.ts_points if p not in out.ts_points]
         out.parse_errors += ref.parse_errors
     out.finishes.sort()
     out.timeline = primary.timeline or other.timeline
@@ -330,7 +424,10 @@ def ref_events_from_openf1(laps: list[dict], race_control: list[dict]) -> RefEve
             continue
         if rc.get("category") != "SessionStatus":
             ev.add_notice(t.timestamp() * 1000, msg)
+            ev.race_control(t.timestamp() * 1000, msg, rc.get("category"))
             continue
+        if "SESSION SUSPENDED" in msg or "SESSION ABORTED" in msg:
+            ev.add_event(t.timestamp() * 1000, "SESSION SUSPENDED", True, "OpenF1 race_control")
         if "SESSION STARTED" in msg or "SESSION RESUMED" in msg:
             ev.add_start(t.timestamp() * 1000, "OpenF1 race_control " + msg)
         elif "SESSION FINISHED" in msg:

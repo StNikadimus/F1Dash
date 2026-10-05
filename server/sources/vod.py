@@ -29,7 +29,7 @@ import httpx
 
 from ..feedstate import FeedState
 from ..openf1 import (ClockStart, OpenF1Client, OpenF1Error, RefEvents, merge_refs, ref_events_from_openf1,
-                      status_series_starts)
+                      status_series_starts, status_series_track)
 from ..telemetry import parse_utc
 from .base import Sink, Source
 from .f1_live import _local_to_utc
@@ -139,6 +139,13 @@ def ref_events_from_archive(events: list[Event]) -> RefEvents:
                     ev.add_start(u, "SessionData.StatusSeries")
                 elif st == "Finished" and not any(abs(x - u) < 2500 for x in ev.finishes):
                     ev.finishes.append(u)
+                elif st == "Aborted":
+                    ev.add_event(u, "SESSION SUSPENDED", True, "SessionData.StatusSeries")
+            for u, ts in status_series_track(d.get("StatusSeries")):
+                if u is not None:
+                    ev.track_status(u, ts, "SessionData.StatusSeries", series=True)
+        elif e.topic == "TrackStatus" and d.get("Status") is not None:
+            ev.track_status(_ms(e), d.get("Status"), "TrackStatus")
         elif e.topic == "ExtrapolatedClock":
             from ..telemetry import parse_utc
             u = parse_utc(d.get("Utc")) if d.get("Utc") else None
@@ -149,7 +156,11 @@ def ref_events_from_archive(events: list[Event]) -> RefEvents:
             msgs = d.get("Messages")
             for m in (msgs.values() if isinstance(msgs, dict) else msgs if isinstance(msgs, list) else []):
                 if isinstance(m, dict) and isinstance(m.get("Message"), str):
-                    ev.add_notice(_ms(e), m["Message"].upper())
+                    from ..telemetry import parse_utc
+                    u = parse_utc(m.get("Utc")) if m.get("Utc") else None
+                    t = u.timestamp() * 1000 if u else _ms(e)
+                    ev.add_notice(t, m["Message"].upper())
+                    ev.race_control(t, m["Message"], m.get("Category"))
         elif e.topic in ("TimingData", "TimingDataF1") and isinstance(d.get("Lines"), dict):
             for num, line in d["Lines"].items():
                 if not isinstance(line, dict) or "NumberOfLaps" not in line:
@@ -160,7 +171,9 @@ def ref_events_from_archive(events: list[Event]) -> RefEvents:
                     continue
                 prev = laps.get(num)
                 laps[num] = max(n, prev or 0)
-                if prev is not None and n > prev and not line.get("InPit") and not line.get("PitOut"):
+                # the first completed lap: the count appears with 1 (0 -> 1 is not sent)
+                first_lap = prev is None and n == 1 and not d.get("_kf") and not getattr(e, "snap", False)
+                if ((prev is not None and n > prev) or first_lap) and not line.get("InPit") and not line.get("PitOut"):
                     ev.add_crossing(num, _ms(e), n)
     ev.finishes.sort()
     return ev

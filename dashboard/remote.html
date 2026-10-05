@@ -147,6 +147,7 @@
       <div class="g g2">
         <button data-c="SYNC_STREAM_START">MARK STREAM START<small>VOYO AT 0:00 (STREAM BEGINNING)</small></button>
         <button data-c="SYNC_STREAM_RESET">RESET STREAM START</button>
+        <button data-c="SYNC_EVENT_MENU">EVENT SYNC<small>ON TV · ▲▼ OK BACK</small></button>
       </div>
       <div class="info" id="syncinfo"></div>
       <div class="info" id="startinfo"></div>
@@ -306,6 +307,14 @@
         (ss.actualAtVideo !== null && ss.actualAtVideo !== undefined ? ` · actual start at <b>${sg(ss.actualAtVideo)}</b>` : "") +
         ` · CONFIDENCE <b>${esc(ss.confidence || "—")}</b>` : `STREAM START <b>0:00 SET</b> · ${esc(ss.reason || "")}`) : "",
     ].filter(Boolean).join(" · ") : "";
+    const es = y.eventSync, ui2 = R.ui || {};
+    if (es && ui2.sync_events) {
+      const cur = (es.events || []).find((e) => e.id === es.sel);
+      const npts = (es.points || []).filter((p) => p.state !== "replaced").length;
+      const nout = (es.points || []).filter((p) => p.state === "outlier").length;
+      $("startinfo").innerHTML += `<br>EVENT SYNC ▶ <b>${cur ? esc(cur.label) + " " + esc((cur.utc || "").slice(0, 8)) : "—"}</b>` +
+        ` · ${npts} point(s)${nout ? ` · <b style="color:var(--amber)">${nout} outlier</b>` : ""} · ▲▼ select · OK = SET · BACK`;
+    }
     const lo = y.lightsOut, ll = lo && lo.last;
     const hm = (u) => u ? esc(String(u).slice(0, 8)) : "—";
     if (lo) $("startinfo").innerHTML += "<br>" + (ll && ll.found ?

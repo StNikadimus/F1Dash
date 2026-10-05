@@ -64,7 +64,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Optional
 
-from .openf1 import ClockStart, RefEvents, announced_start_ms, status_series_starts
+from .openf1 import ClockStart, RefEvents, announced_start_ms, status_series_starts, status_series_track
 from .session_phases import SessionTimeline, build_timeline, fmt_clock, session_kind
 from .telemetry import parse_utc
 
@@ -310,7 +310,7 @@ class FeedRefCollector:
             self._tl_key = data.get("Key")
         if topic in self.TIMELINE_TOPICS and len(self._small) < 100_000:
             self._small.append((float(event_ms), topic, data))
-        if topic in ("SessionStatus", "SessionData", "ExtrapolatedClock", "RaceControlMessages"):
+        if topic in ("SessionStatus", "SessionData", "ExtrapolatedClock", "RaceControlMessages", "TrackStatus"):
             self.seen[topic] = self.seen.get(topic, 0) + 1
         if topic == "ExtrapolatedClock":
             # fallback only (whole seconds): the clock starts running at the start
@@ -325,7 +325,12 @@ class FeedRefCollector:
             for m in (msgs.values() if isinstance(msgs, dict) else msgs if isinstance(msgs, list) else []):
                 if isinstance(m, dict) and isinstance(m.get("Message"), str):
                     u = parse_utc(m.get("Utc")) if m.get("Utc") else None
-                    self.ref.add_notice(u.timestamp() * 1000 if u else float(event_ms), m["Message"].upper())
+                    t = u.timestamp() * 1000 if u else float(event_ms)
+                    self.ref.add_notice(t, m["Message"].upper())
+                    self.ref.race_control(t, m["Message"], m.get("Category"))
+            return
+        if topic == "TrackStatus" and data.get("Status") is not None:
+            self.ref.track_status(float(event_ms), data.get("Status"), "TrackStatus")
             return
         if topic == "SessionData" and isinstance(data.get("StatusSeries"), (dict, list)):
             # status history with its own Utc (also in the snapshot): the start is known even
@@ -337,6 +342,11 @@ class FeedRefCollector:
                     self.ref.add_start(u, "SessionData.StatusSeries")
                 elif st == "Finished" and not any(abs(t - u) < 2500 for t in self.ref.finishes):
                     self.ref.finishes.append(u)
+                elif st == "Aborted":
+                    self.ref.add_event(u, "SESSION SUSPENDED", True, "SessionData.StatusSeries")
+            for u, ts in status_series_track(data["StatusSeries"]):
+                if u is not None:
+                    self.ref.track_status(u, ts, "SessionData.StatusSeries", series=True)
             return
         if topic == "SessionStatus" and not snapshot:
             if data.get("Status") == "Started":
@@ -355,7 +365,11 @@ class FeedRefCollector:
                 continue
             prev = self.laps.get(str(num))
             self.laps[str(num)] = max(n, prev or 0)
-            if snapshot or data.get("_kf") or prev is None or n <= prev or d.get("InPit") or d.get("PitOut"):
+            # the lap count of a car appears with its first completed lap (0 -> 1 is not sent): a
+            # first value of 1 in a live message is that crossing
+            first_lap = prev is None and n == 1
+            if snapshot or data.get("_kf") or (prev is None and not first_lap) or (prev is not None and n <= prev) \
+                    or d.get("InPit") or d.get("PitOut"):
                 continue            # snapshots / the TimingDataF1 twin / pit lane are no crossings on track
             self.ref.add_crossing(str(num), float(event_ms), n)
 
@@ -364,12 +378,13 @@ class FeedRefCollector:
 # Anchors and the mapping
 # ---------------------------------------------------------------------------
 CONFIDENCES = ("HIGH", "MEDIUM", "LOW", "MANUAL", "UNSYNCED")
-EVENT_KINDS = ("lap", "start", "finish", "marker", "stream")   # matched to OpenF1 / feed / timing clock timestamps (ms)
+EVENT_KINDS = ("lap", "start", "finish", "marker", "stream", "event")   # matched to OpenF1 / feed / timing clock timestamps (ms)
 METHOD_LABEL = {"lap": "Line crossing (event anchor)", "start": "Session start (event anchor)",
                 "finish": "Session finish (event anchor)", "countdown": "VOYO Countdown",
                 "exact": "Manual Exact Time", "pin": "Manual pin", "estimate": "Session Start Estimate",
                 "marker": "Phase marker", "clock": "Session clock",
-                "stream": "Stream start mark (actual F1 start)"}
+                "stream": "Stream start mark (actual F1 start)", "event": "Event sync (ms timestamp)",
+                "rcm": "Event sync (race control, whole seconds)"}
 CLASS_ORDER = ("event", "clock", "countdown", "exact")      # most precise kind of anchor first
 
 
@@ -392,11 +407,12 @@ class Anchor:
     paused: bool = False           # video was paused on the event (no reaction time)
     status: str = ""               # history only: replaced | rejected
     label: str = ""                # method as the user reads it: "Q2 Time Remaining", "Q2 END Marker"
+    event_id: str = ""             # EVENT SYNC: the catalog event this point was set on
 
     def to_json(self) -> dict:
         return {k: getattr(self, k) for k in ("kind", "offset", "f1_ms", "video_time", "wall", "driver", "lap",
                                                 "grounded", "ambiguous", "ref_source", "error", "detail", "paused",
-                                                "status", "label")}
+                                                "status", "label", "event_id")}
 
     def group(self) -> tuple:
         """Anchors from the same user action / the same source are not independent:
@@ -404,6 +420,8 @@ class Anchor:
         the countdown graphic's bias; all typed times share your reading."""
         if self.kind in EVENT_KINDS:
             return ("event", round(self.f1_ms / 10))
+        if self.kind == "rcm":                       # race control events: each one is its own moment,
+            return ("clock", round(self.f1_ms / 10))  # but only whole seconds -> the less precise class
         return (self.kind,)
 
     def nominal(self) -> Optional[tuple[float, float]]:
@@ -412,8 +430,8 @@ class Anchor:
             return (0.1, 0.3) if self.paused else (0.2, 0.5)       # press reaction; ms timestamps
         if self.kind == "countdown":
             return (1.0, 2.0)                                       # whole seconds + graphic lag
-        if self.kind == "clock":
-            return (0.5, 1.0)                                       # the TV clock shows whole seconds
+        if self.kind in ("clock", "rcm"):
+            return (0.5, 1.0)                                       # whole seconds (TV clock / race control Utc)
         if self.kind == "exact":
             return (0.5, 1.0)
         return None
@@ -596,6 +614,7 @@ class SyncManager:
         self._clock_lost_logged = False
         self.origin: Optional[dict] = None           # START OF STREAM: VOYO 0:00 of this session + video
         self.lights_out: Optional[dict] = None       # last LIGHTS OUT (L) result: matched event or why not
+        self.event_sel: Optional[str] = None         # EVENT SYNC: selected event id (remote UP / DOWN)
         self._start_key: Optional[tuple] = None      # last logged start state
         self._solve()
 
@@ -619,6 +638,7 @@ class SyncManager:
             self.history = []
             self.origin = None
             self.lights_out = None
+            self.event_sel = None
             self._start_key = None
             self.pending = None
             self.deviation_note = None
@@ -1050,6 +1070,177 @@ class SyncManager:
                 log.info("[SYNC] Detected race delay: %s (actual start - scheduled start)%s",
                          fmt_signed(info["f1_delay"]),
                          " - the scheduled start is ignored as the race-time anchor" if info["delayed"] else "")
+
+    # ------------------------------------------------------------------ EVENT SYNC
+    # The SYNC menu's EVENT SYNC sub-menu: the real, timestamped F1 events of this session; SET
+    # matches one to the current VOYO position. Every point is an ordinary anchor of the existing
+    # solver (median, outlier rejection, confidence classes, saved per session + video).
+    def event_catalog(self) -> list[dict]:
+        ref = self.ref
+        if ref is None or not self.session:
+            return []
+        sess = self.session or {}
+        race = session_kind(sess.get("session_type"), sess.get("session_name")) == "race"
+        info = self.start_info(None)
+        out: list[dict] = []
+
+        def add(kind, ms, label, precise, source, incident, **kw):
+            if any(e["label"] == label and abs(e["ms"] - ms) < 2500 for e in out):
+                return                                           # same moment from another source
+            out.append({"id": f"{kind[0]}{int(ms)}", "kind": kind, "ms": ms, "label": label, "precise": precise,
+                        "source": source, "incident": incident, **kw})
+        for i, t in enumerate(sorted(ref.starts)):
+            first = t == info["actual"] or (info["actual"] is None and i == 0)
+            label = ("LIGHTS OUT" if first else "RESTART") if race else ("SESSION START" if first else "SESSION RESUMED")
+            add("start", t, label, t not in ref.approx_starts, ref.start_src.get(t, ref.source), not first)
+        if race:
+            # the leader starting lap n+1 = the first car crossing the line with n laps completed
+            first_by_lap: dict[int, tuple[float, str]] = {}
+            for num, lst in ref.crossings.items():
+                for t, lap in lst:
+                    if lap is not None and (lap not in first_by_lap or t < first_by_lap[lap][0]):
+                        first_by_lap[lap] = (t, num)
+            last = max(first_by_lap) if first_by_lap else None
+            for lap, (t, num) in sorted(first_by_lap.items()):
+                if lap == last and ref.finishes:
+                    continue                                     # the leader's finish = the chequered flag
+                add("lap", t, f"LAP {lap + 1}", True, f"line crossing #{num}", False, driver=num, lap=lap)
+        for t in ref.finishes:
+            add("finish", t, "CHEQUERED FLAG" if race else "SESSION END", True, "SessionStatus Finished", True)
+        for t, label, precise, source in ref.all_events():
+            add("event" if precise else "rcm", t, label, precise, source,
+                label not in ("PIT EXIT OPEN", "PIT EXIT CLOSED"))
+        tl = self.timeline()
+        for mk in (tl.markers if tl is not None else []):
+            if mk.sync:
+                add("marker", mk.ms, mk.label, True, "F1 timing clock", mk.kind != "start")
+        out.sort(key=lambda e: e["ms"])
+        return out
+
+    def _shown_ms(self) -> Optional[float]:
+        t = self._last_target
+        return t if t is not None and math.isfinite(t) else None
+
+    def event_menu(self) -> list[dict]:
+        """What the sub-menu lists: structural events always; race incidents (safety car, red flag,
+        chequered flag ...) only once the synchronised video has reached them - no spoilers."""
+        synced = self.mapping.confidence in ("HIGH", "MEDIUM", "MANUAL") and self.mapping.offset is not None
+        shown = self._shown_ms()
+        return [e for e in self.event_catalog()
+                if not e["incident"] or (synced and shown is not None and e["ms"] <= shown + 10_000)]
+
+    def event_select(self, delta: int) -> str:
+        lst = self.event_menu()
+        if not lst:
+            return "EVENT SYNC: no timestamped F1 events for this session yet"
+        ids = [e["id"] for e in lst]
+        if self.event_sel not in ids:
+            # start near the moment the video shows (or the first event)
+            shown = self._shown_ms()
+            i = min(range(len(lst)), key=lambda k: abs(lst[k]["ms"] - shown)) if shown is not None else 0
+        else:
+            i = (ids.index(self.event_sel) + delta) % len(ids)
+        self.event_sel = ids[i]
+        e = lst[i]
+        return f"EVENT SYNC ▶ {e['label']} · {utc_str(e['ms'])[:8]} UTC"
+
+    def event_set(self, mono: float, src_now_ms: float, event_id: Optional[str] = None) -> str:
+        """SET: the video shows the selected F1 event now -> one sync point (an anchor)."""
+        err = self._need_clock(mono)
+        if err:
+            return err
+        eid = event_id or self.event_sel
+        ev = next((e for e in self.event_catalog() if e["id"] == eid), None)
+        if ev is None:
+            return "SYNC: choose an event first (EVENT SYNC list)" if not eid else \
+                "SYNC: that event is not in this session's F1 data"
+        self.event_sel = ev["id"]
+        video, pb, press_b = self._now_point(mono, src_now_ms, reaction=True)
+        ms = ev["ms"]
+        offset = ms / 1000 - pb if video else (press_b - ms) / 1000
+        kind = {"start": "start" if ev["precise"] else "clock", "lap": "lap", "finish": "finish",
+                "marker": "marker", "event": "event", "rcm": "rcm"}[ev["kind"]]
+        for x in self.anchors:                                 # the same event set again: replaced
+            if x.event_id == ev["id"]:
+                x.status = "replaced"
+                self.history.append(x)
+        del self.history[:-30]
+        self.anchors = [x for x in self.anchors if x.event_id != ev["id"]]
+        a = Anchor(kind, offset, ms, pb, time.time(), ev.get("driver"), ev.get("lap"), True, False, False,
+                   ev["source"], error=self.anchor_error if ev["precise"] else 1.0,
+                   paused=bool(video and self.clock.last and self.clock.last.paused), label=ev["label"],
+                   detail=f"{ev['label']} {utc_str(ms)} UTC ({ev['source']})", event_id=ev["id"])
+        m = self._add(a, force=True)                           # every point is kept; the solver weighs it
+        dev = self._shift(video, a.offset, m.offset) if m.offset is not None else 0.0
+        log.info("[SYNC] Event sync point: %s F1 %s UTC (%s) <-> VOYO %s -> %s, %d point(s)", ev["label"],
+                 utc_str(ms), ev["source"], "no VOYO clock" if pb is None else f"{pb:.3f} s",
+                 "OUTLIER %+.2f s" % dev if a.outlier else f"deviation {dev:+.2f} s", len(self.anchors))
+        log.info("[SYNC] Combined sync: %s (%s)", m.confidence, m.reason)
+        vid = f" ↔ VOYO {fmt_hms(pb)}.{int(round((pb % 1) * 1000)):03d}" if pb is not None else ""
+        head = f"EVENT SYNC {ev['label']} ✓ F1 {utc_str(ms)[:12]}{vid}"
+        if a.outlier:
+            head += f" · OUTLIER ({dev:+.2f} s from the other points)"
+        return self._anchor_result(m, a, head)
+
+    def remove_point(self, point_id: str) -> str:
+        """Remove one sync point (any anchor) by its id."""
+        hit = [x for x in self.anchors if self._point_id(x) == str(point_id)]
+        if not hit:
+            return "SYNC: that sync point no longer exists"
+        for x in hit:
+            x.status = "removed"
+            self.history.append(x)
+        del self.history[:-30]
+        self.anchors = [x for x in self.anchors if x not in hit]
+        self.pending = None
+        m = self._solve()
+        self.K = m.offset
+        self._pending_jump = True
+        self._save_asset()
+        log.info("[SYNC] Sync point removed: %s", hit[0].label or hit[0].kind)
+        return self._result(m, f"REMOVED {hit[0].label or hit[0].kind}")
+
+    def clear_event_points(self) -> str:
+        """CLEAR EVENT SYNC POINTS: only the Event Sync points of this session + video (the stream start
+        and the other anchors stay)."""
+        pts = [x for x in self.anchors if x.event_id]
+        if not pts:
+            return "SYNC: no event sync points to clear"
+        for x in pts:
+            x.status = "replaced"
+            self.history.append(x)
+        del self.history[:-30]
+        self.anchors = [x for x in self.anchors if not x.event_id]
+        self.pending = None
+        m = self._solve()
+        self.K = m.offset
+        self._pending_jump = True
+        self._save_asset()
+        log.info("[SYNC] %d event sync point(s) cleared (stream start %s)", len(pts),
+                 "kept" if self.origin is not None else "not set")
+        return self._result(m, f"EVENT SYNC POINTS CLEARED ({len(pts)})")
+
+    @staticmethod
+    def _point_id(a: Anchor) -> str:
+        return str(int(round(a.wall * 1000)))
+
+    def _event_state(self, m: Mapping, start: Optional[float], src_now_ms: float) -> dict:
+        menu = self.event_menu()
+        hidden = len(self.event_catalog()) - len(menu)
+        rows = []
+        for a in self.anchors[-20:]:
+            r = self._anchor_row(a, m, start)
+            r.update(id=self._point_id(a), eventId=a.event_id or None, f1Utc=utc_str(a.f1_ms),
+                     videoTime=None if a.video_time is None else round(a.video_time, 3))
+            rows.append(r)
+        cur = None
+        if m.offset is not None and (self.vod or self.active == "VOYO") and m.confidence != "LIVE":
+            cur = {"videoZeroUtc": utc_str(m.offset * 1000)}
+        return {"events": [{k: e.get(k) for k in ("id", "label", "precise", "source", "incident")}
+                           | {"utc": utc_str(e["ms"])} for e in menu],
+                "hiddenIncidents": hidden, "sel": self.event_sel, "points": rows, "current": cur,
+                "reason": None if menu else (self._lights_out_missing(src_now_ms)[1] if self.session else
+                                             "F1 session not identified")}
 
     # ------------------------------------------------------------------ LIGHTS OUT (L)
     def _checked_topics(self) -> str:
@@ -2019,6 +2210,7 @@ class SyncManager:
                 "actualStartVideo": actual_video},
             "streamDelaySeconds": None if stream_delay is None else round(stream_delay, 1),
             "lightsOut": self._lights_out_state(src_now_ms),
+            "eventSync": self._event_state(m, start, src_now_ms),
             # START OF STREAM: VOYO 0:00 and the F1 time of it (or why it is not known)
             "streamStart": None if o is None else {
                 "set": True, "videoTime": round(float(o.get("video_time") or 0.0), 2),
@@ -2104,7 +2296,7 @@ class SyncManager:
         label = a.label or {"lap": f"S lap {a.lap}" if a.lap is not None else "S", "start": "L", "finish": "Finish",
                             "stream": "Stream start",
                             "countdown": "Countdown", "exact": "Exact time", "pin": "Pin"}.get(a.kind, a.kind)
-        return {"kind": a.kind, "label": label, "method": METHOD_LABEL.get(a.kind, a.kind),
+        return {"kind": a.kind, "label": label, "method": METHOD_LABEL.get(a.kind, a.kind), "precise": a.kind != "rcm",
                 "text": self._anchor_text(a), "driver": a.driver, "lap": a.lap, "state": state,
                 "restored": a.restored, "paused": a.paused, "ref": a.ref_source,
                 "offset": self._disp(a.offset, start), "residual": shift}

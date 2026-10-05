@@ -424,7 +424,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     SYNC_ACTIONS = {"capture": None, "countdown": "countdown", "exact": "f1_time", "auto": None,
                     "estimate": "lead_seconds", "clear": None, "keep_old": None, "use_new": None,
                     "resync": None, "select_session": "session_key", "clock": "clock", "marker": "marker",
-                    "stream_start": None, "stream_reset": None}
+                    "stream_start": None, "stream_reset": None,
+                    "event_set": "id", "event_remove": "id", "event_clear": None}
 
     async def api_media_catalog(request: Request) -> Response:
         """SELECT SESSION: Grands Prix + sessions of a season (public data, read-only)."""

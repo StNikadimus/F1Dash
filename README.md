@@ -898,6 +898,20 @@ Alone it is **HIGH**; with other anchors it counts twice in the median. The menu
 yet, not in the historical data, VOD timing unavailable, unknown / wrong session, unreadable
 messages); the log has `[SYNC] Looking for Lights Out event …` lines.
 
+**EVENT SYNC** (SYNC menu → *Event Sync*; also the phone's EVENT SYNC button) opens a sub-menu
+with the real, timestamped F1 events of the session: LIGHTS OUT / SESSION START, every LAP n
+(the leader crossing the line), PIT EXIT OPEN / CLOSED, TRACK YELLOW, SAFETY CAR DEPLOYED /
+ENDING, VSC, RED FLAG, SESSION SUSPENDED, RESTART, TRACK CLEAR, CHEQUERED FLAG, qualifying /
+practice phase markers – only what the session's data actually contains (no 5 / 3 / 1 minute or
+formation lap: the F1 data has no such event). Move VOYO to the moment (pause on it) and SET;
+repeat with more events. Each point is an anchor of the sync above: median, outlier rejection
+(a wrong point is marked ⚠ OUTLIER and kept, not used), confidence by precision (millisecond
+events vs race-control messages with whole-second times, marked ±1 s), saved per session +
+video. Remove single points (✕) or CLEAR EVENT SYNC POINTS (the stream start stays).
+↑ / ↓ select, OK / Enter SET, BACK / Backspace back – the TV remote and the phone d-pad work in
+the sub-menu. Race incidents are listed only once the synchronised video reaches them (no
+spoilers). Nothing of it appears outside the SYNC menu.
+
 Precise **event anchors** without typing (any time, also to verify):
 `L` / BLUE = lights out / the session clock starts; `S` / RED = the selected
 car (or the leader) crosses the line. The press is matched automatically to
