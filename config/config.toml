@@ -362,6 +362,9 @@ outlier_seconds = 1.0              # with >= 3 anchors: further than this from t
 # sessions after start_delay_threshold_seconds - or when race control announces a delay.
 race_start_grace_seconds = 360
 start_delay_threshold_seconds = 60
+# LIVE: when the race start is due but the primary connection (F1 TV) has no exact lights out, open
+# a second, minimal connection to the PUBLIC F1 SignalR live timing feed for it (server/lights_out_probe.py)
+lights_out_public_fallback = true
 # MARK STREAM START (VOYO at the absolute beginning of the stream, 0:00) is accepted only when the
 # VOYO position is at most this far from 0:00
 stream_start_tolerance_seconds = 2.0

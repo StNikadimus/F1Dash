@@ -158,6 +158,9 @@ class RefEvents:
     # race_control", "ExtrapolatedClock ±1 s"); starts derived from the session clock are approx
     start_src: dict[float, str] = field(default_factory=dict)
     approx_starts: set = field(default_factory=set)
+    # every report of a start: (ms, "<source family> · <topic>", approx). ``starts`` is derived from
+    # it - one per start, the most authoritative report's time (server/lights_out.py)
+    start_obs: list = field(default_factory=list)
     parse_errors: int = 0                                   # start / status messages that could not be read
     # other timestamped events for EVENT SYNC: (ms, label, precise, source) - track status changes
     # (SessionData.StatusSeries / TrackStatus, ms) and race control messages (whole seconds)
@@ -182,23 +185,24 @@ class RefEvents:
         return not self.crossings and not self.starts and not self.finishes
 
     def add_start(self, ms: float, src: str, approx: bool = False) -> None:
-        """One start event (dedup: the same start from several topics is one start; an exact
-        timestamp replaces one derived from the session clock)."""
-        for t in list(self.starts):
-            if abs(t - ms) < 2500:
-                if t in self.approx_starts and not approx:
-                    self.starts.remove(t)
-                    self.approx_starts.discard(t)
-                    self.start_src.pop(t, None)
-                    break
-                return
-        if approx and any(t not in self.approx_starts and abs(t - ms) < 120_000 for t in self.starts):
-            return                                      # an exact start nearby is known
-        self.starts.append(ms)
-        self.starts.sort()
-        self.start_src[ms] = src
-        if approx:
-            self.approx_starts.add(ms)
+        """One report of a start. Reports of the same start (several topics / sources, a reconnect
+        snapshot repeating it) are one start; its time comes from the most authoritative report."""
+        from .lights_out import family
+        fam = family(src)
+        if any(abs(o[0] - ms) < 50 and family(o[1]) == fam and o[2] == approx for o in self.start_obs):
+            return                                      # the same report again (e.g. after a reconnect)
+        self.start_obs.append((float(ms), src, bool(approx)))
+        self._derive_starts()
+
+    def _derive_starts(self) -> None:
+        from .lights_out import best, clusters
+        self.starts, self.start_src, self.approx_starts = [], {}, set()
+        for c in clusters(self.start_obs):
+            t, src, approx = best(c)
+            self.starts.append(t)
+            self.start_src[t] = src
+            if approx:
+                self.approx_starts.add(t)
 
     def add_event(self, ms: float, label: str, precise: bool, source: str) -> None:
         """One event; the same event from two sources (within 2.5 s) is kept once, the precise one wins."""
@@ -381,8 +385,8 @@ def merge_refs(primary: Optional[RefEvents], other: Optional[RefEvents]) -> RefE
     out = RefEvents(source=f"{primary.source}+{other.source}")
     out.crossings = primary.crossings if primary.crossings else other.crossings
     for ref in (primary, other):
-        for t in ref.starts:
-            out.add_start(t, ref.start_src.get(t, ref.source), t in ref.approx_starts)
+        for t, src, approx in ref.start_obs:
+            out.add_start(t, src, approx)
         for t in ref.finishes:
             if not any(abs(x - t) < 2500 for x in out.finishes):
                 out.finishes.append(t)
@@ -429,7 +433,7 @@ def ref_events_from_openf1(laps: list[dict], race_control: list[dict]) -> RefEve
         if "SESSION SUSPENDED" in msg or "SESSION ABORTED" in msg:
             ev.add_event(t.timestamp() * 1000, "SESSION SUSPENDED", True, "OpenF1 race_control")
         if "SESSION STARTED" in msg or "SESSION RESUMED" in msg:
-            ev.add_start(t.timestamp() * 1000, "OpenF1 race_control " + msg)
+            ev.add_start(t.timestamp() * 1000, "OpenF1 · race_control " + msg)
         elif "SESSION FINISHED" in msg:
             ev.finishes.append(t.timestamp() * 1000)
     ev.starts.sort()

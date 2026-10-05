@@ -63,6 +63,15 @@ class Engine:
         self.sync = SyncManager(sync_cfg, bool((cfg.get("voyo") or {}).get("enabled")),
                                 float(cfg["source"].get("delay_seconds", 0.0)), source.speed,
                                 DATA_DIR / "sync_calibration.json", vod=self.vod)
+        # source family of the feed's LIGHTS OUT reports (server/lights_out.py): the live socket is
+        # "F1 TV timing" while authenticated, else the public "F1 SignalR"; a replay is the archive
+        self.sync.feed_ref.family = lambda: (
+            ("F1 TV timing" if getattr(source, "auth_mode", "ANONYMOUS") == "AUTHENTICATED" else "F1 SignalR")
+            if source.mode == "live" else "F1 archive" if source.mode == "replay" else "Simulator")
+        self._lo_probe = None                                     # public F1 SignalR LIGHTS OUT fallback
+        self._lo_check = 0.0
+        self._lo_cfg = cfg.get("live") or {}
+        self._lo_enabled = bool(sync_cfg.get("lights_out_public_fallback", True))
         self.openf1: Optional[OpenF1Client] = getattr(source, "openf1", None)
         self._detect_task: Optional[asyncio.Task] = None
         self._detected_for: Optional[str] = None
@@ -131,6 +140,9 @@ class Engine:
                   self._wx_task):
             if t is not None and not t.done():
                 t.cancel()
+        if self._lo_probe is not None and self._lo_probe.task is not None and not self._lo_probe.task.done():
+            self._lo_probe.task.cancel()
+        self._lo_probe = None
 
     # state views (the state *at the target time*)
     @property
@@ -453,6 +465,39 @@ class Engine:
         self.hub.broadcast({"type": "pos_reset"})
         self._session_id = None
         self.sync.initialize(session, ref)
+
+    async def _lights_out_fallback(self, probe_factory=None) -> None:
+        """LIVE: open the public F1 SignalR feed when the race start is due but the primary connection
+        has no exact one (F1 TV socket without it, or the socket down); close it once a start is known
+        or the session changes. Never for a recording (history: archive + OpenF1)."""
+        sm = self.sync
+        sess = sm.session or {}
+        key = sess.get("session_key")
+        probe = self._lo_probe
+        if probe is not None and (key != probe.key or self.source.mode != "live"):
+            await probe.stop("session changed")
+            self._lo_probe = probe = None
+        if self.source.mode != "live" or not self._lo_enabled or key is None:
+            return
+        from .session_phases import session_kind
+        if session_kind(sess.get("session_type"), sess.get("session_name")) != "race":
+            return
+        res = sm.lights_out_result()
+        exact = res.ok and res.confidence != "MEDIUM"
+        if exact:
+            if probe is not None:
+                await probe.stop(f"lights out known ({res.source})")
+                self._lo_probe = None
+            return
+        now_ms = self._src_now_ms()
+        info = sm.start_info(now_ms)
+        sched = info.get("scheduled")
+        due = info["state"] in ("DELAYED", "STARTED", "RUNNING") or (sched is not None and now_ms >= sched - 60_000)
+        primary_public_ok = getattr(self.source, "auth_mode", "ANONYMOUS") != "AUTHENTICATED" and \
+            self._status.get("state") == "connected"
+        if probe is None and due and not primary_public_ok:
+            from .lights_out_probe import PublicStartProbe
+            self._lo_probe = PublicStartProbe(sm, self._lo_cfg, key, probe_factory).start()
 
     def set_selected(self, num: Optional[str]) -> None:
         self._selected = num
@@ -1362,6 +1407,12 @@ class Engine:
                 self._parse_error("timeline")
             now = time.monotonic()
             self._check_feed_age(now)
+            if now - self._lo_check >= 2.0:
+                self._lo_check = now
+                try:
+                    await self._lights_out_fallback()
+                except Exception:  # noqa: BLE001 - the fallback never stops the dashboard
+                    self._parse_error("lights-out-fallback")
             if (self._dirty and now - self._last_full >= STATE_INTERVAL) or now - self._last_full > 5:
                 self._dirty = False
                 self._last_full = now

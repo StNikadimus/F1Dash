@@ -126,7 +126,7 @@ def ref_events_from_archive(events: list[Event]) -> RefEvents:
         if e.topic == "SessionStatus":
             st = d.get("Status")
             if st == "Started":
-                ev.add_start(_ms(e), "SessionStatus")
+                ev.add_start(_ms(e), "F1 archive · SessionStatus")
             elif st == "Finished" and not any(abs(x - _ms(e)) < 2500 for x in ev.finishes):
                 ev.finishes.append(_ms(e))
         elif e.topic == "SessionData" and d.get("StatusSeries") is not None:
@@ -136,7 +136,7 @@ def ref_events_from_archive(events: list[Event]) -> RefEvents:
                 if u is None:
                     ev.parse_errors += 1
                 elif st == "Started":
-                    ev.add_start(u, "SessionData.StatusSeries")
+                    ev.add_start(u, "F1 archive · SessionData.StatusSeries")
                 elif st == "Finished" and not any(abs(x - u) < 2500 for x in ev.finishes):
                     ev.finishes.append(u)
                 elif st == "Aborted":
@@ -151,7 +151,7 @@ def ref_events_from_archive(events: list[Event]) -> RefEvents:
             u = parse_utc(d.get("Utc")) if d.get("Utc") else None
             t = clock.feed(u.timestamp() * 1000 if u else _ms(e), d.get("Remaining"), d.get("Extrapolating"))
             if t is not None:
-                ev.add_start(t, "ExtrapolatedClock ±1 s", approx=True)
+                ev.add_start(t, "F1 archive · ExtrapolatedClock ±1 s", approx=True)
         elif e.topic == "RaceControlMessages":
             msgs = d.get("Messages")
             for m in (msgs.values() if isinstance(msgs, dict) else msgs if isinstance(msgs, list) else []):

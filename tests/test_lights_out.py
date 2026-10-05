@@ -43,7 +43,7 @@ class LiveLightsOutTest(unittest.TestCase):
         msg, logs = self.l_press(r)
         self.assertIn("LIGHTS OUT ✓ F1 13:00:00", msg)
         self.assertIn("HIGH", msg)
-        for line in ("[SYNC] Looking for Lights Out event", "[SYNC] Lights Out event found: 13:00:00.000 (SessionStatus)",
+        for line in ("[SYNC] Looking for Lights Out event", "[SYNC] Lights Out event found: 13:00:00.000 (F1 SignalR · SessionStatus)",
                      "[SYNC] Lights Out F1 timestamp: 13:00:00.000 UTC", "[SYNC] VOYO reference time: video",
                      "[SYNC] Calculated stream offset:", "[SYNC] Sync confidence: HIGH"):
             self.assertIn(line, logs)
@@ -59,7 +59,7 @@ class LiveLightsOutTest(unittest.TestCase):
         r.to_video_showing(SCHED + 90_000)
         msg, _ = self.l_press(r)
         self.assertIn("LIGHTS OUT ✓", msg)
-        self.assertEqual(r.state()["lightsOut"]["last"]["source"], "SessionData.StatusSeries")
+        self.assertEqual(r.state()["lightsOut"]["last"]["source"], "F1 SignalR · SessionData.StatusSeries")
         self.assertAlmostEqual(r.shown(), SCHED + 90_000, delta=50)
         # only the session clock: ±1 s fallback, never presented as exact
         c = LiveRace(self, stream_delay_s=30, start_ms=SCHED, start_via="clock")
@@ -67,7 +67,7 @@ class LiveLightsOutTest(unittest.TestCase):
         msg, _ = self.l_press(c)
         self.assertIn("LIGHTS OUT ✓", msg)
         st = c.state()
-        self.assertEqual(st["lightsOut"]["last"]["source"], "ExtrapolatedClock ±1 s")
+        self.assertEqual(st["lightsOut"]["last"]["source"], "F1 SignalR · ExtrapolatedClock ±1 s")
         self.assertEqual(st["confidence"], "MEDIUM")
         self.assertEqual(st["anchors"][0]["kind"], "clock")
         self.assertAlmostEqual(c.shown(), SCHED, delta=1100)
@@ -185,7 +185,7 @@ class VodLightsOutTest(unittest.TestCase):
         self.assertNotIn("SessionStatus", topics)                  # why it said "no data" before
         ref = ref_events_from_archive(self.events)
         self.assertEqual(ref.starts, [JP_START])
-        self.assertEqual(ref.start_src[JP_START], "SessionData.StatusSeries")
+        self.assertEqual(ref.start_src[JP_START], "F1 archive · SessionData.StatusSeries")
         self.assertEqual(len(ref.finishes), 1)
         # before the big download: the small META topics already have it
         meta = ref_events_from_archive([e for e in self.events if e.topic in META_TOPICS])
@@ -199,7 +199,7 @@ class VodLightsOutTest(unittest.TestCase):
         self.assertIn("HIGH", msg)
         self.assertAlmostEqual(s.mapping.offset, k, places=2)        # the delayed start, not the 05:00 schedule
         st = s.get_state(5.0, 0.0, None)
-        self.assertEqual(st["lightsOut"]["source"], "SessionData.StatusSeries")
+        self.assertEqual(st["lightsOut"]["source"], "F1 archive · SessionData.StatusSeries")
         self.assertIsNone(st["lightsOut"]["last"]["streamDelaySeconds"])
         self.assertAlmostEqual(st["startInfo"]["f1DelaySeconds"], 842.1, places=1)
 
