@@ -145,7 +145,7 @@
         <button data-c="SYNC_MENU">MENU<small>ON TV</small></button>
       </div>
       <div class="g g2">
-        <button data-c="SYNC_STREAM_START">MARK STREAM START<small>VIDEO SHOWS THE ACTUAL START</small></button>
+        <button data-c="SYNC_STREAM_START">MARK STREAM START<small>VOYO AT 0:00 (STREAM BEGINNING)</small></button>
         <button data-c="SYNC_STREAM_RESET">RESET STREAM START</button>
       </div>
       <div class="info" id="syncinfo"></div>
@@ -302,7 +302,9 @@
       si.f1DelaySeconds !== null && si.f1DelaySeconds !== undefined ? `F1 START DELAY <b>${sg(si.f1DelaySeconds)}</b>` : "",
       y.streamDelaySeconds !== null && y.streamDelaySeconds !== undefined ? `STREAM DELAY <b>${sg(y.streamDelaySeconds)}</b>` :
         ss && ss.streamDelaySeconds !== null && ss.streamDelaySeconds !== undefined ? `STREAM DELAY <b>${sg(ss.streamDelaySeconds)}</b>` : "",
-      ss ? (ss.pending ? "STREAM START <b>waiting for the actual start</b>" : `STREAM START <b>marked</b> · CONFIDENCE <b>${esc(y.confidence || "—")}</b>`) : "",
+      ss ? (ss.originUtc ? `STREAM START <b>0:00 SET</b> = <b>${esc(ss.originUtc.slice(0, 8))} UTC</b>` +
+        (ss.actualAtVideo !== null && ss.actualAtVideo !== undefined ? ` · actual start at <b>${sg(ss.actualAtVideo)}</b>` : "") +
+        ` · CONFIDENCE <b>${esc(ss.confidence || "—")}</b>` : `STREAM START <b>0:00 SET</b> · ${esc(ss.reason || "")}`) : "",
     ].filter(Boolean).join(" · ") : "";
     const lo = y.lightsOut, ll = lo && lo.last;
     const hm = (u) => u ? esc(String(u).slice(0, 8)) : "—";

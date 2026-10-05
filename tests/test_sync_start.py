@@ -106,7 +106,7 @@ class StartStateTest(unittest.TestCase):
         r.step(10 * 60)
         self.assertEqual(r.state()["startInfo"]["state"], "PRE_START")
         r.to_video_showing(SCHED)
-        msg = r.sync.mark_stream_start(r.mono, r.now)
+        msg = r.sync.add_event_anchor("start", r.mono, r.now, None, "START")             # lights out
         self.assertIn("STREAM DELAY +0:30", msg)
         st = r.state()
         self.assertEqual(st["confidence"], "HIGH")
@@ -149,10 +149,10 @@ class StartStateTest(unittest.TestCase):
     def test_3_stream_delayed_f1_on_time(self):
         r = LiveRace(self, stream_delay_s=4 * 60, start_ms=SCHED)
         r.to_video_showing(SCHED)
-        self.assertIn("STREAM DELAY +4:00", r.sync.mark_stream_start(r.mono, r.now))
+        self.assertIn("STREAM DELAY +4:00", r.sync.add_event_anchor("start", r.mono, r.now, None, "START"))
         st = r.state()
         self.assertEqual(st["startInfo"]["f1DelaySeconds"], 0.0)
-        self.assertAlmostEqual(st["streamStart"]["streamDelaySeconds"], 240.0, delta=0.1)
+        self.assertAlmostEqual(st["lightsOut"]["last"]["streamDelaySeconds"], 240.0, delta=0.1)
         self.assertAlmostEqual(r.shown(), SCHED, delta=50)
 
     def test_4_both_f1_and_voyo_delayed_are_not_combined(self):
@@ -162,81 +162,31 @@ class StartStateTest(unittest.TestCase):
         r.to_video_showing(SCHED + 4 * MIN)
         self.assertAlmostEqual(r.now, SCHED + 8 * MIN, delta=1)
         with self.assertLogs("sync", "INFO") as logs:
-            msg = r.sync.mark_stream_start(r.mono, r.now)
+            msg = r.sync.add_event_anchor("start", r.mono, r.now, None, "START")
         self.assertIn("STREAM DELAY +4:00", msg)                 # NOT +8:00 (vs the 15:00 schedule)
         st = r.state()
         self.assertEqual(st["startInfo"]["f1DelaySeconds"], 240.0)
-        self.assertAlmostEqual(st["streamStart"]["streamDelaySeconds"], 240.0, delta=0.1)
+        self.assertAlmostEqual(st["lightsOut"]["last"]["streamDelaySeconds"], 240.0, delta=0.1)
         self.assertAlmostEqual(st["streamDelaySeconds"], 240.0, delta=0.1)
         self.assertAlmostEqual(r.shown(), SCHED + 4 * MIN, delta=50)   # the video maps to the ACTUAL start
         text = "\n".join(logs.output)
-        for line in ("[SYNC] Stream start marked", "[SYNC] VOYO playback position:",
-                     "[SYNC] F1 actual event start: 13:04:00.000 UTC", "[SYNC] Scheduled start: 13:00:00.000 UTC",
-                     "[SYNC] Detected race delay: +4:00", "[SYNC] Calculated stream delay: +4:00",
-                     "[SYNC] Sync confidence: HIGH"):
+        for line in ("[SYNC] Looking for Lights Out event", "[SYNC] VOYO reference time:",
+                     "[SYNC] Lights Out F1 timestamp: 13:04:00.000 UTC (scheduled 13:00:00.000 UTC, race delay +4:00)",
+                     "(stream delay +4:00)", "[SYNC] Sync confidence: HIGH"):
             self.assertIn(line, text)
-
-    def test_5_mark_stream_start_and_repeat(self):
-        r = LiveRace(self, stream_delay_s=90, start_ms=SCHED)
-        r.to_video_showing(SCHED - 20_000)                       # wrong moment (20 s before the start)
-        r.sync.mark_stream_start(r.mono, r.now)
-        self.assertAlmostEqual(r.state()["streamStart"]["streamDelaySeconds"], 70.0, delta=0.1)
-        # the real start is shown 20 s later - mark again: the new mark replaces the old one
-        r.to_video_showing(SCHED)
-        msg = r.sync.mark_stream_start(r.mono, r.now)
-        self.assertIn("STREAM START", msg)
-        st = r.state()
-        self.assertEqual([a["kind"] for a in st["anchors"]], ["stream"])
-        self.assertIn("replaced", [h["state"] for h in st["history"]])
-        self.assertAlmostEqual(st["streamStart"]["streamDelaySeconds"], 90.0, delta=0.1)
-        self.assertEqual(st["confidence"], "HIGH")
-        self.assertAlmostEqual(r.shown(), SCHED, delta=50)
 
     def test_5b_reaction_time_while_playing(self):
         r = LiveRace(self, stream_delay_s=60, start_ms=SCHED, reaction=0.2)
-        r.to_video_showing(SCHED + 200, paused=False)            # pressed 0.2 s after the start was shown
-        r.sync.mark_stream_start(r.mono, r.now)
-        self.assertAlmostEqual(r.state()["streamStart"]["streamDelaySeconds"], 60.0, delta=0.1)
+        r.to_video_showing(SCHED + 200, paused=False)            # L pressed 0.2 s after lights out was shown
+        r.sync.add_event_anchor("start", r.mono, r.now, None, "START")
+        self.assertAlmostEqual(r.state()["lightsOut"]["last"]["streamDelaySeconds"], 60.0, delta=0.1)
         self.assertAlmostEqual(r.shown(), SCHED + 200, delta=60)
-
-    def test_6_reset_stream_start(self):
-        r = LiveRace(self, stream_delay_s=45, start_ms=SCHED)
-        r.to_video_showing(SCHED)
-        r.sync.mark_stream_start(r.mono, r.now)
-        self.assertEqual(r.state()["confidence"], "HIGH")
-        self.assertIn("STREAM START RESET", r.sync.reset_stream_start())
-        st = r.state()
-        self.assertIsNone(st["streamStart"])
-        self.assertEqual(st["anchors"], [])
-        self.assertEqual(st["confidence"], "LOW")                # back to the broadcast-delay estimate
-        self.assertIn("no stream start mark", r.sync.reset_stream_start())
-
-    def test_7_delayed_start_then_actual_start(self):
-        # the video shows the start before the start reached the dashboard (feed late): the mark waits
-        r = LiveRace(self, stream_delay_s=0, start_ms=None,
-                     notices=[(SCHED - MIN, "START PROCEDURE SUSPENDED")])
-        r.step(30 * 60 + 5 * 60, paused=True)                    # 15:05, start delayed, video paused on the start
-        self.assertEqual(r.state()["startInfo"]["state"], "DELAYED")
-        pb_mark = r.pb()
-        msg = r.sync.mark_stream_start(r.mono, r.now)
-        self.assertIn("waiting for the actual F1 start", msg)
-        self.assertTrue(r.state()["streamStart"]["pending"])
-        self.assertEqual(r.sync.mapping.confidence, "LOW")       # scheduled start NOT used meanwhile
-        # the Started event arrives (timestamp 15:05:00) - the waiting mark is applied to it
-        actual = r.now
-        r.sync.observe_feed("SessionStatus", {"Status": "Started"}, actual, False)
-        r.step(1, paused=True)
-        st = r.state()
-        self.assertFalse(st["streamStart"]["pending"])
-        self.assertEqual(st["confidence"], "HIGH")
-        self.assertAlmostEqual(r.sync.mapping.offset, actual / 1000 - pb_mark, places=2)
-        self.assertEqual(st["startInfo"]["f1DelaySeconds"], 300.0)
 
     def test_8_sync_after_a_delayed_start(self):
         r = LiveRace(self, stream_delay_s=150, start_ms=SCHED + 7 * MIN,
                      notices=[(SCHED + MIN, "RACE START DELAYED")])
         r.to_video_showing(SCHED + 7 * MIN)
-        r.sync.mark_stream_start(r.mono, r.now)
+        r.sync.add_event_anchor("start", r.mono, r.now, None, "START")
         # the race runs; the video keeps following F1 time from the ACTUAL start
         r.step(60)
         self.assertAlmostEqual(r.now - r.shown(), 150_000, delta=600)
@@ -309,9 +259,9 @@ class VodDelayedJapanTest(unittest.TestCase):
         self.assertAlmostEqual(self.s.mapping.offset, self.K + 600, places=2)
         self.assertIn("announced start", self.s.mapping.anchor)
 
-    def test_stream_mark_on_lights_out_is_high_and_the_start_is_in_the_video(self):
+    def test_lights_out_is_high_and_the_start_is_in_the_video(self):
         self.at(self.start)
-        msg = self.s.mark_stream_start(self.mono, 0.0)
+        msg = self.s.add_event_anchor("start", self.mono, 0.0, None, "START")
         self.assertIn("HIGH", msg)
         st = self.s.get_state(self.mono, 0.0, None)
         self.assertAlmostEqual(st["offsetSeconds"], self.K, places=2)

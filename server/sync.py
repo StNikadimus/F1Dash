@@ -29,10 +29,10 @@ an *anchor* (a moment of the video whose F1 time is known):
                      reaching 0:00 (Q2 END / SESSION END) or starting (Q2 START)  (event anchor)
   Automatic          only a sync saved for the same video + session; otherwise
                      it says why it cannot sync and changes nothing.
-  MARK STREAM START  the video shows the ACTUAL start of the session now (lights out /
-                     session start): matched to the start event in the F1 data, never to
-                     the scheduled start. Repeatable (the new mark replaces the old one) and
-                     removable (RESET STREAM START).                              (HIGH)
+  MARK STREAM START  VOYO is at the absolute beginning of THIS stream (0:00): the stream
+                     origin. Not the race start / lights out / the schedule. Its F1 time comes
+                     from this video's F1 anchors (lights out ...) and is saved per session +
+                     video; LIVE: from the moment 0:00 airs (LOW). Reset: RESET STREAM START.
 
 Scheduled vs actual start: ``sessions.date_start`` / ``SessionInfo.StartDate`` is only the
 schedule. Starts are delayed (weather, red flag before the start, aborted start procedure,
@@ -551,7 +551,8 @@ class SyncManager:
         # for the formation lap (scheduled time = formation lap, SessionStatus Started = lights out)
         self.start_grace_s = max(0.0, float(s.get("start_delay_threshold_seconds", 60)))
         self.start_grace_race_s = max(self.start_grace_s, float(s.get("race_start_grace_seconds", 360)))
-        self.stream_wait_s = max(60.0, float(s.get("stream_mark_wait_seconds", 1200)))
+        # MARK STREAM START is accepted only this close to the beginning of the stream (0:00)
+        self.origin_tol_s = max(0.5, float(s.get("stream_start_tolerance_seconds", 2.0)))
         lead = s.get("broadcast_lead_seconds", "")
         self.lead_cfg: Optional[float] = None if lead in ("", None) else float(lead)
         self.lead_uncertainty = max(10.0, float(s.get("lead_uncertainty_seconds", 1200)))
@@ -593,8 +594,7 @@ class SyncManager:
         self._last_mono: Optional[float] = None
         self._pending_jump = False
         self._clock_lost_logged = False
-        self.stream_pending: Optional[dict] = None   # MARK STREAM START before the start was in the data
-        self.stream_mark: Optional[dict] = None      # the applied mark (display / diagnostics)
+        self.origin: Optional[dict] = None           # START OF STREAM: VOYO 0:00 of this session + video
         self.lights_out: Optional[dict] = None       # last LIGHTS OUT (L) result: matched event or why not
         self._start_key: Optional[tuple] = None      # last logged start state
         self._solve()
@@ -617,13 +617,14 @@ class SyncManager:
         if session is None or session.get("session_key") != old:
             self.anchors = []
             self.history = []
-            self.stream_pending = self.stream_mark = None
+            self.origin = None
             self.lights_out = None
             self._start_key = None
             self.pending = None
             self.deviation_note = None
             self.trim = 0.0
             self._restore_asset()
+            self._load_origin()
         self._solve()
         self._pending_jump = True
 
@@ -672,7 +673,7 @@ class SyncManager:
         self.edge.observe(s)
         self.anchors = []
         self.history = []
-        self.stream_pending = self.stream_mark = None
+        self.origin = None
         self.pending = None
         self.deviation_note = None
         self.trim = 0.0
@@ -687,6 +688,7 @@ class SyncManager:
                                                   else self.default_delay) - base
             self.est_source = "broadcast-delay-estimate"
         self._restore_asset()
+        self._load_origin()
         if changed:
             self.note = "VOYO video changed - the previous sync is not used"
         log.info("VOYO playback clock: %s video %r", "changed" if changed else "new", s.asset[:60])
@@ -716,9 +718,6 @@ class SyncManager:
                 continue
         if restored:
             self.anchors = restored
-            sm = next((a for a in reversed(restored) if a.kind == "stream"), None)
-            self.stream_mark = None if sm is None else {
-                "video_time": sm.video_time, "actual_ms": sm.f1_ms, "stream_delay": None, "restored": True}
             self.trim = float(saved.get("trim") or 0.0)
             self.note = f"sync restored for this video and session ({len(restored)} anchor(s))"
             log.info("Sync: %s", self.note)
@@ -727,6 +726,8 @@ class SyncManager:
     def _save_asset(self) -> None:
         if not self.asset:
             return
+        if self.origin is not None:
+            self._origin_from_sync()
         self.store.data["assets"][self.asset] = {
             "session_key": (self.session or {}).get("session_key"), "saved": time.time(),
             "anchors": [a.to_json() for a in self.anchors if a.video_time is not None], "trim": self.trim,
@@ -775,6 +776,19 @@ class SyncManager:
                         health="MANUAL", n_valid=1, independent=1)
         elif real:
             m = self._solve_anchors(real, video)
+        elif video and self.origin is not None and self.origin.get("utc_ms") is not None \
+                and self.origin.get("key") == self._origin_key():
+            o = self.origin
+            conf = o.get("conf") or "LOW"
+            src = "saved sync of this video" if o.get("source") == "saved" else (o.get("method") or "")
+            m = Mapping(o["utc_ms"] / 1000 - float(o.get("video_time") or 0.0), None, conf, "stream-origin",
+                        f"Start of stream: VOYO 0:00 = {utc_str(o['utc_ms'])} UTC ({src})."
+                        + (" The stream delay is estimated - press L at lights out to make it exact."
+                           if conf == "LOW" else ""),
+                        True, 0 if conf == "LOW" else 1, None, "Stream start (0:00)",
+                        f"0:00 = {utc_str(o['utc_ms'])[:8]} UTC", health="LOW" if conf == "LOW" else
+                        ("MANUAL" if conf == "MANUAL" else conf), health_error=o.get("health_error"),
+                        n_valid=1, independent=1)
         elif video and self.vod:
             start = self._session_start_ms()
             lead = self.user_lead()
@@ -1168,107 +1182,153 @@ class SyncManager:
             head += " (start not confirmed - press C if the TV shows lap 1)"
         return self._anchor_result(m, a, head)
 
+    # ------------------------------------------------------------------ START OF STREAM (VOYO 0:00)
+    # The stream origin = VOYO playback position 0:00, the beginning of THIS VOYO broadcast (not the
+    # race start / lights out / the schedule). No F1 topic contains it, so its F1 time comes from:
+    #   1. the F1-referenced anchors of the same video (Lights out, countdown, S, exact time):
+    #      origin = the mapped F1 time of 0:00 - saved per session + video;
+    #   2. a saved origin of the same session + video (reopened VOD);
+    #   3. LIVE only: the moment 0:00 airs (F1 receive clock - the stream delay estimate) - LOW;
+    #   otherwise: set, waiting for an F1 reference (the reason is shown). Never the wall clock
+    #   for a recording, never the scheduled / actual start.
+    def _origin_key(self) -> Optional[str]:
+        sk = (self.session or {}).get("session_key")
+        return f"{sk}|{self.asset}" if sk is not None and self.asset else None
+
+    def _store_origin(self) -> None:
+        o, key = self.origin, self._origin_key()
+        if o is None or key is None or o.get("key") != key:
+            return
+        sess = self.session or {}
+        self.store.data.setdefault("origins", {})[key] = {
+            "utc_ms": o.get("utc_ms"), "conf": o.get("conf"), "method": o.get("method"),
+            "health_error": o.get("health_error"), "video_time": o.get("video_time"), "source": o.get("source"),
+            "session_key": sess.get("session_key"), "meeting": sess.get("meeting_name"),
+            "session_name": sess.get("session_name"), "asset": self.asset, "vod": self.vod, "saved": time.time()}
+        self.store.save()
+
+    def _load_origin(self) -> None:
+        """The saved stream origin of exactly this session + this video (never another GP / session /
+        video; a live channel page only the same day)."""
+        key = self._origin_key()
+        self.origin = None
+        saved = (self.store.data.get("origins") or {}).get(key or "")
+        if not saved or (not self.vod and time.time() - float(saved.get("saved", 0)) > 12 * 3600):
+            return
+        self.origin = {**saved, "key": key, "restored": True}
+        log.info("[SYNC] Stream start restored for %s %s (%s): %s", saved.get("meeting"), saved.get("session_name"),
+                 self.asset, f"0:00 = {utc_str(saved['utc_ms'])} UTC ({saved.get('method')})"
+                 if saved.get("utc_ms") is not None else "F1 reference still missing")
+
+    def _origin_from_sync(self) -> bool:
+        """Origin from the F1-referenced anchors of this video (if any) - True when (re)computed."""
+        o = self.origin
+        if o is None or o.get("key") != self._origin_key():
+            return False
+        f1 = [a for a in self.anchors if a.video_time is not None and a.kind not in ("pin", "origin")]
+        if not f1:
+            return False
+        keep = self.mapping
+        m = self._solve(video=True)
+        self.mapping = keep
+        if m.offset is None or m.source in ("stream-origin", "session-start-estimate") or \
+                m.confidence not in ("HIGH", "MEDIUM", "MANUAL") or not m.grounded:
+            return False
+        utc = (m.offset + float(o.get("video_time") or 0.0)) * 1000
+        if o.get("utc_ms") is not None and abs(o["utc_ms"] - utc) < 50 and o.get("conf") == m.confidence:
+            return False
+        o.update(utc_ms=utc, conf=m.confidence, method=m.method, health_error=m.health_error, source="sync",
+                 restored=False)
+        log.info("[SYNC] Stream origin established: VOYO 0:00 = %s UTC (from %s, %s)", utc_str(utc), m.method,
+                 m.confidence)
+        self._store_origin()
+        return True
+
+    def _origin_missing(self) -> str:
+        if not self.session:
+            return "F1 session not identified - select the session first"
+        ref = self.ref
+        if self.vod and (ref is None or ref.source == "none" or ref.empty()):
+            return ("historical timing unavailable (OpenF1 / F1 archive not loaded) - use Manual Exact Time, "
+                    "or Lights out once the timing is loaded")
+        return ("stream anchor set but F1 reference unavailable - press L when the video shows lights out (or use "
+                "Countdown / Exact Time / S); the origin is then computed and saved for this video")
+
     def mark_stream_start(self, mono: float, src_now_ms: float) -> str:
-        """MARK STREAM START: the video shows the ACTUAL start of the session now. The moment is
-        matched to the start event in the F1 data (never the scheduled time). Pressing again
-        replaces the previous mark; RESET STREAM START removes it."""
-        err = self._need_clock(mono)
-        if err:
-            return err
-        video, pb, press_b = self._now_point(mono, src_now_ms, reaction=True)
-        # video playing: the marked frame is the reaction time before the press (pb is corrected
-        # for it) - so is the moment the stream showed the start
-        react = self.reaction * max(self.clock.rate_now(), 0.0) if video and not self.clock.last.paused else 0.0
-        info = self.start_info(None if self.vod else src_now_ms)
-        log.info("[SYNC] Stream start marked")
-        log.info("[SYNC] VOYO playback position: %s%s", "no VOYO clock (fixed-delay mode)" if pb is None
-                 else f"{pb:.3f} s ({fmt_hms(pb)})",
-                 "" if not video else (" (paused)" if self.clock.last and self.clock.last.paused else
-                                       f" (minus {self.reaction:.2f} s reaction)"))
-        if not self.vod:
-            log.info("[SYNC] Receive time (F1 clock B) at the mark: %s UTC", utc_str(press_b))
-        if info["actual"] is None:
-            self.stream_pending = {"video": video, "pb": pb, "press_b": press_b - react * 1000, "wall": time.time(),
-                                   "asset": self.asset}
-            log.info("[SYNC] F1 actual event start: not in the F1 data yet (start state %s) - the mark waits for "
-                     "it; the scheduled start (%s UTC) is not used", info["state"],
-                     utc_str(info["scheduled"]) if info["scheduled"] is not None else "unknown")
-            txt = ("STREAM START MARKED - waiting for the actual F1 start in the data "
-                   f"({info['state'].replace('_', '-')}; the scheduled start is not used)")
-            self.last_result = txt
-            return txt
-        return self._apply_stream_mark(video, pb, press_b - react * 1000, info)
-
-    def _apply_stream_mark(self, video: bool, pb: Optional[float], press_b: float, info: dict) -> str:
-        actual = info["actual"]
-        for x in self.anchors:
-            if x.kind == "stream":
-                x.status = "replaced"
-                self.history.append(x)
-        del self.history[:-30]
-        self.anchors = [x for x in self.anchors if x.kind != "stream"]
-        self.stream_pending = None
-        # press_b = F1 receive clock (B) at the moment the video showed the start
-        offset = actual / 1000 - pb if video else (press_b - actual) / 1000
-        stream_delay = None if self.vod else (press_b - actual) / 1000
-        detail = f"video shows the actual start ({utc_str(actual)} UTC)"
-        if stream_delay is not None:
-            detail += f" · stream delay {fmt_signed(stream_delay)}"
-        a = Anchor("stream", offset, actual, pb, time.time(), grounded=True,
-                   ref_source=self.ref.source if self.ref else "", error=self.anchor_error,
-                   paused=bool(video and self.clock.last and self.clock.last.paused),
-                   label="Stream start", detail=detail)
-        m = self._add(a, explicit=True)
-        self.stream_mark = {"video_time": pb, "press_b": press_b, "wall": a.wall, "actual_ms": actual,
-                            "scheduled_ms": info["scheduled"], "f1_delay": info["f1_delay"],
-                            "stream_delay": stream_delay, "restored": False}
-        log.info("[SYNC] F1 actual event start: %s UTC", utc_str(actual))
-        log.info("[SYNC] Scheduled start: %s UTC", utc_str(info["scheduled"]) if info["scheduled"] is not None
-                 else "unknown")
-        if info["f1_delay"] is not None:
-            log.info("[SYNC] Detected race delay: %s (actual - scheduled)%s", fmt_signed(info["f1_delay"]),
-                     " - scheduled start ignored as the race-time anchor" if info["delayed"] else "")
-        if stream_delay is not None:
-            log.info("[SYNC] Calculated stream delay: %s (video behind the actual F1 start)", fmt_signed(stream_delay))
-        else:
-            log.info("[SYNC] Actual start is at video position %s (recording)", fmt_hms(pb or 0))
-        log.info("[SYNC] Sync confidence: %s", m.confidence)
-        head = "STREAM START" + (f" · STREAM DELAY {fmt_signed(stream_delay)}" if stream_delay is not None else
-                                 f" at video {fmt_hms(pb or 0)}")
-        return self._anchor_result(m, a, head)
-
-    def _resolve_stream_pending(self, src_now_ms: float) -> None:
-        p = self.stream_pending
-        if p is None:
-            return
-        if p["asset"] != self.asset or time.time() - p["wall"] > self.stream_wait_s:
-            log.warning("[SYNC] Stream start mark dropped: %s", "another video" if p["asset"] != self.asset else
-                        f"no actual F1 start in the data within {self.stream_wait_s / 60:.0f} min")
-            self.stream_pending = None
-            return
-        info = self.start_info(None if self.vod else src_now_ms)
-        if info["actual"] is not None:
-            log.info("[SYNC] Actual F1 start arrived - applying the waiting stream start mark")
-            self.last_result = self._apply_stream_mark(p["video"], p["pb"], p["press_b"], info)
-
-    def reset_stream_start(self) -> str:
-        marks = [x for x in self.anchors if x.kind == "stream"]
-        if not marks and self.stream_pending is None:
-            return "SYNC: no stream start mark to reset"
-        for x in marks:
-            x.status = "replaced"
-            self.history.append(x)
-        del self.history[:-30]
-        self.anchors = [x for x in self.anchors if x.kind != "stream"]
-        self.stream_pending = self.stream_mark = None
-        self.pending = None
-        self.deviation_note = None
-        self.trim = 0.0
+        """MARK STREAM START: VOYO is at the absolute beginning of the stream (0:00) now."""
+        if self.clock.last is None or not self.clock.fresh(mono):
+            return "SYNC: no VOYO playback clock - the stream position cannot be read (VOYO window / video open?)"
+        sess = self.session or {}
+        if not sess.get("session_key"):
+            return "SYNC: F1 session not identified - select the session first (the stream start belongs to a session)"
+        pb = self.clock.pb_at(mono)
+        if pb is None or pb > self.origin_tol_s:
+            return (f"SYNC: VOYO is at {fmt_hms(pb or 0)} - move it to the absolute beginning of the stream (0:00) "
+                    "first, then press MARK STREAM START")
+        key = self._origin_key()
+        log.info("[SYNC] Stream start marked: VOYO position %.2f s = beginning of this VOYO stream", pb)
+        log.info("[SYNC] Session: %s %s (key %s), video %s, %s", sess.get("meeting_name"), sess.get("session_name"),
+                 sess.get("session_key"), self.asset, "VOD" if self.vod else "LIVE")
+        saved = (self.store.data.get("origins") or {}).get(key or "")
+        self.origin = {"key": key, "video_time": pb, "utc_ms": None, "conf": None, "method": None, "source": None,
+                       "restored": False}
+        if self._origin_from_sync():
+            pass                                         # 1. from this video's F1 anchors (e.g. lights out)
+        elif saved and saved.get("utc_ms") is not None and (self.vod or time.time() - float(saved.get("saved", 0))
+                                                             < 12 * 3600):
+            self.origin.update(utc_ms=saved["utc_ms"] - (float(saved.get("video_time") or 0) - pb) * 1000,
+                               conf=saved.get("conf"), method=saved.get("method"),
+                               health_error=saved.get("health_error"), source="saved", restored=True)
+            log.info("[SYNC] Stream origin from the saved sync of this video: %s UTC", utc_str(self.origin["utc_ms"]))
+        elif not self.vod:
+            # 3. LIVE: 0:00 airs now (or edge - pb seconds ago when the live edge is measured) -> F1 time of
+            # that frame = F1 receive clock - the stream delay estimate (learned / configured)
+            edge = self.edge.edge_at(mono)
+            lag = max(0.0, edge - pb) if edge is not None else 0.0
+            learned = self.store.data.get("edge_delay_s")
+            delay = float(learned) if (edge is not None and learned is not None) else self.default_delay
+            utc = src_now_ms - (lag + delay + pb) * 1000
+            self.origin.update(utc_ms=utc, conf="LOW", method=f"live airing time - {delay:.1f} s stream delay (estimate)",
+                               source="live")
+            log.info("[SYNC] Stream origin (LIVE): aired %s, stream delay estimate %.1f s -> 0:00 = %s UTC (LOW until "
+                     "lights out confirms it)", "now" if not lag else f"{lag:.0f} s ago", delay, utc_str(utc))
+        self._store_origin()
         m = self._solve()
         self.K = m.offset
         self._pending_jump = True
         self._save_asset()
-        log.info("[SYNC] Stream start mark reset - sync from the remaining anchors / estimate (%s)", m.confidence)
+        o = self.origin
+        if o.get("utc_ms") is None:
+            why = self._origin_missing()
+            log.warning("[SYNC] Stream start set, no F1 time for it yet: %s", why)
+            txt = f"STREAM START 0:00 SET - {why}"
+        else:
+            txt = (f"STREAM START 0:00 SET · 0:00 = {utc_str(o['utc_ms'])[:8]} UTC ({o.get('method')}) · "
+                   f"CONFIDENCE {o.get('conf')}")
+            log.info("[SYNC] Stream origin: %s UTC (%s, %s)", utc_str(o["utc_ms"]), o.get("method"), o.get("conf"))
+        self.last_result = txt
+        return txt
+
+    def reset_stream_start(self) -> str:
+        legacy = [x for x in self.anchors if x.kind == "stream"]     # marks of the earlier "actual start" meaning
+        key = self._origin_key()
+        stored = key is not None and key in (self.store.data.get("origins") or {})
+        if self.origin is None and not legacy and not stored:
+            return "SYNC: no stream start set for this video / session"
+        for x in legacy:
+            x.status = "replaced"
+            self.history.append(x)
+        del self.history[:-30]
+        self.anchors = [x for x in self.anchors if x.kind != "stream"]
+        self.origin = None
+        if stored:
+            self.store.data["origins"].pop(key, None)
+        self.pending = None
+        m = self._solve()
+        self.K = m.offset
+        self._pending_jump = True
+        self._save_asset()
+        log.info("[SYNC] Stream start reset for %s - sync from the remaining anchors (%s)", key, m.confidence)
         return self._result(m, "STREAM START RESET")
 
     # ------------------------------------------------------------------ qualifying / practice
@@ -1405,8 +1465,6 @@ class SyncManager:
             self._last_target = None
         self._last_src_now = src_now_ms
         self._last_mono = mono
-        if self.stream_pending is not None:
-            self._resolve_stream_pending(src_now_ms)
         self._track_start(self._start_at())
         return tgt
 
@@ -1899,7 +1957,7 @@ class SyncManager:
         actual_video = None
         if info and info["actual"] is not None and video_mode and m.offset is not None:
             actual_video = round(info["actual"] / 1000 - m.offset, 2)
-        sm_ = self.stream_mark
+        o = self.origin
         stream_delay = None                         # how far the video is behind the F1 events now
         if not self.vod and m.offset is not None and m.confidence in ("HIGH", "MEDIUM", "MANUAL"):
             if self.active == "VOYO" and pb is not None:
@@ -1961,12 +2019,17 @@ class SyncManager:
                 "actualStartVideo": actual_video},
             "streamDelaySeconds": None if stream_delay is None else round(stream_delay, 1),
             "lightsOut": self._lights_out_state(src_now_ms),
-            "streamStart": {"pending": True} if self.stream_pending is not None else None if sm_ is None else {
-                "pending": False, "videoTime": None if sm_.get("video_time") is None else round(sm_["video_time"], 2),
-                "actualUtc": utc_str(sm_.get("actual_ms")),
-                "streamDelaySeconds": None if sm_.get("stream_delay") is None else round(sm_["stream_delay"], 1),
-                "f1DelaySeconds": None if sm_.get("f1_delay") is None else round(sm_["f1_delay"], 1),
-                "restored": bool(sm_.get("restored"))},
+            # START OF STREAM: VOYO 0:00 and the F1 time of it (or why it is not known)
+            "streamStart": None if o is None else {
+                "set": True, "videoTime": round(float(o.get("video_time") or 0.0), 2),
+                "originUtc": utc_str(o.get("utc_ms")), "confidence": o.get("conf"), "method": o.get("method"),
+                "restored": bool(o.get("restored")), "source": o.get("source"),
+                "reason": None if o.get("utc_ms") is not None else self._origin_missing(),
+                # where the scheduled / actual start are in this stream (offset from 0:00)
+                "scheduledAtVideo": None if o.get("utc_ms") is None or start is None
+                else round((start - o["utc_ms"]) / 1000 + float(o.get("video_time") or 0.0), 1),
+                "actualAtVideo": None if o.get("utc_ms") is None or info is None or info["actual"] is None
+                else round((info["actual"] - o["utc_ms"]) / 1000 + float(o.get("video_time") or 0.0), 1)},
             "deviationNote": self.deviation_note,
             "drift": None if not self.pending else {
                 "current": self._disp(self.pending["old"], start),

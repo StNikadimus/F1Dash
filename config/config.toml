@@ -362,8 +362,9 @@ outlier_seconds = 1.0              # with >= 3 anchors: further than this from t
 # sessions after start_delay_threshold_seconds - or when race control announces a delay.
 race_start_grace_seconds = 360
 start_delay_threshold_seconds = 60
-# MARK STREAM START pressed before the actual start is in the F1 data: wait this long for it
-stream_mark_wait_seconds = 1200
+# MARK STREAM START (VOYO at the absolute beginning of the stream, 0:00) is accepted only when the
+# VOYO position is at most this far from 0:00
+stream_start_tolerance_seconds = 2.0
 
 [vod]
 # "auto" = detect the session from the VOYO page title (via OpenF1), or an
