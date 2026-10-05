@@ -1475,7 +1475,7 @@
       <div class="sm-methods">
         <button data-m="clock">Session Clock<small>time remaining / elapsed</small></button>
         <button data-m="marker">Phase Marker<small>SYNC HERE · most precise</small></button>
-        <button data-m="stream">Mark Stream Start<small>video shows the actual start · HIGH</small></button>
+        <button data-m="stream">Mark Stream Start<small>VOYO at 0:00 · origin of the stream</small></button>
         <button data-m="countdown">VOYO Countdown<small>recommended</small></button>
         <button data-m="exact">Manual Exact Time<small>time shown in the video</small></button>
         <button data-m="auto">Restore Saved Sync<small>automatic · only if reliable</small></button>
@@ -1495,10 +1495,11 @@
         <div class="sm-markers" id="sm-markers"></div>
       </div>
       <div class="sm-panel" id="sm-p-stream" hidden>
-        <p>When the video shows the <b>actual start</b> of the session (lights out / session start) press
-          <b>MARK STREAM START</b> - pause VOYO exactly on it for the best result. The moment is matched to the
-          start event in the F1 data, <b>never to the scheduled start</b>, so a delayed race and a delayed stream
-          are not mixed up. Marked the wrong moment? Press it again on the right one, or reset it.</p>
+        <p>Position VOYO at the <b>absolute beginning of the stream (0:00)</b>, then press <b>MARK STREAM START</b>.
+          This is the origin of this VOYO broadcast - <b>not</b> the race start, lights out or the schedule. Its F1
+          time comes from an F1 reference of this video - best: press <b>LIGHTS OUT (L)</b> when the video shows it -
+          and is saved for this session + video (reopening the VOD restores it). LIVE: estimated from the moment
+          0:00 airs until lights out confirms it.</p>
         <div class="sm-row"><button class="pri" data-apply="stream_start">MARK STREAM START</button>
           <button data-lights>LIGHTS OUT (L)</button>
           <button data-apply="stream_reset">RESET STREAM START</button></div>
@@ -1713,17 +1714,22 @@
       out += row("Lights out", `<span class="sm-warn">not available</span> <small>${esc(lo.reason || "")}</small>`);
     }
     const ss = sy.streamStart;
-    if (ss) out += row("Stream start mark", ss.pending ? `<span class="sm-warn">waiting for the actual start in the F1 data</span>` :
-      `${has(ss.videoTime) ? "video " + fmtVid(ss.videoTime) + " = " : "at "}${hm(ss.actualUtc)}${has(ss.streamDelaySeconds) ? ` <small>stream delay ${fmtSigned(ss.streamDelaySeconds)}</small>` : ""}${ss.restored ? " <small>saved</small>" : ""}`);
+    if (ss) {
+      out += row("Stream start", `0:00 · ANCHOR SET` + (ss.originUtc ? ` · = ${hm(ss.originUtc)} <small>${esc(ss.method || "")}${ss.restored ? " · saved" : ""}</small>` :
+        ` <span class="sm-warn">no F1 time yet</span> <small>${esc(ss.reason || "")}</small>`));
+      if (has(ss.actualAtVideo) || has(ss.scheduledAtVideo))
+        out += row("Offset from 0:00", (has(ss.actualAtVideo) ? `actual start at ${fmtSigned(ss.actualAtVideo)}` : "") +
+          (has(ss.scheduledAtVideo) ? ` <small>scheduled start at ${fmtSigned(ss.scheduledAtVideo)}</small>` : ""));
+    }
     return out;
   }
   function streamHint(sy) {
     if (!sy) return "";
-    const ss = sy.streamStart, si = sy.startInfo || {};
-    if (ss && ss.pending) return "Marked - waiting for the actual start to appear in the F1 data (the scheduled start is not used).";
-    if (ss) return `Marked: STREAM DELAY ${has(ss.streamDelaySeconds) ? fmtSigned(ss.streamDelaySeconds) : "—"} · CONFIDENCE ${esc(sy.confidence)}` +
-      (has(ss.f1DelaySeconds) ? ` · F1 start delay ${fmtSigned(ss.f1DelaySeconds)}` : "");
-    return si.state === "DELAYED" ? "The start is DELAYED - mark the moment the video shows the actual start." : "No stream start marked.";
+    const ss = sy.streamStart;
+    if (!ss) return "STREAM START: not set.";
+    return `STREAM START: 0:00 · ANCHOR: SET` + (ss.originUtc ?
+      ` · OFFSET: ${has(ss.actualAtVideo) ? "actual start at " + fmtSigned(ss.actualAtVideo) : "0:00 = " + esc(ss.originUtc.slice(0, 8)) + " UTC"} · CONFIDENCE: ${esc(ss.confidence || "—")}` :
+      ` · ${esc(ss.reason || "")}`);
   }
   function renderSyncMenu() {
     const sy = S.sync;
