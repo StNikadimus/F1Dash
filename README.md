@@ -886,6 +886,18 @@ position and four methods:
 | **Automatic** | nothing | uses only a sync saved for *this video and this session*. Otherwise it explains why it cannot sync (above) and changes nothing – never silently. It suggests a learned lead time for the estimate. |
 | **Session Start Estimate** | enter how long the video runs before the scheduled start (prefilled with a learned value, never assumed) | **LOW / ESTIMATED**, no exact time is shown anywhere |
 
+**Lights out (`L` / BLUE / phone START / SYNC menu LIGHTS OUT)** is matched to the
+actual start event in the F1 data – never the schedule: `SessionData.StatusSeries`
+(*SessionStatus Started* with its own millisecond Utc – the only exact source in the F1
+archive, which has no `SessionStatus` topic), the live `SessionStatus`, OpenF1
+`SESSION STARTED`, and as a ±1 s fallback the moment `ExtrapolatedClock` starts running.
+OpenF1 and the archive are merged (one missing source never hides the other), and the small
+archive topics are read before the big download, so `L` works on a recording before SYNC.
+Alone it is **HIGH**; with other anchors it counts twice in the median. The menu shows
+`LIGHTS OUT ✓ · F1 EVENT · VOYO · STREAM DELAY`, or why it is not available (not received
+yet, not in the historical data, VOD timing unavailable, unknown / wrong session, unreadable
+messages); the log has `[SYNC] Looking for Lights Out event …` lines.
+
 Precise **event anchors** without typing (any time, also to verify):
 `L` / BLUE = lights out / the session clock starts; `S` / RED = the selected
 car (or the leader) crosses the line. The press is matched automatically to

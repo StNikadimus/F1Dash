@@ -154,6 +154,11 @@ class RefEvents:
     source: str = "none"                                    # openf1 | archive | feed
     crossings: dict[str, list[tuple[float, int]]] = field(default_factory=dict)   # num -> [(ms, completed lap)]
     starts: list[float] = field(default_factory=list)       # SESSION STARTED (lights out / clock start)
+    # where each start came from (ms -> "SessionData.StatusSeries", "SessionStatus", "OpenF1
+    # race_control", "ExtrapolatedClock ±1 s"); starts derived from the session clock are approx
+    start_src: dict[float, str] = field(default_factory=dict)
+    approx_starts: set = field(default_factory=set)
+    parse_errors: int = 0                                   # start / status messages that could not be read
     finishes: list[float] = field(default_factory=list)     # SESSION FINISHED
     # race control messages about the START itself (delayed / postponed / suspended start
     # procedure / "FORMATION LAP WILL START AT 14:10"): (ms, message) - see start_notice()
@@ -170,6 +175,25 @@ class RefEvents:
 
     def empty(self) -> bool:
         return not self.crossings and not self.starts and not self.finishes
+
+    def add_start(self, ms: float, src: str, approx: bool = False) -> None:
+        """One start event (dedup: the same start from several topics is one start; an exact
+        timestamp replaces one derived from the session clock)."""
+        for t in list(self.starts):
+            if abs(t - ms) < 2500:
+                if t in self.approx_starts and not approx:
+                    self.starts.remove(t)
+                    self.approx_starts.discard(t)
+                    self.start_src.pop(t, None)
+                    break
+                return
+        if approx and any(t not in self.approx_starts and abs(t - ms) < 120_000 for t in self.starts):
+            return                                      # an exact start nearby is known
+        self.starts.append(ms)
+        self.starts.sort()
+        self.start_src[ms] = src
+        if approx:
+            self.approx_starts.add(ms)
 
     def add_notice(self, ms: float, text: str) -> None:
         if start_notice(text) and not any(abs(t - ms) < 1000 and m == text for t, m in self.notices):
@@ -219,6 +243,66 @@ def announced_start_ms(text: str, notice_ms: float, gmt_offset: Any) -> Optional
     return t - off_ms
 
 
+class ClockStart:
+    """Lights out / session start from ``ExtrapolatedClock`` when no status message has it: the
+    clock waits at its full value (e.g. 02:00:00, Extrapolating false) and starts running at the
+    start; its posts are whole seconds -> the start follows to about ±1 s (approx)."""
+
+    def __init__(self) -> None:
+        self.full: Optional[int] = None
+        self.done = False
+
+    def feed(self, utc_ms: Optional[float], remaining: Any, extrapolating: Any) -> Optional[float]:
+        from .session_phases import hms_ms
+        rem = hms_ms(remaining) if isinstance(remaining, str) else None
+        if self.done or utc_ms is None or rem is None:
+            return None
+        if extrapolating is not True:
+            if self.full is None or rem > self.full:
+                self.full = rem                     # waiting at the full value (or a later reset)
+            if self.full - rem < 1000:
+                return None
+        if self.full is None or not 0 < self.full - rem <= 10_000:
+            return None
+        self.done = True
+        return utc_ms - (self.full - rem)
+
+
+def status_series_starts(series: Any) -> list[tuple[Optional[float], str]]:
+    """SessionData.StatusSeries entries (list or {"2": {...}}) -> [(utc ms or None if unreadable,
+    status)] for SessionStatus entries."""
+    out = []
+    items = series.values() if isinstance(series, dict) else series if isinstance(series, list) else []
+    for e in items:
+        if isinstance(e, dict) and isinstance(e.get("SessionStatus"), str):
+            u = parse_utc(e.get("Utc")) if e.get("Utc") else None
+            out.append((u.timestamp() * 1000 if u else None, e["SessionStatus"]))
+    return out
+
+
+def merge_refs(primary: Optional[RefEvents], other: Optional[RefEvents]) -> RefEvents:
+    """OpenF1 + F1 archive: lap crossings from the primary (OpenF1) when it has them, start /
+    finish / start-delay notices from both - one missing source never hides the other's events."""
+    if primary is None and other is None:
+        return RefEvents(source="none")
+    if primary is None or other is None:
+        return primary or other
+    out = RefEvents(source=f"{primary.source}+{other.source}")
+    out.crossings = primary.crossings if primary.crossings else other.crossings
+    for ref in (primary, other):
+        for t in ref.starts:
+            out.add_start(t, ref.start_src.get(t, ref.source), t in ref.approx_starts)
+        for t in ref.finishes:
+            if not any(abs(x - t) < 2500 for x in out.finishes):
+                out.finishes.append(t)
+        for t, m in ref.notices:
+            out.add_notice(t, m)
+        out.parse_errors += ref.parse_errors
+    out.finishes.sort()
+    out.timeline = primary.timeline or other.timeline
+    return out
+
+
 def ref_events_from_openf1(laps: list[dict], race_control: list[dict]) -> RefEvents:
     ev = RefEvents(source="openf1")
     by_driver: dict[str, list[dict]] = {}
@@ -248,7 +332,7 @@ def ref_events_from_openf1(laps: list[dict], race_control: list[dict]) -> RefEve
             ev.add_notice(t.timestamp() * 1000, msg)
             continue
         if "SESSION STARTED" in msg or "SESSION RESUMED" in msg:
-            ev.starts.append(t.timestamp() * 1000)
+            ev.add_start(t.timestamp() * 1000, "OpenF1 race_control " + msg)
         elif "SESSION FINISHED" in msg:
             ev.finishes.append(t.timestamp() * 1000)
     ev.starts.sort()

@@ -29,7 +29,8 @@ def iso(ms):
 class LiveRace:
     """A live race on the feed + a VOYO live stream ``stream_delay`` seconds behind it."""
 
-    def __init__(self, test, stream_delay_s, start_ms, notices=(), reaction=0.0):
+    def __init__(self, test, stream_delay_s, start_ms, notices=(), reaction=0.0, start_via="SessionStatus"):
+        self.start_via = start_via            # SessionStatus | StatusSeries | clock (ExtrapolatedClock only)
         self.t = test
         self.sync = SyncManager({"enabled": True, "mode": "AUTO", "broadcast_delay_seconds": 5.0,
                                  "mark_reaction_seconds": reaction},
@@ -46,6 +47,8 @@ class LiveRace:
                                                "StartDate": iso(SCHED)[:19], "GmtOffset": "00:00:00",
                                                "Meeting": {"Name": "Test Grand Prix"}}, self.now, True)
         self.sync.observe_feed("TimingData", {"Lines": {"1": {"NumberOfLaps": 0}}}, self.now, True)
+        self.sync.observe_feed("ExtrapolatedClock", {"Utc": iso(self.now), "Remaining": "02:00:00",
+                                                     "Extrapolating": False}, self.now, True)
         self.step(0)
 
     def pb(self):
@@ -62,7 +65,15 @@ class LiveRace:
                     self.notices.remove((ms, text))
             if not self.started and self.start is not None and self.now >= self.start:
                 self.started = True
-                self.sync.observe_feed("SessionStatus", {"Status": "Started"}, self.start, False)
+                if self.start_via == "SessionStatus":
+                    self.sync.observe_feed("SessionStatus", {"Status": "Started"}, self.start, False)
+                elif self.start_via == "StatusSeries":
+                    self.sync.observe_feed("SessionData", {"StatusSeries": {"2": {"Utc": iso(self.start),
+                                                                                  "SessionStatus": "Started"}}},
+                                           self.start, False)
+                else:                         # the session clock starts running (posted 2 s later)
+                    self.sync.observe_feed("ExtrapolatedClock", {"Utc": iso(self.start + 2000),
+                                                                 "Remaining": "01:59:58"}, self.start + 2000, False)
             if self.started and self.now >= self.start + (self.laps + 1) * 90_000:
                 self.laps += 1                # lap completed (line crossing of car 1)
                 self.sync.observe_feed("TimingData", {"Lines": {"1": {"NumberOfLaps": self.laps}}},

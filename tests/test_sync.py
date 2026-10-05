@@ -275,10 +275,10 @@ class VodSyncTest(unittest.TestCase):
         self.assertAlmostEqual(st["offsetSeconds"], self.K, places=2)
         self.assertLess(st["errorSeconds"], 0.5)
 
-    def test_lights_out_alone_is_medium_then_s_makes_high(self):
+    def test_lights_out_alone_is_high_and_s_keeps_it_high(self):
         s = self.make()
         self.at(s, START_MS)
-        self.assertIn("MEDIUM", s.add_event_anchor("start", self.mono, T0, None, "START"))
+        self.assertIn("HIGH", s.add_event_anchor("start", self.mono, T0, None, "START"))   # unique ms event
         t, _ = self.ref.crossings["12"][5]
         self.at(s, t)
         self.assertIn("HIGH", s.add_event_anchor("lap", self.mono, T0, "12", "ANT"))
@@ -340,8 +340,9 @@ class VodSyncTest(unittest.TestCase):
         s = self.make()
         self.at(s, self.sched - 600_000)
         s.add_countdown_anchor(600, self.mono, T0, target="scheduled")
-        self.at(s, START_MS)
-        s.add_event_anchor("start", self.mono, T0, None, "L")          # exact: consistent
+        t0, _ = self.ref.crossings["12"][3]
+        self.at(s, t0)
+        s.add_event_anchor("lap", self.mono, T0, "12", "ANT")         # exact: consistent
         st = s.get_state(self.mono, T0, None)
         self.assertEqual((st["confidence"], st["health"]), ("HIGH", "HIGH"))
         self.assertFalse(st["errorMeasured"])                          # one precise anchor: stated range
@@ -374,13 +375,13 @@ class VodSyncTest(unittest.TestCase):
         st = s.get_state(self.mono, T0, None)
         rows = {r["label"]: r for r in st["anchors"]}
         self.assertEqual(rows["S lap 7"]["state"], "outlier")
-        self.assertEqual(rows["L"]["state"], "valid")
+        self.assertEqual(rows["Lights out"]["state"], "valid")
         self.assertEqual((st["anchorsValid"], st["anchorsOutliers"]), (4, 1))
         self.assertEqual((st["confidence"], st["health"]), ("HIGH", "HIGH"))
         self.assertTrue(st["errorMeasured"])
-        self.assertAlmostEqual(float(st["healthError"].strip("±s ")), 0.13, places=2)   # measured: max deviation
-        self.assertAlmostEqual(self.K - s.mapping.offset, 0.08, delta=0.005)  # median of 0.10/-0.05/0.08;
-        #                                                                  the mean with lap 7 would be 0.38
+        self.assertAlmostEqual(float(st["healthError"].strip("±s ")), 0.14, places=2)   # measured: max deviation
+        self.assertAlmostEqual(self.K - s.mapping.offset, 0.09, delta=0.005)  # median of 0.10 (lights out,
+        #                                          counted twice) / -0.05 / 0.08; the mean with lap 7 would be 0.38
         self.assertIn("1 outlier", st["reason"])
 
     def test_same_event_twice_is_not_independent(self):
@@ -389,7 +390,7 @@ class VodSyncTest(unittest.TestCase):
         s.add_event_anchor("start", self.mono, T0, None, "L")
         s.add_event_anchor("start", self.mono, T0, None, "L")
         self.assertEqual(s.mapping.independent, 1)
-        self.assertEqual(s.mapping.confidence, "MEDIUM")
+        self.assertEqual(s.mapping.confidence, "HIGH")           # one event (lights out alone is HIGH)
 
     def test_health_levels_and_no_invented_error(self):
         s = self.make()
@@ -454,7 +455,7 @@ class VodSyncTest(unittest.TestCase):
             s2 = SyncManager({}, True, 0, 1.0, path, vod=True)     # dashboard restarted
             s2.initialize(self.session, self.ref)
             self.at(s2, START_MS)
-            self.assertEqual(s2.mapping.confidence, "MEDIUM")
+            self.assertEqual(s2.mapping.confidence, "HIGH")          # lights out alone
             self.assertIn("+restored", s2.mapping.source)
             s3 = SyncManager({}, True, 0, 1.0, path, vod=True)     # other session, same video
             s3.initialize({**self.session, "session_key": 11249}, self.ref)
@@ -481,11 +482,11 @@ class VodSyncTest(unittest.TestCase):
                 return s
             a = video("111")
             a.add_event_anchor("start", self.mono, T0, None, "L")
-            self.assertEqual(a.mapping.confidence, "MEDIUM")
+            self.assertEqual(a.mapping.confidence, "HIGH")
             b = video("222")                                              # same GP + session, other recording
             self.assertEqual(b.mapping.confidence, "UNSYNCED")
             c = video("111")                                              # the first recording again
-            self.assertEqual(c.mapping.confidence, "MEDIUM")
+            self.assertEqual(c.mapping.confidence, "HIGH")
             self.assertIn("restored", c.mapping.source)
 
     def test_clock_lost_holds_and_is_not_synced(self):

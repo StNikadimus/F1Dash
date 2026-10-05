@@ -64,7 +64,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Optional
 
-from .openf1 import RefEvents, announced_start_ms
+from .openf1 import ClockStart, RefEvents, announced_start_ms, status_series_starts
 from .session_phases import SessionTimeline, build_timeline, fmt_clock, session_kind
 from .telemetry import parse_utc
 
@@ -280,9 +280,13 @@ class FeedRefCollector:
         self._small: list[tuple[float, str, Any]] = []
         self._tl_n = -1
         self._tl_key: Any = None
+        self._clock = ClockStart()
+        self.seen: dict[str, int] = {}          # start-relevant topics received (diagnostics)
 
     def reset(self) -> None:
         self.laps.clear()
+        self._clock = ClockStart()
+        self.seen = {}
         self.ref = RefEvents(source="feed")
         self._small = []
         self._tl_n = -1
@@ -306,6 +310,16 @@ class FeedRefCollector:
             self._tl_key = data.get("Key")
         if topic in self.TIMELINE_TOPICS and len(self._small) < 100_000:
             self._small.append((float(event_ms), topic, data))
+        if topic in ("SessionStatus", "SessionData", "ExtrapolatedClock", "RaceControlMessages"):
+            self.seen[topic] = self.seen.get(topic, 0) + 1
+        if topic == "ExtrapolatedClock":
+            # fallback only (whole seconds): the clock starts running at the start
+            u = parse_utc(data.get("Utc")) if data.get("Utc") else None
+            t = self._clock.feed(u.timestamp() * 1000 if u else float(event_ms), data.get("Remaining"),
+                                 data.get("Extrapolating"))
+            if t is not None:
+                self.ref.add_start(t, "ExtrapolatedClock ±1 s", approx=True)
+            return
         if topic == "RaceControlMessages":
             msgs = data.get("Messages")
             for m in (msgs.values() if isinstance(msgs, dict) else msgs if isinstance(msgs, list) else []):
@@ -316,20 +330,18 @@ class FeedRefCollector:
         if topic == "SessionData" and isinstance(data.get("StatusSeries"), (dict, list)):
             # status history with its own Utc (also in the snapshot): the start is known even
             # when the server joined after it
-            ser = data["StatusSeries"]
-            for e in (ser.values() if isinstance(ser, dict) else ser):
-                if isinstance(e, dict) and e.get("SessionStatus") == "Started" and e.get("Utc"):
-                    u = parse_utc(e.get("Utc"))
-                    if u and not any(abs(t - u.timestamp() * 1000) < 2000 for t in self.ref.starts):
-                        self.ref.starts.append(u.timestamp() * 1000)
-                        self.ref.starts.sort()
+            for u, st in status_series_starts(data["StatusSeries"]):
+                if u is None:
+                    self.ref.parse_errors += 1
+                elif st == "Started":
+                    self.ref.add_start(u, "SessionData.StatusSeries")
+                elif st == "Finished" and not any(abs(t - u) < 2500 for t in self.ref.finishes):
+                    self.ref.finishes.append(u)
             return
         if topic == "SessionStatus" and not snapshot:
             if data.get("Status") == "Started":
-                if not any(abs(t - event_ms) < 2000 for t in self.ref.starts):
-                    self.ref.starts.append(event_ms)
-                    self.ref.starts.sort()
-            elif data.get("Status") == "Finished":
+                self.ref.add_start(float(event_ms), "SessionStatus")
+            elif data.get("Status") == "Finished" and not any(abs(t - event_ms) < 2500 for t in self.ref.finishes):
                 self.ref.finishes.append(event_ms)
             return
         if topic not in ("TimingData", "TimingDataF1") or not isinstance(data.get("Lines"), dict):
@@ -583,6 +595,7 @@ class SyncManager:
         self._clock_lost_logged = False
         self.stream_pending: Optional[dict] = None   # MARK STREAM START before the start was in the data
         self.stream_mark: Optional[dict] = None      # the applied mark (display / diagnostics)
+        self.lights_out: Optional[dict] = None       # last LIGHTS OUT (L) result: matched event or why not
         self._start_key: Optional[tuple] = None      # last logged start state
         self._solve()
 
@@ -605,6 +618,7 @@ class SyncManager:
             self.anchors = []
             self.history = []
             self.stream_pending = self.stream_mark = None
+            self.lights_out = None
             self._start_key = None
             self.pending = None
             self.deviation_note = None
@@ -818,7 +832,15 @@ class SyncManager:
             if pkeys:
                 break
         pkeys = pkeys[-self.marks_used:]
-        med, _ = _robust([rep[k] for k in pkeys])
+
+        def wvals(keys):
+            # lights out / the stream start mark (the unique start event, ms timestamp) counts
+            # twice in the median of the precise anchors
+            out = []
+            for k in keys:
+                out += [rep[k]] * (2 if any(x.kind in ("start", "stream") for x in groups[k]) else 1)
+            return out
+        med, _ = _robust(wvals(pkeys))
         if len(pkeys) >= 3:                                  # a majority exists: reject outliers
             sigma = 1.4826 * median(abs(rep[k] - med) for k in pkeys)
             bad = [k for k in pkeys if abs(rep[k] - med) > max(3 * sigma, self.outlier_s)]
@@ -827,7 +849,7 @@ class SyncManager:
                     for x in groups[k]:
                         x.outlier = True
                 pkeys = [k for k in pkeys if k not in bad]
-                med, _ = _robust([rep[k] for k in pkeys])
+                med, _ = _robust(wvals(pkeys))
         spread = max(abs(rep[k] - med) for k in pkeys) if len(pkeys) >= 2 else None
         # verification by the less precise groups (countdown / typed time): within their stated range?
         verified, contra = [], []
@@ -898,8 +920,9 @@ class SyncManager:
                 reason += " A fixed delay cannot follow pause/seek."
             return Mapping(med, err, conf, src, reason, **{**common, "health": health, "health_error": health_err})
         a = groups[pkeys[-1]][0]
-        if any(x.kind == "stream" for x in groups[pkeys[-1]]):
-            reason = ("Stream start marked: the video moment you marked is matched to the ACTUAL F1 start "
+        if any(x.kind in ("stream", "start") for x in groups[pkeys[-1]]):
+            what = "Stream start marked" if any(x.kind == "stream" for x in groups[pkeys[-1]]) else "Lights out"
+            reason = (f"{what}: the video moment is matched to the ACTUAL F1 start "
                       f"({a.ref_source or 'reference'} millisecond timestamp) - not the scheduled start. The error is "
                       f"your key press ({'video paused on the start' if a.paused else 'reaction time'}).")
             return Mapping(med, err, "HIGH" if video else "MEDIUM", src, reason,
@@ -1013,6 +1036,137 @@ class SyncManager:
                 log.info("[SYNC] Detected race delay: %s (actual start - scheduled start)%s",
                          fmt_signed(info["f1_delay"]),
                          " - the scheduled start is ignored as the race-time anchor" if info["delayed"] else "")
+
+    # ------------------------------------------------------------------ LIGHTS OUT (L)
+    def _checked_topics(self) -> str:
+        if self.vod:
+            src = (self.ref.source if self.ref else "none")
+            parts = []
+            if "openf1" in src:
+                parts.append("OpenF1 race_control (SESSION STARTED)")
+            if "archive" in src:
+                parts.append("F1 archive SessionData.StatusSeries, SessionStatus, ExtrapolatedClock")
+            return ", ".join(parts) or "none (no OpenF1 reference, F1 archive timing not loaded)"
+        seen = self.feed_ref.seen
+        return ", ".join(f"{t} ({seen.get(t, 0)} msgs)" for t in
+                         ("SessionData", "SessionStatus", "ExtrapolatedClock", "RaceControlMessages"))
+
+    def _lights_out_missing(self, src_now_ms: float) -> tuple[str, str]:
+        """(code, explanation) why no lights out / session start is in the data."""
+        sess = self.session or {}
+        ref = self.ref
+        if not sess:
+            return "session", ("wrong or unknown session - the F1 session is not identified "
+                               f"({self.detect_reason or 'select it in the SYNC menu'})")
+        if ref is not None and ref.parse_errors and not ref.starts:
+            return "parse", (f"{ref.parse_errors} session status message(s) could not be parsed (no readable Utc) - "
+                             "see the server log")
+        kind = session_kind(sess.get("session_type"), sess.get("session_name"))
+        if self.vod:
+            if ref is None or ref.source == "none" or ref.empty():
+                return "vod_unavailable", ("VOD timing data unavailable - OpenF1 gave no reference for this session "
+                                           "and the F1 archive timing is not loaded (network?)")
+            return "not_in_history", (f"no lights out / session start in the historical data of "
+                                      f"{sess.get('meeting_name') or ''} {sess.get('session_name') or ''}".strip()
+                                      + (" (wrong session selected?)" if kind not in ("race", "unknown") else ""))
+        info = self.start_info(src_now_ms)
+        if info["state"] in ("PRE_START", "DELAYED", "UNKNOWN"):
+            sched = info["scheduled"]
+            return "not_yet", (f"not received yet - the session has not started in the F1 data "
+                               f"(state {info['state'].replace('_', '-')}"
+                               + (f", scheduled {utc_str(sched)[:8]} UTC" if sched is not None else "") + ")")
+        return "not_received", "the start was not received (the dashboard may have joined after it without the status history)"
+
+    def add_lights_out(self, mono: float, src_now_ms: float) -> str:
+        """L / START: the video shows lights out (the session start) now. Matched to the ACTUAL
+        start event in the F1 data (SessionData.StatusSeries / SessionStatus / OpenF1; the session
+        clock as a ±1 s fallback) - never to the scheduled start."""
+        log.info("[SYNC] Looking for Lights Out event")
+        err = self._need_clock(mono)
+        if err:
+            return err
+        ref = self.ref
+        starts = sorted(ref.starts) if ref else []
+        sess = self.session or {}
+        if not starts:
+            code, why = self._lights_out_missing(src_now_ms)
+            log.warning("[SYNC] Lights Out not found: %s", why)
+            log.warning("[SYNC] Checked topics: %s", self._checked_topics())
+            log.warning("[SYNC] Session: %s %s (key %s, scheduled %s)", sess.get("meeting_name"),
+                        sess.get("session_name"), sess.get("session_key"), sess.get("date_start"))
+            self.lights_out = {"found": False, "code": code, "reason": why, "checked": self._checked_topics()}
+            txt = f"SYNC: LIGHTS OUT NOT FOUND - {why}"
+            self.last_result = txt
+            return txt
+        video, pb, press_b = self._now_point(mono, src_now_ms, reaction=True)
+        react = self.reaction * max(self.clock.rate_now(), 0.0) if video and not self.clock.last.paused else 0.0
+        info = self.start_info(None if self.vod else src_now_ms)
+        prior = self._solve(video=video)
+        good_prior = prior.offset is not None and prior.grounded and prior.n > 0 and \
+            prior.confidence in ("HIGH", "MEDIUM", "MANUAL")
+        est = None
+        if prior.offset is not None and not (prior.confidence == "LIVE" and video):
+            est = (pb + (self.K if video and self.K is not None else prior.offset)) * 1000 if video \
+                else press_b - prior.offset * 1000
+        grounded, ambiguous = True, False
+        if len(starts) == 1:
+            best = starts[0]
+        elif good_prior:
+            window = (max(3 * prior.error + 2, 5.0) if prior.error is not None else self.window_s) * 1000
+            near = [t for t in starts if abs(t - est) <= window]
+            if not near:
+                why = (f"lights out of {sess.get('session_name') or 'this session'} is at "
+                       + ", ".join(utc_str(t)[:8] for t in starts) + f" UTC - none within ±{window / 1000:.0f} s of the "
+                       "current sync (wrong session selected, or the sync is off - Clear it first)")
+                log.warning("[SYNC] Lights Out not matched: %s", why)
+                self.lights_out = {"found": False, "code": "no_match", "reason": why, "checked": self._checked_topics()}
+                self.last_result = "SYNC: " + why
+                return self.last_result
+            best = min(near, key=lambda t: abs(t - est))
+            ambiguous = len(near) > 1
+            grounded = not ambiguous
+        else:
+            # no reliable sync yet: the race start (lights out before the first lap) unless the
+            # estimate is clearly nearer a restart after a red flag
+            first = info["actual"] if info["actual"] is not None else starts[0]
+            if est is None:
+                best = first
+            else:
+                order = sorted(starts, key=lambda t: abs(t - est))
+                best = order[0]
+                grounded = abs(order[1] - est) - abs(order[0] - est) > 300_000
+        approx = best in ref.approx_starts
+        src_txt = ref.start_src.get(best, ref.source)
+        offset = best / 1000 - pb if video else (press_b - best) / 1000
+        shown_b = press_b - react * 1000                 # receive clock when the video showed it
+        stream_delay = None if self.vod else (shown_b - best) / 1000
+        kind, label = ("clock", "Lights out (session clock ±1 s)") if approx else ("start", "Lights out")
+        n = starts.index(best) + 1
+        a = Anchor(kind, offset, best, pb, time.time(), None, None, grounded, ambiguous, False,
+                   ref.source, error=1.0 if approx else self.anchor_error,
+                   paused=bool(video and self.clock.last and self.clock.last.paused), label=label,
+                   detail=f"lights out {utc_str(best)} UTC ({src_txt}"
+                          + (f", start {n} of {len(starts)}" if len(starts) > 1 else "") + ")")
+        log.info("[SYNC] Lights Out event found: %s (%s)%s", utc_str(best), src_txt,
+                 f" - start {n} of {len(starts)}" if len(starts) > 1 else "")
+        log.info("[SYNC] Lights Out F1 timestamp: %s UTC (scheduled %s UTC%s)", utc_str(best),
+                 utc_str(info["scheduled"]) if info["scheduled"] is not None else "?",
+                 "" if info["scheduled"] is None else f", race delay {fmt_signed((best - info['scheduled']) / 1000)}")
+        log.info("[SYNC] VOYO reference time: %s%s", "no VOYO clock" if pb is None else f"video {pb:.3f} s",
+                 "" if self.vod else f", receive time {utc_str(shown_b)} UTC")
+        m = self._add(a)
+        log.info("[SYNC] Calculated stream offset: %.3f s%s", offset,
+                 "" if stream_delay is None else f" (stream delay {fmt_signed(stream_delay)})")
+        log.info("[SYNC] Sync confidence: %s", m.confidence)
+        self.lights_out = {"found": True, "f1_ms": best, "source": src_txt, "approx": approx, "video_time": pb,
+                           "voyo_ms": None if self.vod else shown_b, "stream_delay": stream_delay,
+                           "grounded": grounded, "n": n, "of": len(starts), "applied": a in self.anchors}
+        head = f"LIGHTS OUT ✓ F1 {utc_str(best)[:8]}" + (
+            f" · VOYO {utc_str(shown_b)[:8]} · STREAM DELAY {fmt_signed(stream_delay)}" if stream_delay is not None
+            else (f" · VIDEO {fmt_hms(pb)}" if pb is not None else ""))
+        if not grounded:
+            head += " (start not confirmed - press C if the TV shows lap 1)"
+        return self._anchor_result(m, a, head)
 
     def mark_stream_start(self, mono: float, src_now_ms: float) -> str:
         """MARK STREAM START: the video shows the ACTUAL start of the session now. The moment is
@@ -1506,6 +1660,8 @@ class SyncManager:
     def add_event_anchor(self, kind: str, mono: float, src_now_ms: float, driver: Optional[str] = None,
                          label: str = "") -> str:
         """You saw an event on the video now; match it to its timestamp on F1's clock (OpenF1 / feed)."""
+        if kind == "start":
+            return self.add_lights_out(mono, src_now_ms)
         err = self._need_clock(mono)
         if err:
             return err
@@ -1804,6 +1960,7 @@ class SyncManager:
                 "scheduledIgnored": bool(info["delayed"]),
                 "actualStartVideo": actual_video},
             "streamDelaySeconds": None if stream_delay is None else round(stream_delay, 1),
+            "lightsOut": self._lights_out_state(src_now_ms),
             "streamStart": {"pending": True} if self.stream_pending is not None else None if sm_ is None else {
                 "pending": False, "videoTime": None if sm_.get("video_time") is None else round(sm_["video_time"], 2),
                 "actualUtc": utc_str(sm_.get("actual_ms")),
@@ -1844,6 +2001,28 @@ class SyncManager:
         }
 
     status = get_state
+
+    def _lights_out_state(self, src_now_ms: float) -> dict:
+        """Is lights out in the data (time + topic), or why not; and the last L result."""
+        ref = self.ref
+        info = self.start_info(None if self.vod else src_now_ms) if self.session else None
+        actual = info["actual"] if info else None
+        out: dict = {"available": actual is not None}
+        if actual is not None:
+            out.update(f1Utc=utc_str(actual), source=ref.start_src.get(actual, ref.source) if ref else None,
+                       approx=bool(ref and actual in ref.approx_starts), starts=len(ref.starts) if ref else 0)
+        else:
+            code, why = self._lights_out_missing(src_now_ms)
+            out.update(code=code, reason=why, checked=self._checked_topics())
+        lo = self.lights_out
+        if lo:
+            out["last"] = {"found": lo["found"], "reason": lo.get("reason"),
+                           "f1Utc": utc_str(lo.get("f1_ms")), "source": lo.get("source"),
+                           "videoTime": None if lo.get("video_time") is None else round(lo["video_time"], 2),
+                           "voyoUtc": utc_str(lo.get("voyo_ms")),
+                           "streamDelaySeconds": None if lo.get("stream_delay") is None else round(lo["stream_delay"], 1),
+                           "grounded": lo.get("grounded"), "applied": lo.get("applied")}
+        return out
 
     def _disp(self, offset: Optional[float], start: Optional[float]) -> Optional[float]:
         """Offset as the user reads it: video position (s) of the scheduled session start

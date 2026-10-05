@@ -304,6 +304,15 @@
         ss && ss.streamDelaySeconds !== null && ss.streamDelaySeconds !== undefined ? `STREAM DELAY <b>${sg(ss.streamDelaySeconds)}</b>` : "",
       ss ? (ss.pending ? "STREAM START <b>waiting for the actual start</b>" : `STREAM START <b>marked</b> · CONFIDENCE <b>${esc(y.confidence || "—")}</b>`) : "",
     ].filter(Boolean).join(" · ") : "";
+    const lo = y.lightsOut, ll = lo && lo.last;
+    const hm = (u) => u ? esc(String(u).slice(0, 8)) : "—";
+    if (lo) $("startinfo").innerHTML += "<br>" + (ll && ll.found ?
+      `LIGHTS OUT ✓ · F1 EVENT <b>${hm(ll.f1Utc)}</b>` + (ll.voyoUtc ? ` · VOYO <b>${hm(ll.voyoUtc)}</b>` : "") +
+        (ll.streamDelaySeconds !== null && ll.streamDelaySeconds !== undefined ? ` · STREAM DELAY <b>${sg(ll.streamDelaySeconds)}</b>` : "") +
+        ` · CONFIDENCE <b>${esc(y.confidence || "—")}</b>` :
+      ll && !ll.found ? `LIGHTS OUT <b style="color:var(--amber)">NOT FOUND</b> · ${esc(ll.reason || "")}` :
+      lo.available ? `LIGHTS OUT in data <b>${hm(lo.f1Utc)} UTC</b> · press START when the video shows it` :
+      `LIGHTS OUT <b style="color:var(--amber)">not available</b> · ${esc(lo.reason || "")}`);
     renderDrivers();
     renderAdvSync();
   }
