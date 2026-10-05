@@ -1453,7 +1453,8 @@
     renderSyncMenu();
   }
   function syncAction(action, value) {
-    const field = { countdown: "countdown", exact: "f1_time", estimate: "lead_seconds", clock: "clock", marker: "marker" }[action];
+    const field = { countdown: "countdown", exact: "f1_time", estimate: "lead_seconds", clock: "clock", marker: "marker",
+      event_set: "id", event_remove: "id" }[action];
     send({ type: "sync_action", action, value: field ? value : undefined });
   }
   function buildSyncMenu() {
@@ -1471,11 +1472,13 @@
         <div class="sm-hint" id="sm-sel-hint"></div>
       </div>
       <div class="sm-info" id="sm-info"></div>
+      <div class="sm-events" id="sm-events" hidden></div>
       <div class="sm-q">How do you want to sync?</div>
       <div class="sm-methods">
         <button data-m="clock">Session Clock<small>time remaining / elapsed</small></button>
         <button data-m="marker">Phase Marker<small>SYNC HERE · most precise</small></button>
         <button data-m="stream">Mark Stream Start<small>VOYO at 0:00 · origin of the stream</small></button>
+        <button data-ev-open>Event Sync<small>real F1 events ↔ VOYO · several points</small></button>
         <button data-m="countdown">VOYO Countdown<small>recommended</small></button>
         <button data-m="exact">Manual Exact Time<small>time shown in the video</small></button>
         <button data-m="auto">Restore Saved Sync<small>automatic · only if reliable</small></button>
@@ -1566,6 +1569,12 @@
       }
       if (b.dataset.cap !== undefined) { syncAction("capture"); return; }
       if (b.dataset.lights !== undefined) { send({ type: "command", command: "SYNC_START" }); return; }
+      // EVENT SYNC sub-menu (server state: the TV remote's UP / DOWN / OK / BACK drive it too)
+      if (b.dataset.evOpen !== undefined) { send({ type: "command", command: "SYNC_EVENT_MENU", arg: "open" }); return; }
+      if (b.dataset.evBack !== undefined) { send({ type: "command", command: "SYNC_EVENT_MENU", arg: "close" }); return; }
+      if (b.dataset.evSet) { syncAction("event_set", b.dataset.evSet); return; }
+      if (b.dataset.evRm) { syncAction("event_remove", b.dataset.evRm); return; }
+      if (b.dataset.evClear !== undefined) { syncAction("event_clear"); return; }
       if (b.dataset.viewAnchors !== undefined) { syncShowAnchors = !syncShowAnchors; renderSyncMenu(); return; }
       if (b.dataset.selectOpen !== undefined) { openSelector(); return; }
       if (b.dataset.selectCancel !== undefined) { syncShowSelect = false; renderSyncMenu(); return; }
@@ -1731,6 +1740,39 @@
       ` · OFFSET: ${has(ss.actualAtVideo) ? "actual start at " + fmtSigned(ss.actualAtVideo) : "0:00 = " + esc(ss.originUtc.slice(0, 8)) + " UTC"} · CONFIDENCE: ${esc(ss.confidence || "—")}` :
       ` · ${esc(ss.reason || "")}`);
   }
+  // EVENT SYNC sub-menu: the real timestamped F1 events of this session and the points set on them
+  function fmtVidMs(v) { return has(v) ? fmtVid(v) + "." + String(Math.round((v % 1) * 1000) % 1000).padStart(3, "0") : NA; }
+  function renderEventSync(sy) {
+    const el = $("sm-events"), ev = (sy && sy.eventSync) || {};
+    const evs = ev.events || [], pts = (ev.points || []).filter((p) => p.state !== "replaced");
+    const sgn2 = (v) => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2) + " s";
+    const cur = !sy.vod && has(sy.streamDelaySeconds) ? `${fmtSigned(sy.streamDelaySeconds)} <small>video behind the F1 events</small>` :
+      ev.current ? `VOYO 0:00 = ${esc(ev.current.videoZeroUtc)} UTC` : `<span class="sm-warn">not synchronised</span>`;
+    const mark = { valid: "✓", outlier: "⚠", unconfirmed: "?" };
+    el.innerHTML = `
+      <div class="sm-sub">EVENT SYNC</div>
+      <p class="sm-hint">Select an F1 event, move VOYO to that exact moment (pause on it), then <b>SET</b>. Repeat with more
+        events - they are combined. <b>↑ / ↓</b> select · <b>OK / Enter</b> SET · <b>BACK / Backspace</b> back.</p>
+      <div class="sm-rrow"><span>Current offset</span><b>${cur}</b></div>
+      <div class="sm-rrow"><span>Confidence</span><b><span class="sd-conf conf-${esc(sy.confidence)}">${esc(sy.confidence)}</span>
+        ${sy.healthError ? ` <small>${esc(sy.healthError)}</small>` : ""}</b></div>
+      <div class="sm-sub">KNOWN EVENTS</div>
+      <div class="sm-markers se-list" id="se-list">${evs.length ? evs.map((e) => `
+        <div class="sm-mk se-ev${e.id === ev.sel ? " sel" : ""}" data-ev="${esc(e.id)}"><div><b>${esc(e.label)}</b>
+          <small>${esc((e.utc || "").slice(0, 12))} UTC${e.precise ? "" : " · ±1 s"} · ${esc(e.source || "")}</small></div>
+          <button data-ev-set="${esc(e.id)}">SET</button></div>`).join("") :
+        `<div class="sm-hint">${esc(ev.reason || "No timestamped F1 events for this session yet.")}</div>`}</div>
+      ${ev.hiddenIncidents ? `<div class="sm-hint">${ev.hiddenIncidents} later race-control event(s) (safety car, flags …) are listed once the synchronised video reaches them - no spoilers.</div>` : ""}
+      <div class="sm-sub">SYNC POINTS</div>
+      ${pts.length ? pts.map((p) => `<div class="sm-an st-${esc(p.state)}"><em>${mark[p.state] || esc(p.state)}${p.state === "outlier" ? " OUTLIER" : ""}</em>
+        <span>${esc(p.label)}${p.precise === false ? " <small>±1 s</small>" : ""}</span>
+        <b><small>F1</small> ${esc((p.f1Utc || "").slice(0, 12))} <small>VOYO</small> ${fmtVidMs(p.videoTime)}</b>
+        <i>${has(p.residual) ? sgn2(p.residual) : ""} <button class="se-rm" data-ev-rm="${esc(p.id)}" title="Remove this point">✕</button></i></div>`).join("") :
+        `<div class="sm-hint">No sync points yet.</div>`}
+      <div class="sm-row"><button data-ev-clear>CLEAR EVENT SYNC POINTS</button><button class="pri" data-ev-back>BACK</button></div>`;
+    const sel = el.querySelector(".se-ev.sel");
+    if (sel) sel.scrollIntoView({ block: "nearest" });
+  }
   function renderSyncMenu() {
     const sy = S.sync;
     const el = $("sync-menu");
@@ -1741,6 +1783,10 @@
       return;
     }
     buildSyncMenu();
+    const evMode = !!(S.ui && S.ui.sync_events);
+    $("sync-menu").classList.toggle("ev-mode", evMode);
+    $("sm-events").hidden = !evMode;
+    if (evMode && sy) renderEventSync(sy);
     const v = sy && sy.voyo;
     const sess = sy && sy.sessionName ? `${flagEmoji(sy.countryCode)} ${esc(sy.meetingName || "")} — ${esc(sy.sessionName)}` :
       `<span class="sm-warn">not identified</span>${sy && sy.detection ? ` <small>${esc(sy.detection)}</small>` : ""}`;

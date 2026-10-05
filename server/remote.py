@@ -36,6 +36,8 @@ COMMANDS = {
     "SYNC_START", "SYNC_CONFIRM", "SYNC_CLEAR", "SYNC_PIN", "SYNC_MENU", "SYNC_KEEP_OLD", "SYNC_USE_NEW",
     # MARK STREAM START: the video shows the ACTUAL session start now / remove that mark
     "SYNC_STREAM_START", "SYNC_STREAM_RESET",
+    # EVENT SYNC sub-menu of the SYNC menu: open / close, choose an F1 event, SET it, clear the points
+    "SYNC_EVENT_MENU", "SYNC_EVENT_PREV", "SYNC_EVENT_NEXT", "SYNC_EVENT_SET", "SYNC_EVENT_CLEAR",
     # track map wrong: rebuild the outline of this circuit (pit lane kept)
     "TRACK_REPORT",
     # weather report popup now (arg in TEST mode: a simulated scenario, see server/weather.py)
@@ -50,7 +52,13 @@ MODE_COMMANDS = {"SET_MODE": None, "CYCLE_MODE": "NEXT", "MODE_AUTO": "AUTO", "M
 MODE_ARG_RE = re.compile(r"^(AUTO|LIVE|VOD|NEXT)$")
 SYNC_ACTIONS = {"SYNC_PLUS", "SYNC_MINUS", "SYNC_ADJUST", "SYNC_MARK", "SYNC_RESYNC",
                 "SYNC_START", "SYNC_CONFIRM", "SYNC_CLEAR", "SYNC_PIN", "SYNC_KEEP_OLD", "SYNC_USE_NEW",
-                "SYNC_STREAM_START", "SYNC_STREAM_RESET"}
+                "SYNC_STREAM_START", "SYNC_STREAM_RESET",
+                "SYNC_EVENT_PREV", "SYNC_EVENT_NEXT", "SYNC_EVENT_SET", "SYNC_EVENT_CLEAR"}
+EVENT_ID_RE = re.compile(r"^[a-z][0-9]{9,15}$")
+# while the EVENT SYNC sub-menu is open, the navigation keys work in it (any key layer)
+EVENT_MENU_KEYS = {"KEY_UP": "SYNC_EVENT_PREV", "KEY_DOWN": "SYNC_EVENT_NEXT", "KEY_OK": "SYNC_EVENT_SET",
+                   "KEY_ENTER": "SYNC_EVENT_SET", "KEY_BACK": "SYNC_EVENT_MENU:close",
+                   "KEY_ESC": "SYNC_EVENT_MENU:close"}
 VIDEO_ACTIONS = {"VIDEO_PLAY_PAUSE": "play_pause", "VIDEO_MUTE": "mute", "VIDEO_VOLUME": "volume",
                  "VIDEO_SEEK": "seek", "VIDEO_FULLSCREEN": "fullscreen"}
 KEY_RE = re.compile(r"^[A-Z0-9_]{1,32}$")
@@ -72,6 +80,7 @@ class UIState:
     video_notice: Optional[str] = None
     video_cmd: dict = field(default_factory=lambda: {"n": 0, "action": None, "arg": None})
     sync_menu: bool = False                  # SYNC menu open on the dashboards
+    sync_events: bool = False                # its EVENT SYNC sub-menu is open (UP/DOWN/OK/BACK drive it)
     pit_debug: bool = False                  # pit-lane reconstruction debug overlay on the map
     toast: dict = field(default_factory=lambda: {"n": 0, "text": None})
     seq: int = 0
@@ -174,6 +183,8 @@ class RemoteController:
         if not key.startswith("KEY_"):
             key = "KEY_" + key
         mapped, layer = self._lookup(key)
+        if self.ui.sync_menu and self.ui.sync_events and key in EVENT_MENU_KEYS:
+            mapped, layer = EVENT_MENU_KEYS[key], "event-sync"
         if not mapped:
             log.info("Unmapped remote key %s from %s", key, origin)
             return False
@@ -322,8 +333,17 @@ class RemoteController:
             self._toast(self.weather_hook((arg or "").lower() or None))
         elif name == "PITLANE_DEBUG":
             self.ui.pit_debug = not self.ui.pit_debug
+        elif name == "SYNC_EVENT_MENU":
+            self.ui.sync_events = not self.ui.sync_events if arg not in ("open", "close") else arg == "open"
+            if self.ui.sync_events:
+                self.ui.sync_menu = True                    # a sub-menu of the SYNC menu
+                self.ui.help = False
+                if self.sync_hook is not None:
+                    self.sync_hook("SYNC_EVENT_PREV", "0")  # select the event nearest the video
         elif name in ("SYNC_MENU", "SYNC_DEBUG"):
             self.ui.sync_menu = not self.ui.sync_menu if arg not in ("open", "close") else arg == "open"
+            if not self.ui.sync_menu:
+                self.ui.sync_events = False
             if self.ui.sync_menu:
                 self.ui.help = False
                 if self.ui.tv_mode == "VIDEO_FOCUS":        # the video window would cover the menu
@@ -331,6 +351,8 @@ class RemoteController:
                     self.ui.video_focus = False
         elif name in SYNC_ACTIONS:
             if name == "SYNC_ADJUST" and (arg is None or not ADJUST_RE.match(arg)):
+                return False
+            if name == "SYNC_EVENT_SET" and arg is not None and not EVENT_ID_RE.match(arg):
                 return False
             if self.sync_hook is None:
                 return False

@@ -813,3 +813,10 @@ div.sm-keys { margin-top: 8px; }
 .track-menu .tm-row { display: flex; gap: 8px; }
 .track-menu button { background: #2f6fd6; color: #fff; border: 0; padding: 6px 14px; font: inherit; font-weight: 800; cursor: pointer; }
 .sm-lab { align-self: center; font-size: 13px; font-weight: 700; color: var(--text-2); white-space: nowrap; }
+/* EVENT SYNC sub-menu of the SYNC menu (replaces the method list while it is open) */
+#sync-menu.ev-mode > :not(.sm-head):not(#sm-events):not(.sm-msg):not(.sm-drift) { display: none; }
+.se-list { max-height: 420px; overflow-y: auto; }
+.se-ev.sel { border-color: var(--green); box-shadow: inset 0 0 0 2px var(--green); }
+.sm-an .se-rm { background: none; border: 1px solid var(--line-2); color: var(--text-3); border-radius: 4px;
+  padding: 0 6px; margin-left: 6px; cursor: pointer; font: 700 13px var(--font); }
+.sm-an.st-outlier em { color: var(--amber); }

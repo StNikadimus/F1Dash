@@ -487,6 +487,15 @@ class Engine:
             return self.sync.confirm(mono)
         if name == "SYNC_CLEAR":
             return self.sync.clear_anchor()
+        if name in ("SYNC_EVENT_PREV", "SYNC_EVENT_NEXT", "SYNC_EVENT_SET", "SYNC_EVENT_CLEAR"):
+            if name == "SYNC_EVENT_SET":
+                text = self.sync.event_set(mono, now, arg)
+            elif name == "SYNC_EVENT_CLEAR":
+                text = self.sync.clear_event_points()
+            else:
+                text = self.sync.event_select(0 if arg == "0" else (-1 if name == "SYNC_EVENT_PREV" else 1))
+            self.hub.set_sync(self.sync_status())            # the menu follows at once
+            return text
         if name == "SYNC_STREAM_START":
             return self.sync.mark_stream_start(mono, now)
         if name == "SYNC_STREAM_RESET":
@@ -553,6 +562,12 @@ class Engine:
                 text = sm.set_estimate(lead)
         elif action == "clear":
             text = sm.clear_anchor()
+        elif action == "event_set":
+            text = sm.event_set(mono, now, str(value) if value is not None else None)
+        elif action == "event_remove":
+            text = sm.remove_point(str(value or ""))
+        elif action == "event_clear":
+            text = sm.clear_event_points()
         elif action == "stream_start":
             text = sm.mark_stream_start(mono, now)
         elif action == "stream_reset":
@@ -576,7 +591,7 @@ class Engine:
             return {"ok": False, "error": "unknown action"}
         failed = text.startswith("SYNC:") if isinstance(text, str) else False
         if self.vod and action in ("countdown", "exact", "estimate", "use_new", "resync", "clock", "marker",
-                                   "stream_start", "stream_reset"):
+                                   "stream_start", "stream_reset", "event_set", "event_remove", "event_clear"):
             self._log_data_check(action, text)
         self.hub.set_sync(self.sync_status())
         return {"ok": not failed, "result": text, **extra, "state": self.sync_status()}
