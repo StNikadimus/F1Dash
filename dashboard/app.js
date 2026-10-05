@@ -1500,6 +1500,7 @@
           start event in the F1 data, <b>never to the scheduled start</b>, so a delayed race and a delayed stream
           are not mixed up. Marked the wrong moment? Press it again on the right one, or reset it.</p>
         <div class="sm-row"><button class="pri" data-apply="stream_start">MARK STREAM START</button>
+          <button data-lights>LIGHTS OUT (L)</button>
           <button data-apply="stream_reset">RESET STREAM START</button></div>
         <div class="sm-hint" id="sm-stream-hint"></div>
       </div>
@@ -1563,6 +1564,7 @@
         return;
       }
       if (b.dataset.cap !== undefined) { syncAction("capture"); return; }
+      if (b.dataset.lights !== undefined) { send({ type: "command", command: "SYNC_START" }); return; }
       if (b.dataset.viewAnchors !== undefined) { syncShowAnchors = !syncShowAnchors; renderSyncMenu(); return; }
       if (b.dataset.selectOpen !== undefined) { openSelector(); return; }
       if (b.dataset.selectCancel !== undefined) { syncShowSelect = false; renderSyncMenu(); return; }
@@ -1696,6 +1698,20 @@
     if (has(si.f1DelaySeconds)) out += row("F1 start delay", `${fmtSigned(si.f1DelaySeconds)} <small>actual start − scheduled start (the event)</small>`);
     if (has(sy.streamDelaySeconds)) out += row("Stream delay", `${fmtSigned(sy.streamDelaySeconds)} <small>video behind the F1 events (the broadcast)</small>`);
     else if (has(si.actualStartVideo)) out += row("Actual start in video", `${fmtVid(si.actualStartVideo)} <small>recording position of lights out / session start</small>`);
+    // LIGHTS OUT: the start event in the F1 data (time + topic) and the last L result - or why not
+    const lo = sy.lightsOut, ll = lo && lo.last;
+    if (ll && ll.found) {
+      out += row("Lights out ✓", `F1 EVENT ${hm(ll.f1Utc)}` + (ll.voyoUtc ? ` · VOYO ${hm(ll.voyoUtc)}` :
+        has(ll.videoTime) ? ` · VIDEO ${fmtVid(ll.videoTime)}` : "") +
+        (has(ll.streamDelaySeconds) ? ` · STREAM DELAY ${fmtSigned(ll.streamDelaySeconds)}` : "") +
+        ` <small>${esc(ll.source || "")}${ll.grounded === false ? " · start not confirmed" : ""}</small>`);
+    } else if (ll && !ll.found) {
+      out += row("Lights out", `<span class="sm-warn">NOT FOUND</span> <small>${esc(ll.reason || "")}</small>`);
+    } else if (lo && lo.available) {
+      out += row("Lights out", `${hm(lo.f1Utc)} <small>${esc(lo.source || "")}${lo.approx ? " (±1 s)" : ""} · press L when the video shows it</small>`);
+    } else if (lo) {
+      out += row("Lights out", `<span class="sm-warn">not available</span> <small>${esc(lo.reason || "")}</small>`);
+    }
     const ss = sy.streamStart;
     if (ss) out += row("Stream start mark", ss.pending ? `<span class="sm-warn">waiting for the actual start in the F1 data</span>` :
       `${has(ss.videoTime) ? "video " + fmtVid(ss.videoTime) + " = " : "at "}${hm(ss.actualUtc)}${has(ss.streamDelaySeconds) ? ` <small>stream delay ${fmtSigned(ss.streamDelaySeconds)}</small>` : ""}${ss.restored ? " <small>saved</small>" : ""}`);

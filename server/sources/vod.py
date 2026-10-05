@@ -28,7 +28,8 @@ from typing import Any, Callable, Optional
 import httpx
 
 from ..feedstate import FeedState
-from ..openf1 import OpenF1Client, OpenF1Error, RefEvents, ref_events_from_openf1
+from ..openf1 import (ClockStart, OpenF1Client, OpenF1Error, RefEvents, merge_refs, ref_events_from_openf1,
+                      status_series_starts)
 from ..telemetry import parse_utc
 from .base import Sink, Source
 from .f1_live import _local_to_utc
@@ -117,6 +118,7 @@ def ref_events_from_archive(events: list[Event]) -> RefEvents:
     """Fallback reference events from the archive itself (same clock as OpenF1)."""
     ev = RefEvents(source="archive")
     laps: dict[str, int] = {}
+    clock = ClockStart()
     for e in events:
         d = e.data if isinstance(e.data, dict) else None
         if d is None:
@@ -124,9 +126,25 @@ def ref_events_from_archive(events: list[Event]) -> RefEvents:
         if e.topic == "SessionStatus":
             st = d.get("Status")
             if st == "Started":
-                ev.starts.append(_ms(e))
-            elif st == "Finished":
+                ev.add_start(_ms(e), "SessionStatus")
+            elif st == "Finished" and not any(abs(x - _ms(e)) < 2500 for x in ev.finishes):
                 ev.finishes.append(_ms(e))
+        elif e.topic == "SessionData" and d.get("StatusSeries") is not None:
+            # the F1 archive has no SessionStatus topic: lights out / session start is the
+            # StatusSeries entry SessionStatus "Started" with its own millisecond Utc
+            for u, st in status_series_starts(d.get("StatusSeries")):
+                if u is None:
+                    ev.parse_errors += 1
+                elif st == "Started":
+                    ev.add_start(u, "SessionData.StatusSeries")
+                elif st == "Finished" and not any(abs(x - u) < 2500 for x in ev.finishes):
+                    ev.finishes.append(u)
+        elif e.topic == "ExtrapolatedClock":
+            from ..telemetry import parse_utc
+            u = parse_utc(d.get("Utc")) if d.get("Utc") else None
+            t = clock.feed(u.timestamp() * 1000 if u else _ms(e), d.get("Remaining"), d.get("Extrapolating"))
+            if t is not None:
+                ev.add_start(t, "ExtrapolatedClock ±1 s", approx=True)
         elif e.topic == "RaceControlMessages":
             msgs = d.get("Messages")
             for m in (msgs.values() if isinstance(msgs, dict) else msgs if isinstance(msgs, list) else []):
@@ -144,6 +162,7 @@ def ref_events_from_archive(events: list[Event]) -> RefEvents:
                 laps[num] = max(n, prev or 0)
                 if prev is not None and n > prev and not line.get("InPit") and not line.get("PitOut"):
                     ev.add_crossing(num, _ms(e), n)
+    ev.finishes.sort()
     return ev
 
 
@@ -282,8 +301,14 @@ class VodSource(Source):
             log.warning("VOD: session clock / phases not available yet (%s)", exc)
         if self.requested != key:
             return
-        meta_ref = of1_ref if of1_ref is not None else RefEvents(source="none")
+        # lights out / session start from the small archive topics too (SessionData.StatusSeries,
+        # ExtrapolatedClock): L works before the big download even when OpenF1 has nothing
+        arch_meta = ref_events_from_archive(small) if timeline is not None else None
+        meta_ref = merge_refs(of1_ref, arch_meta if arch_meta is not None and not arch_meta.empty() else None)
         meta_ref.timeline = timeline
+        log.info("VOD: sync reference before the download: %d start(s) %s, %d lap crossings (%s)",
+                 len(meta_ref.starts), [meta_ref.start_src.get(t) for t in meta_ref.starts],
+                 sum(len(v) for v in meta_ref.crossings.values()), meta_ref.source)
         self.session = None
         if self.on_meta:
             self.on_meta(session, meta_ref)
@@ -314,7 +339,7 @@ class VodSource(Source):
         if not events:
             raise RuntimeError("archive contains no data")
         ckpts, arch_ref = await asyncio.to_thread(self._prepare, events)
-        ref = of1_ref or arch_ref
+        ref = merge_refs(of1_ref, arch_ref)
         full_tl = await asyncio.to_thread(build_timeline, events, session.get("session_type"),
                                           session.get("session_name"))
         ref.timeline = full_tl if full_tl.phases or timeline is None else timeline
