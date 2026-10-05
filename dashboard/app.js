@@ -1759,9 +1759,13 @@
       <div class="sm-sub">KNOWN EVENTS</div>
       <div class="sm-markers se-list" id="se-list">${evs.length ? evs.map((e) => `
         <div class="sm-mk se-ev${e.id === ev.sel ? " sel" : ""}" data-ev="${esc(e.id)}"><div><b>${esc(e.label)}</b>
-          <small>${esc((e.utc || "").slice(0, 12))} UTC${e.precise ? "" : " · ±1 s"} · ${esc(e.source || "")}</small></div>
+          <small>${esc((e.utc || "").slice(0, 12))} UTC${e.precise ? "" : " · ±1 s"} · ${esc(e.source || "")}${e.confidence ?
+            ` · confidence ${esc(e.confidence)}` : ""}${e.conflict ? ` · <span class="sm-warn">sources disagree: ${esc(e.conflict)}</span>` : ""}</small></div>
           <button data-ev-set="${esc(e.id)}">SET</button></div>`).join("") :
         `<div class="sm-hint">${esc(ev.reason || "No timestamped F1 events for this session yet.")}</div>`}</div>
+      ${sy.sessionKind === "race" && ev.lightsOut && !has(ev.lightsOut.timestamp_ms) ? `<div class="sm-mk"><div><b>LIGHTS OUT</b>
+        <small><span class="sm-warn">Unavailable</span> · ${esc(ev.lightsOut.reason || "")}${(sy.lightsOut || {}).fallback &&
+          sy.lightsOut.fallback.state !== "off" ? ` · public F1 SignalR fallback: ${esc(sy.lightsOut.fallback.state)}` : ""}</small></div></div>` : ""}
       ${ev.hiddenIncidents ? `<div class="sm-hint">${ev.hiddenIncidents} later race-control event(s) (safety car, flags …) are listed once the synchronised video reaches them - no spoilers.</div>` : ""}
       <div class="sm-sub">SYNC POINTS</div>
       ${pts.length ? pts.map((p) => `<div class="sm-an st-${esc(p.state)}"><em>${mark[p.state] || esc(p.state)}${p.state === "outlier" ? " OUTLIER" : ""}</em>

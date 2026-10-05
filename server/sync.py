@@ -64,6 +64,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Optional
 
+from .lights_out import LightsOutResult, resolve_lights_out
 from .openf1 import ClockStart, RefEvents, announced_start_ms, status_series_starts, status_series_track
 from .session_phases import SessionTimeline, build_timeline, fmt_clock, session_kind
 from .telemetry import parse_utc
@@ -282,6 +283,9 @@ class FeedRefCollector:
         self._tl_key: Any = None
         self._clock = ClockStart()
         self.seen: dict[str, int] = {}          # start-relevant topics received (diagnostics)
+        # source family of this feed's reports ("F1 TV timing" / "F1 SignalR" / "F1 archive" ...),
+        # set by the engine from the live connection's state (server/lights_out.py)
+        self.family: Any = lambda: "F1 SignalR"
 
     def reset(self) -> None:
         self.laps.clear()
@@ -303,10 +307,13 @@ class FeedRefCollector:
         if event_ms is None or not isinstance(data, dict):
             return
         if topic == "SessionInfo" and data.get("Key") is not None and data.get("Key") != self._tl_key:
-            # another session (the server keeps running from FP3 into qualifying): start over
+            # another session (the server keeps running from qualifying into the race): start over -
+            # the previous session's starts / laps / events must never be this session's
             if self._tl_key is not None:
                 self._small, self._tl_n = [], -1
-                self.ref.timeline = None
+                self.laps.clear()
+                self._clock = ClockStart()
+                self.ref = RefEvents(source="feed")
             self._tl_key = data.get("Key")
         if topic in self.TIMELINE_TOPICS and len(self._small) < 100_000:
             self._small.append((float(event_ms), topic, data))
@@ -318,7 +325,7 @@ class FeedRefCollector:
             t = self._clock.feed(u.timestamp() * 1000 if u else float(event_ms), data.get("Remaining"),
                                  data.get("Extrapolating"))
             if t is not None:
-                self.ref.add_start(t, "ExtrapolatedClock ±1 s", approx=True)
+                self.ref.add_start(t, f"{self.family()} · ExtrapolatedClock ±1 s", approx=True)
             return
         if topic == "RaceControlMessages":
             msgs = data.get("Messages")
@@ -339,7 +346,7 @@ class FeedRefCollector:
                 if u is None:
                     self.ref.parse_errors += 1
                 elif st == "Started":
-                    self.ref.add_start(u, "SessionData.StatusSeries")
+                    self.ref.add_start(u, f"{self.family()} · SessionData.StatusSeries")
                 elif st == "Finished" and not any(abs(t - u) < 2500 for t in self.ref.finishes):
                     self.ref.finishes.append(u)
                 elif st == "Aborted":
@@ -350,7 +357,7 @@ class FeedRefCollector:
             return
         if topic == "SessionStatus" and not snapshot:
             if data.get("Status") == "Started":
-                self.ref.add_start(float(event_ms), "SessionStatus")
+                self.ref.add_start(float(event_ms), f"{self.family()} · SessionStatus")
             elif data.get("Status") == "Finished" and not any(abs(t - event_ms) < 2500 for t in self.ref.finishes):
                 self.ref.finishes.append(event_ms)
             return
@@ -615,6 +622,9 @@ class SyncManager:
         self.origin: Optional[dict] = None           # START OF STREAM: VOYO 0:00 of this session + video
         self.lights_out: Optional[dict] = None       # last LIGHTS OUT (L) result: matched event or why not
         self.event_sel: Optional[str] = None         # EVENT SYNC: selected event id (remote UP / DOWN)
+        self._lo_memo: Optional[tuple] = None        # (key, LightsOutResult) of the resolver
+        self._lo_logged: Optional[tuple] = None
+        self.lo_fallback: dict = {"state": "off"}    # the public F1 SignalR fallback connection (LIVE)
         self._start_key: Optional[tuple] = None      # last logged start state
         self._solve()
 
@@ -1000,13 +1010,10 @@ class SyncManager:
         RUNNING    the session is running (or over)"""
         sched = self._session_start_ms()
         ref = self.ref
-        starts = sorted(ref.starts) if ref else []
-        first = ref.first_crossing() if ref else None
-        known = [t for t in starts if at_ms is None or t <= at_ms]
-        # the start is the last Started BEFORE the first completed lap: an aborted start is followed
-        # by another Started; a restart after a red flag later in the session comes after laps
-        before = [t for t in known if first is None or t <= first + 1000]
-        actual = before[-1] if before else None     # only restarts known: the start itself is unknown
+        # the ONE canonical actual start (server/lights_out.py): the last start before the first
+        # completed lap, from the most authoritative source - never the schedule
+        lo = self.lights_out_result()
+        actual = lo.timestamp_ms if lo.ok and (at_ms is None or lo.timestamp_ms <= at_ms) else None
         notices = [(t, m) for t, m in (getattr(ref, "notices", None) or [])
                    if (at_ms is None or t <= at_ms) and (actual is None or t <= actual)]
         gmt = (self.session or {}).get("gmt_offset")
@@ -1036,6 +1043,58 @@ class SyncManager:
         return {"state": state, "scheduled": sched, "actual": actual, "announced": announced,
                 "f1_delay": f1_delay, "waited": waited, "delayed": delayed, "notice": last_notice,
                 "race": race}
+
+    # ------------------------------------------------------------------ LIGHTS OUT resolver
+    def _lo_cache(self) -> Optional[dict]:
+        key = (self.session or {}).get("session_key")
+        return (self.store.data.get("lights_out") or {}).get(str(key)) if key is not None else None
+
+    def lights_out_result(self) -> LightsOutResult:
+        """The canonical LIGHTS OUT of the current session (memoised; saved per session key)."""
+        ref, sess = self.ref, self.session or {}
+        obs = list(ref.start_obs) if ref is not None else []
+        first = ref.first_crossing() if ref is not None else None
+        cache = self._lo_cache()
+        key = (id(ref), len(obs), first, sess.get("session_key"), sess.get("date_start"),
+               None if cache is None else cache.get("timestamp_ms"))
+        if self._lo_memo is not None and self._lo_memo[0] == key:
+            return self._lo_memo[1]
+        race = session_kind(sess.get("session_type"), sess.get("session_name")) in ("race", "unknown")
+        res = resolve_lights_out(obs, first, sess if sess else None, historical=self.vod, cache=cache, race=race)
+        self._lo_memo = (key, res)
+        self._lo_after(res, first)
+        return res
+
+    def _lo_after(self, res: LightsOutResult, first: Optional[float]) -> None:
+        """[SYNC] log lines when the result changes; save an established result for this session."""
+        k = (res.timestamp_ms, res.source, res.confidence, res.conflict, res.cached)
+        if k != self._lo_logged and self.session:
+            self._lo_logged = k
+            sess = self.session
+            if res.ok:
+                log.info("[SYNC] Lights Out resolved: %s UTC from %s - confidence %s%s (%s %s, session %s, %s)",
+                         utc_str(res.timestamp_ms), res.source, res.confidence, " (saved result)" if res.cached else "",
+                         sess.get("meeting_name"), sess.get("session_name"), sess.get("session_key"),
+                         "historical" if res.historical else "live")
+                if len(res.sources) > 1:
+                    log.info("[SYNC] Lights Out sources: %s", "; ".join(
+                        f"{x['source']} {x['utc']}{' ✓' if x['agrees'] else ' ✗'}" for x in res.sources))
+                if res.conflict:
+                    log.warning("[SYNC] Lights Out sources DISAGREE: %s - using %s (source priority)",
+                                res.conflict_detail, res.family)
+            else:
+                log.info("[SYNC] Lights Out unavailable for %s %s (session %s): %s", sess.get("meeting_name"),
+                         sess.get("session_name"), sess.get("session_key"), res.reason)
+        # established: a recording, or live once the first lap is complete (an aborted start can
+        # still be followed by the real one before that)
+        if res.ok and not res.cached and res.confidence != "MEDIUM" and (self.vod or first is not None):
+            entry = {"timestamp_ms": res.timestamp_ms, "source": res.source, "confidence": res.confidence,
+                     "meeting_key": res.meeting_key, "session_key": res.session_key,
+                     "session_name": res.session_name, "historical": res.historical, "resolved_at": res.resolved_at}
+            saved = self._lo_cache()
+            if not saved or saved.get("timestamp_ms") != entry["timestamp_ms"] or saved.get("source") != entry["source"]:
+                self.store.data.setdefault("lights_out", {})[str(res.session_key)] = entry
+                self.store.save()
 
     def _start_at(self) -> Optional[float]:
         """F1 time the start state is evaluated at: live = the feed's now; recording = the time shown."""
@@ -1089,10 +1148,19 @@ class SyncManager:
                 return                                           # same moment from another source
             out.append({"id": f"{kind[0]}{int(ms)}", "kind": kind, "ms": ms, "label": label, "precise": precise,
                         "source": source, "incident": incident, **kw})
-        for i, t in enumerate(sorted(ref.starts)):
-            first = t == info["actual"] or (info["actual"] is None and i == 0)
-            label = ("LIGHTS OUT" if first else "RESTART") if race else ("SESSION START" if first else "SESSION RESUMED")
-            add("start", t, label, t not in ref.approx_starts, ref.start_src.get(t, ref.source), not first)
+        lo = self.lights_out_result()
+        if lo.ok:
+            add("start", lo.timestamp_ms, "LIGHTS OUT" if race else "SESSION START",
+                lo.family != "session clock" and not (lo.source or "").endswith("±1 s"),
+                (lo.source or "") + (" (saved)" if lo.cached else ""), False, confidence=lo.confidence,
+                conflict=lo.conflict_detail)
+        for t in sorted(ref.starts):
+            if lo.ok and abs(t - lo.timestamp_ms) < 30_000:
+                continue
+            if lo.ok and t < lo.timestamp_ms:
+                continue                                         # an aborted start before the real one
+            add("start", t, "RESTART" if race else "SESSION RESUMED", t not in ref.approx_starts,
+                ref.start_src.get(t, ref.source), True)
         if race:
             # the leader starting lap n+1 = the first car crossing the line with n laps completed
             first_by_lap: dict[int, tuple[float, str]] = {}
@@ -1236,8 +1304,10 @@ class SyncManager:
         cur = None
         if m.offset is not None and (self.vod or self.active == "VOYO") and m.confidence != "LIVE":
             cur = {"videoZeroUtc": utc_str(m.offset * 1000)}
-        return {"events": [{k: e.get(k) for k in ("id", "label", "precise", "source", "incident")}
-                           | {"utc": utc_str(e["ms"])} for e in menu],
+        lo = self.lights_out_result()
+        return {"events": [{k: e.get(k) for k in ("id", "label", "precise", "source", "incident", "confidence",
+                                                   "conflict")} | {"utc": utc_str(e["ms"])} for e in menu],
+                "lightsOut": lo.to_json() if self.session else None,
                 "hiddenIncidents": hidden, "sel": self.event_sel, "points": rows, "current": cur,
                 "reason": None if menu else (self._lights_out_missing(src_now_ms)[1] if self.session else
                                              "F1 session not identified")}
@@ -1292,6 +1362,9 @@ class SyncManager:
             return err
         ref = self.ref
         starts = sorted(ref.starts) if ref else []
+        lo = self.lights_out_result() if self.session else None
+        if lo is not None and lo.ok and not any(abs(t - lo.timestamp_ms) < 30_000 for t in starts):
+            starts = sorted(starts + [lo.timestamp_ms])         # the saved result of this session
         sess = self.session or {}
         if not starts:
             code, why = self._lights_out_missing(src_now_ms)
@@ -1340,15 +1413,16 @@ class SyncManager:
                 order = sorted(starts, key=lambda t: abs(t - est))
                 best = order[0]
                 grounded = abs(order[1] - est) - abs(order[0] - est) > 300_000
-        approx = best in ref.approx_starts
-        src_txt = ref.start_src.get(best, ref.source)
+        approx = ref is not None and best in ref.approx_starts
+        src_txt = (ref.start_src.get(best) if ref is not None else None) or \
+            ((lo.source + (" (saved)" if lo.cached else "")) if lo is not None and lo.ok else "?")
         offset = best / 1000 - pb if video else (press_b - best) / 1000
         shown_b = press_b - react * 1000                 # receive clock when the video showed it
         stream_delay = None if self.vod else (shown_b - best) / 1000
         kind, label = ("clock", "Lights out (session clock ±1 s)") if approx else ("start", "Lights out")
         n = starts.index(best) + 1
         a = Anchor(kind, offset, best, pb, time.time(), None, None, grounded, ambiguous, False,
-                   ref.source, error=1.0 if approx else self.anchor_error,
+                   ref.source if ref is not None else "saved", error=1.0 if approx else self.anchor_error,
                    paused=bool(video and self.clock.last and self.clock.last.paused), label=label,
                    detail=f"lights out {utc_str(best)} UTC ({src_txt}"
                           + (f", start {n} of {len(starts)}" if len(starts) > 1 else "") + ")")
@@ -2262,7 +2336,9 @@ class SyncManager:
         ref = self.ref
         info = self.start_info(None if self.vod else src_now_ms) if self.session else None
         actual = info["actual"] if info else None
-        out: dict = {"available": actual is not None}
+        res = self.lights_out_result()
+        out: dict = {"available": actual is not None, "resolved": res.to_json() if self.session else None,
+                     "fallback": dict(self.lo_fallback)}
         if actual is not None:
             out.update(f1Utc=utc_str(actual), source=ref.start_src.get(actual, ref.source) if ref else None,
                        approx=bool(ref and actual in ref.approx_starts), starts=len(ref.starts) if ref else 0)

@@ -141,7 +141,9 @@ class F1LiveSource(Source):
 
     # ------------------------------------------------------------------
     async def run(self, sink: Sink) -> None:
-        helpers = [asyncio.create_task(self._schedule_loop(sink)), asyncio.create_task(self._archive_loop(sink))]
+        # helpers = false: a minimal second connection (the LIGHTS OUT fallback, server/lights_out_probe.py)
+        helpers = [asyncio.create_task(self._schedule_loop(sink)), asyncio.create_task(self._archive_loop(sink))] \
+            if self.cfg.get("helpers", True) else []
         try:
             await self._run(sink)
         finally:                    # stopped (LIVE -> VOD switch, shutdown): no helper keeps running

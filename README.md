@@ -898,6 +898,18 @@ Alone it is **HIGH**; with other anchors it counts twice in the median. The menu
 yet, not in the historical data, VOD timing unavailable, unknown / wrong session, unreadable
 messages); the log has `[SYNC] Looking for Lights Out event …` lines.
 
+**One canonical LIGHTS OUT** (server/lights_out.py) feeds `L`, Event Sync, the start state and
+the stream start. Every report of a start keeps its source: LIVE = *F1 TV timing* (authenticated
+socket) → *F1 SignalR* (the public feed; when the F1 TV socket has no start once it is due, or the
+socket is down, a second minimal anonymous connection – the same client the dashboard used before
+F1 TV – is opened just for it) ; VOD = *F1 archive* (stored official timing) → *OpenF1*; the session
+clock (±1 s) only when nothing exact exists. The race start is the last *Started* before the first
+completed lap; reports of one start are combined (agreeing sources → VERY HIGH, a disagreement is
+reported and the source hierarchy decides). The scheduled start is metadata only – with no verified
+start it says *Unavailable: No verified actual race-start timestamp found*. A resolved start is saved
+per session key (reopening a VOD reuses it; never another session's). When the server runs from one
+session into the next, the previous session's starts / laps are dropped.
+
 **EVENT SYNC** (SYNC menu → *Event Sync*; also the phone's EVENT SYNC button) opens a sub-menu
 with the real, timestamped F1 events of the session: LIGHTS OUT / SESSION START, every LAP n
 (the leader crossing the line), PIT EXIT OPEN / CLOSED, TRACK YELLOW, SAFETY CAR DEPLOYED /
