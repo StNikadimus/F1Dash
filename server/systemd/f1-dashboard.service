@@ -8,8 +8,8 @@
 Description=F1 TV live timing dashboard (backend, AUTO SYNC, recording)
 After=network-online.target time-sync.target
 Wants=network-online.target
-# VOYO stream recordings on another disk (e.g. a USB disk at /mnt/usb): start only once it is mounted
-#RequiresMountsFor=/mnt/usb
+# VOYO stream recordings on the external disk (/mnt/f1disk): uncomment to start only once it is mounted
+#RequiresMountsFor=/mnt/f1disk
 
 [Service]
 User=f1
