@@ -138,7 +138,21 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     tracks = TrackProvider(DATA_DIR, cfg["tracks"])
     auth = make_auth(cfg)                     # one F1 TV sign-in for every LIVE period of this process
     # VOYO stream recordings: written on this server under [voyo.recording] path (checked now)
-    stream_rec = VoyoStreamRecorder((cfg.get("voyo") or {}).get("recording"), DATA_DIR / "recordings").start()
+    rec_cfg = (cfg.get("voyo") or {}).get("recording") or {}
+    stream_rec = VoyoStreamRecorder(rec_cfg, DATA_DIR / "recordings").start()
+    # the server's own VOYO player (tools/voyo_server_player.py): its own stream instances + packages
+    sp_cfg = (cfg.get("voyo") or {}).get("server_player") or {}
+    player_rec = player_tracker = None
+    if sp_cfg.get("enabled"):
+        from .autosync import StreamTracker
+        player_rec = VoyoStreamRecorder(rec_cfg, DATA_DIR / "recordings", channel="server_player",
+                                        capture=bool(sp_cfg.get("record_video", True))).start()
+        player_store_path = DATA_DIR / "voyo_server_player_instances.json"
+        try:
+            player_store = json.loads(player_store_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            player_store = {}
+        player_tracker = StreamTracker(player_store)
     rt = Runtime(cfg, hub, tracks, auth, stream_rec)
 
     async def publish_ui(msg: dict) -> None:
@@ -242,6 +256,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             t.cancel()
         await rt.stop()
         stream_rec.close()
+        if player_rec is not None:
+            player_rec.close()
 
     # ---------------------------------------------------------------- HTTP
     async def index(request: Request) -> Response:
@@ -494,14 +510,72 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         if len(raw) > MAX_CLOCK_BODY:
             return JSONResponse({"ok": False, "error": "too large"}, status_code=413)
         try:
-            sample = parse_voyo_sample(json.loads(raw or b"{}"), time.time(), time.monotonic())
+            body = json.loads(raw or b"{}")
+            sample = parse_voyo_sample(body, time.time(), time.monotonic())
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)[:80]}, status_code=400)
+        if isinstance(body, dict) and body.get("channel") == "server_player":
+            return server_player_sample(request, body, sample)
         rt.engine.voyo_sample(sample)
         # the open VOYO stream recording + whether the PC should run the opt-in window capture for it
         return JSONResponse({"ok": True, "recording": stream_rec.clock_reply()})
 
     # ---------------------------------------------------------------- VOYO stream recordings
+    class PlayerView:
+        """What the recorder reads for a server-player sample: the F1 session (the live engine's,
+        else the player's schedule hint), LIVE DATA DELAY of the live feed - never the dashboard's
+        sync of the VOYO window you watch (that is another stream instance)."""
+
+        def __init__(self, inst, hint: dict) -> None:
+            eng = rt.engine
+            live_eng = eng is not None and not eng.vod and rt.source is not None and rt.source.mode == "live"
+            sess = (eng.sync.session if live_eng else None) or {}
+            if not sess.get("session_key") and hint.get("session_name"):
+                sess = {"session_key": None, "meeting_name": hint.get("meeting"),
+                        "session_name": hint.get("session_name"), "date_start": hint.get("start"),
+                        "source": "server player schedule"}
+            self.session = sess or None
+            self.vod = not (inst is not None and inst.live)
+            self.live_delay = eng.sync.live_delay if live_eng else None
+            self.auto_state, self.mapping, self.K, self.page = {}, None, None, None
+
+    def server_player_sample(request: Request, body: dict, sample) -> Response:
+        if player_rec is None:
+            return JSONResponse({"ok": False, "error": "[voyo.server_player] enabled = false"}, status_code=409)
+        host = request.client.host if request.client else ""
+        if host not in LOOPBACK:
+            return JSONResponse({"ok": False, "error": "the server player runs on this server only"},
+                                status_code=403)
+        if body.get("close"):
+            # the player closed the stream (session window over): its package is complete
+            player_rec.finalize(str(body.get("why") or "server player closed the stream")[:80])
+            player_tracker.current = None
+            return JSONResponse({"ok": True, "recording": player_rec.clock_reply()})
+        reason = player_tracker.observe(sample, {}, time.time())
+        inst = player_tracker.current
+        if reason and inst is not None:
+            player_tracker.store.setdefault("instances", {})[inst.id] = inst.to_json()
+            with contextlib.suppress(OSError):
+                (DATA_DIR / "voyo_server_player_instances.json").write_text(
+                    json.dumps(player_tracker.store, default=str), encoding="utf-8")
+        hint = body.get("session_hint") if isinstance(body.get("session_hint"), dict) else {}
+        hint = {k: str(v)[:120] for k, v in hint.items() if k in ("meeting", "session_name", "start", "end")}
+        try:
+            player_rec.observe(sample, inst, reason, PlayerView(inst, hint))
+        except Exception:  # noqa: BLE001
+            log.exception("VOYO server player recording failed")
+        return JSONResponse({"ok": True, "recording": player_rec.clock_reply()})
+
+    def _rec_for(iid: str) -> VoyoStreamRecorder:
+        if player_rec is not None:
+            pkg = player_rec.package_dir(iid)
+            if pkg is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    if json.loads((pkg / "manifest.json").read_text(encoding="utf-8")).get("channel") == \
+                            "server_player":
+                        return player_rec
+        return stream_rec
+
     def _voyo_poster_ok(request: Request) -> JSONResponse | None:
         host = request.client.host if request.client else ""
         if host not in LOOPBACK and not allow_remote_clock:
@@ -512,7 +586,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
 
     async def api_voyo_recordings(request: Request) -> Response:
         """List of the VOYO stream recordings on this server (index.json of [voyo.recording] path)."""
-        return JSONResponse({"status": stream_rec.status(), "recordings": stream_rec.list()})
+        return JSONResponse({"status": stream_rec.status(),
+                             "server_player": player_rec.status() if player_rec is not None else None,
+                             "recordings": stream_rec.list(also=(player_rec,))})
 
     async def api_voyo_recording(request: Request) -> Response:
         """One package: manifest + meta + anchors + the AUTO SYNC calibration re-run from its anchors
@@ -555,7 +631,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             size = int(request.headers.get("content-length") or 0) or None
         except ValueError:
             size = None
-        target, err = stream_rec.capture_target(iid, name, size)
+        rec = _rec_for(iid)
+        target, err = rec.capture_target(iid, name, size)
         if target is None:
             return JSONResponse({"ok": False, "error": err}, status_code=409 if "off" in (err or "") else 400)
         if target.exists():
@@ -586,7 +663,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         if "pc_now_epoch" in info:              # PC clock - server clock (upload time ignored): for alignment
             info["pc_clock_minus_server_s"] = round(info["pc_now_epoch"] - time.time(), 3)
         try:
-            stream_rec.capture_stored(iid, target, info)
+            rec.capture_stored(iid, target, info)
         except OSError as exc:
             log.warning("VOYO capture index %s: %s", iid, exc)
         return JSONResponse({"ok": True, "stored": target.name, "bytes": n})

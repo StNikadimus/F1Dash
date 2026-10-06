@@ -137,13 +137,18 @@ class VoyoStreamRecorder:
     """Writes the package of the current VOYO stream instance (server side)."""
 
     def __init__(self, rc: Optional[dict], f1_recordings: Optional[Path] = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, channel: str = "viewer",
+                 capture: Optional[bool] = None) -> None:
+        """``channel``: "viewer" = the VOYO window you watch (PC / TV, drives the dashboard sync);
+        "server_player" = the server's own VOYO player (tools/voyo_server_player.py) - its own
+        stream instances and packages in the same folder. ``capture`` overrides record_video_capture."""
         self.rc = dict(rc or {})
+        self.channel = channel
         self.enabled = bool(self.rc.get("enabled", True))
         self.want_meta = bool(self.rc.get("record_metadata", True))
         self.want_timeline = bool(self.rc.get("record_timeline", True))
         self.want_sync = bool(self.rc.get("record_sync", True))
-        self.capture_enabled = bool(self.rc.get("record_video_capture", False))
+        self.capture_enabled = bool(self.rc.get("record_video_capture", False)) if capture is None else bool(capture)
         self.tl_every = max(0.0, float(self.rc.get("timeline_interval_seconds", 1.0)))
         self.pair_every = max(1.0, float(self.rc.get("pair_interval_seconds", 10.0)))
         self.min_free = max(0, int(self.rc.get("min_free_bytes", 0) or 0))
@@ -233,7 +238,9 @@ class VoyoStreamRecorder:
             wall = self.now() - max(0.0, time.monotonic() - s.mono)
             if self.cur is None or self.cur["stream_instance_id"] != inst.id:
                 self._switch(inst, reason or "first stream seen", sync, s, wall)
-            elif reason == "resumed":
+            else:
+                self.cur["live"] = inst.live           # the length may load after the first samples
+            if reason == "resumed":
                 self._obs({"type": "note", "t": round(wall, 3), "text": "server restarted - same stream instance resumed"})
             self._timeline(s, wall, sync)
             self._sync_obs(s, wall, sync)
@@ -258,7 +265,7 @@ class VoyoStreamRecorder:
         else:
             mode = self._mode(sync)
             self.cur = {
-                "schema": SCHEMA, "stream_instance_id": inst.id, "status": "recording",
+                "schema": SCHEMA, "stream_instance_id": inst.id, "status": "recording", "channel": self.channel,
                 "detected_at": _iso(inst.first_seen_wall), "detected_at_epoch": inst.first_seen_wall,
                 "stream_start_wall_time": _iso(inst.origin_wall or inst.first_seen_wall),
                 "stream_start_wall_epoch": inst.origin_wall or inst.first_seen_wall,
@@ -353,7 +360,8 @@ class VoyoStreamRecorder:
                        "quality": "measured" if m.confidence in ("HIGH", "MEDIUM", "MANUAL") else "estimate"})
             self.cur["sync"] = {"confidence": m.confidence, "offset": round(k, 3), "method": m.method,
                                 "state": st.get("state")}
-        if not getattr(sync, "vod", True) and wall - self._last_dd >= 10:
+        if not getattr(sync, "vod", True) and getattr(sync, "live_delay", None) is not None and \
+                wall - self._last_dd >= 10:
             dd = sync.live_delay.snapshot(mono)
             if dd.get("samples"):
                 self._last_dd = wall
@@ -365,14 +373,18 @@ class VoyoStreamRecorder:
     def _session(self, sync) -> None:
         sess = getattr(sync, "session", None) or {}
         key = sess.get("session_key")
-        if key is None:
+        if key is None and not sess.get("session_name"):
             return
         cur = self.cur.get("session") or {}
-        if cur.get("session_key") == key:
+        ident = (key, sess.get("meeting_name"), sess.get("session_name"))
+        if (cur.get("session_key"), cur.get("meeting"), cur.get("session_name")) == ident:
             return
+        if key is None and cur.get("session_key") is not None:
+            return                        # a schedule hint never replaces an identified F1 session
         new = {"session_key": key, "meeting": sess.get("meeting_name"), "session_name": sess.get("session_name"),
                "kind": session_kind(sess.get("session_name")), "year": sess.get("year"),
-               "date_start": sess.get("date_start"), "associated_at": _iso(self.now())}
+               "date_start": sess.get("date_start"), "associated_at": _iso(self.now()),
+               "source": sess.get("source") or "f1 session"}
         if cur:
             self.cur["session_history"].append(cur)
             self._obs({"type": "note", "t": round(self.now(), 3),
@@ -510,6 +522,7 @@ class VoyoStreamRecorder:
         pos = m.get("position") or {}
         cap = m.get("capture") or {}
         return {"stream_instance_id": m.get("stream_instance_id"), "status": m.get("status"),
+                "channel": m.get("channel") or "viewer",
                 "title": m.get("title"), "live": m.get("live"), "media_id": m.get("media_id"),
                 "detected_at": m.get("detected_at"), "stream_start_wall_time": m.get("stream_start_wall_time"),
                 "closed_at": m.get("closed_at"), "updated_at": m.get("updated_at"),
@@ -567,13 +580,16 @@ class VoyoStreamRecorder:
         self.rebuild_index()
 
     # ------------------------------------------------------------------ list / load (dashboard, offline use)
-    def list(self) -> list[dict]:
+    def list(self, also: tuple = ()) -> list[dict]:
+        """All packages (index.json) with the live state of the open one(s) - ``also``: the other
+        channels' recorders writing into the same folder."""
         if not self.ok:
             return []
-        recs = list(self._load_index()["recordings"].values())
-        if self.cur is not None:
-            recs = [r for r in recs if r["stream_instance_id"] != self.cur["stream_instance_id"]] + \
-                [self.summary(self.cur)]
+        recs = {r["stream_instance_id"]: r for r in self._load_index()["recordings"].values()}
+        for rec in (self, *also):
+            if rec is not None and rec.cur is not None:
+                recs[rec.cur["stream_instance_id"]] = self.summary(rec.cur)
+        recs = list(recs.values())
         return sorted(recs, key=lambda r: r.get("detected_at") or "", reverse=True)
 
     def package_dir(self, iid: str) -> Optional[Path]:
@@ -591,7 +607,7 @@ class VoyoStreamRecorder:
     def clock_reply(self) -> dict:
         """Returned to the PC's clock bridge with every sample: which package is open, whether the
         PC should run the (opt-in) window capture for it."""
-        return {"instance": self.cur["stream_instance_id"] if self.cur else None,
+        return {"channel": self.channel, "instance": self.cur["stream_instance_id"] if self.cur else None,
                 "capture": bool(self.capture_enabled and self.ok and self.cur is not None),
                 "segment_seconds": int(self.rc.get("capture_segment_seconds", 60)),
                 "fps": int(self.rc.get("capture_fps", 30)), "crf": int(self.rc.get("capture_crf", 23))}

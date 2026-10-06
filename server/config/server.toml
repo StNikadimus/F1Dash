@@ -27,3 +27,10 @@ require_mount = "/mnt/f1disk"
 # path = "/mnt/data/f1-voyo-streams"          # data disk
 # path = "/var/lib/f1-dashboard/voyo_streams" # system data dir (then require_mount = "")
 # record_video_capture = true                 # opt-in window capture by the PC that shows VOYO
+
+[voyo.server_player]
+# the server opens VOYO itself around every F1 session and records it - no PC needed
+# (server/README.md "Recording VOYO on the server"; ./server/voyo-player.sh login once)
+enabled = true
+# the F1 live page in VOYO; "" = the page open when you last finished "voyo-player.sh login"
+stream_url = ""

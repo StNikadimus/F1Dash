@@ -342,6 +342,36 @@ keep_race_days = 30             # Grand Prix
 keep_other_days = 7             # session not identified
 
 # ---------------------------------------------------------------------------
+# SERVER VOYO PLAYER - the server opens VOYO itself and records it, with no PC switched on
+# (tools/voyo_server_player.py, service server/systemd/f1-voyo-player.service; server/README.md
+# "Recording VOYO on the server"). Google Chrome runs on a virtual screen (Xvfb), signed in to your
+# VOYO account (sign in once over VNC: voyo_server_player.py login); before each F1 session of
+# record_sessions it opens stream_url, starts playback, and ffmpeg records that screen (+ sound) -
+# what Chrome displays, like any screen recording; it never touches VOYO's stream, keys or DRM.
+# The packages are VOYO stream recordings of channel "server_player" in [voyo.recording] path.
+# For your own use - check VOYO's terms (e.g. how many streams your account may play at once).
+# ---------------------------------------------------------------------------
+[voyo.server_player]
+enabled = false
+# the VOYO page of the F1 live stream (the address you open on the PC). "" = the page that was open
+# when you last closed "voyo_server_player.py login"
+stream_url = ""
+when = "schedule"               # schedule = F1 sessions below | always | off
+record_sessions = ["practice1", "practice2", "practice3", "sprint_qualifying", "sprint", "qualifying", "race"]
+lead_minutes = 15               # open the stream this long before the scheduled start
+trail_minutes = 30              # ... and keep it until this long after the scheduled end
+keep_open_while_feed_live = true  # longer while the dashboard's live feed says the session still runs (red flags)
+record_video = true             # screen + sound recording into the package (capture/)
+fullscreen_video = true         # show only the video (the player's own fullscreen) - the recording is the picture
+browser = ""                    # "" = google-chrome (needed for VOYO's DRM on Linux), else a path
+display = ":90"                 # the virtual screen
+resolution = "1920x1080"
+cdp_port = 9224                 # Chrome's local DevTools port (127.0.0.1 only) - reads the video clock
+profile = "data/browser-profiles/voyo-server"
+audio = true                    # PulseAudio null sink "f1voyo" (needs pulseaudio); false = video only
+vnc_port = 5900                 # "login": x11vnc on 127.0.0.1 only - reach it through an SSH tunnel
+
+# ---------------------------------------------------------------------------
 # VOYO video <-> F1 data synchronisation. See README "VOYO sync".
 #
 # Clocks: A = F1 event time (canonical, from the feed's own timestamps),

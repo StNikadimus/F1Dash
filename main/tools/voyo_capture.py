@@ -33,7 +33,7 @@ from typing import Callable, Optional
 
 
 def ffmpeg_cmd(ffmpeg: str, spec: dict, out_dir: Path, run: str, fps: int = 30, crf: int = 23,
-               segment_s: int = 60, audio: str = "") -> list[str]:
+               segment_s: int = 60, audio: "str | dict" = "") -> list[str]:
     """ffmpeg command for one capture run of the window ``spec`` ({"title": ...} on Windows,
     {"window_id": "0x..."} on X11) into fragmented-MP4 segments listed in <run>_list.csv."""
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]          # stdin stays open: "q" stops it cleanly
@@ -44,7 +44,9 @@ def ffmpeg_cmd(ffmpeg: str, spec: dict, out_dir: Path, run: str, fps: int = 30, 
                 "-i", spec.get("display") or ":0"]
     else:
         raise ValueError("no window to capture")
-    if audio:
+    if isinstance(audio, dict) and audio.get("format") == "pulse":
+        cmd += ["-thread_queue_size", "1024", "-f", "pulse", "-i", str(audio.get("device") or "default")]
+    elif audio:
         cmd += ["-f", "dshow", "-i", f"audio={audio}"]
     # a keyframe at every segment boundary: segments can only be cut there
     cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p",
@@ -145,7 +147,7 @@ class VoyoWindowCapture:
         cmd = ffmpeg_cmd(self.ffmpeg, spec, out, self.run_id, int(want.get("fps") or self.rc.get("capture_fps", 30)),
                          int(want.get("crf") or self.rc.get("capture_crf", 23)),
                          int(want.get("segment_seconds") or self.rc.get("capture_segment_seconds", 60)),
-                         str(self.rc.get("capture_audio_device") or ""))
+                         spec.get("audio") or str(self.rc.get("capture_audio_device") or ""))
         flags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
         self.run_start = time.time()
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,

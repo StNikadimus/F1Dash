@@ -1258,6 +1258,16 @@ browser / OS blanks protected video, the capture is black (not worked around). `
 `keep_<practice1|practice2|practice3|sprint_qualifying|sprint|qualifying|race|other>_days`
 (0 = keep); metadata stays.
 
+### The server's own VOYO player
+
+`tools/voyo_server_player.py` (`server/voyo-player.sh`, service `f1-voyo-player`) lets the server
+open VOYO itself in Google Chrome on a virtual screen around each F1 session and record it, with no
+PC on. Its samples carry `"channel": "server_player"` (and a `session_hint` from the schedule),
+accepted from the server itself only. They get their own stream tracker and packages (manifest
+`channel: "server_player"`) and never touch the dashboard's sync of the VOYO window you watch. A
+POST with `"close": true` closes its package at the end of the session window. Setup:
+`server/README.md` "Recording VOYO on the server".
+
 ### Errors
 
 At start the path is resolved, created (if `create_path_if_missing`), write-tested and logged
