@@ -164,32 +164,37 @@ If a write fails later (disk full, USB disk unplugged), recording stops and the 
 The server re-checks the path every 60 s and continues the open package once it is writable again.
 `min_free_bytes` (default 2 GiB) stops writing before the disk fills.
 
-### External USB hard drive
+### External USB hard drive (configured: `/mnt/f1disk`)
+
+`server/config/server.toml` already points the recordings at the disk:
+
+```toml
+[voyo.recording]
+path = "/mnt/f1disk/voyo_streams"
+require_mount = "/mnt/f1disk"
+```
+
+Until a disk is mounted at `/mnt/f1disk`, the log shows `VOYO stream recording DISABLED: no disk
+mounted at /mnt/f1disk ...`. The dashboard works normally and **nothing is written to the system
+disk**. The path is checked again every 60 s while VOYO samples arrive. Once the disk is mounted,
+recording starts on its own and creates `voyo_streams/` on the disk; no restart is needed.
+
+Mounting it (once):
 
 ```bash
-lsblk -f                                   # find the disk, e.g. /dev/sdb1 (ext4 recommended)
-sudo mkdir -p /mnt/usb
+lsblk -f                                   # find the disk, e.g. /dev/sdb1, and its UUID + type
+sudo mkdir -p /mnt/f1disk
 # /etc/fstab - nofail: the server still boots without the disk
-UUID=<uuid-of-sdb1>  /mnt/usb  ext4  defaults,nofail,x-systemd.device-timeout=10  0  2
-sudo mount /mnt/usb
-sudo mkdir -p /mnt/usb/f1-voyo && sudo chown f1: /mnt/usb/f1-voyo
+UUID=<uuid>  /mnt/f1disk  ext4  defaults,nofail,x-systemd.device-timeout=10  0  2
+#   NTFS:  UUID=<uuid>  /mnt/f1disk  ntfs3  defaults,nofail,uid=f1,gid=f1  0  0
+#   exFAT: UUID=<uuid>  /mnt/f1disk  exfat  defaults,nofail,uid=f1,gid=f1  0  0
+sudo systemctl daemon-reload && sudo mount /mnt/f1disk
+sudo chown f1: /mnt/f1disk                 # ext4 only (NTFS/exFAT: uid=f1 above)
 ```
 
-Then add these lines to `server/.env`:
-
-```
-F1DASH_VOYO_RECORDING_PATH=/mnt/usb/f1-voyo
-F1DASH_VOYO_RECORDING_CREATE_PATH_IF_MISSING=false
-```
-
-`create_path_if_missing = false` matters here. If the disk is not mounted, `/mnt/usb/f1-voyo` does
-not exist, so recording is switched off with a clear message instead of silently filling the
-system disk under `/mnt/usb`.
-
-- **NTFS/exFAT disks:** mount them with `uid=f1,gid=f1` so the service user can write.
-- **To start the service only once the disk is mounted:** uncomment `RequiresMountsFor=` in
-  `systemd/f1-dashboard.service`.
-- **Docker:** add the disk as a volume (commented example in `docker/docker-compose.yml`).
+Here `f1` is the service user from `systemd/f1-dashboard.service`; when started by hand, it is your
+own user. To use another mount point, change both lines in `server.toml`, or set
+`F1DASH_VOYO_RECORDING_PATH` and `F1DASH_VOYO_RECORDING_REQUIRE_MOUNT`.
 
 ### Window capture (opt-in)
 

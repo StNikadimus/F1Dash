@@ -17,9 +17,13 @@ open_browser = false
 allow_remote_clock = true
 
 [voyo.recording]
-# where the VOYO stream recordings go on this server - any disk / mount (server/README.md):
+# VOYO stream recordings go to the external disk mounted at /mnt/f1disk (server/README.md
+# "External USB hard drive"). Until a disk is mounted there, recording waits (logged, re-checked
+# every 60 s) and nothing is written to the system disk; after mounting, it starts by itself and
+# creates the voyo_streams folder on the disk. Another mount point: change both lines.
+path = "/mnt/f1disk/voyo_streams"
+require_mount = "/mnt/f1disk"
+# other examples:
 # path = "/mnt/data/f1-voyo-streams"          # data disk
-# path = "/mnt/usb/f1-voyo"                   # external USB disk (with create_path_if_missing = false)
-# path = "/var/lib/f1-dashboard/voyo_streams" # system data dir
-# default (main/config/config.toml): path = "data/voyo_streams" = $F1DASH_DATA_DIR/voyo_streams
+# path = "/var/lib/f1-dashboard/voyo_streams" # system data dir (then require_mount = "")
 # record_video_capture = true                 # opt-in window capture by the PC that shows VOYO

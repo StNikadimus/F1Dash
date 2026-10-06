@@ -100,6 +100,22 @@ class PathSelectionTest(unittest.TestCase):
         finally:
             ro.chmod(0o700)
 
+    def test_require_mount_waits_for_the_disk(self):
+        mnt = self.d / "f1disk"
+        mnt.mkdir()
+        rc = {"path": str(mnt / "voyo_streams"), "require_mount": str(mnt), "min_free_bytes": 0}
+        with mock.patch("os.path.ismount", return_value=False):
+            rec = VoyoStreamRecorder(rc).start()
+        self.assertIn("no disk mounted", rec.status()["error"])
+        self.assertFalse((mnt / "voyo_streams").exists())                  # nothing on the system disk
+        rec._last_recheck = -1e9
+        with mock.patch("os.path.ismount", side_effect=lambda p: Path(p) == mnt.resolve()):
+            rec._recheck()                                                   # disk mounted later
+        self.assertTrue(rec.ok)
+        self.assertTrue((mnt / "voyo_streams").is_dir())
+        _, err = resolve_root({"path": str(self.d / "elsewhere"), "require_mount": str(mnt)})
+        self.assertIn("not on require_mount", err)
+
     def test_write_test_failure_reported(self):
         with mock.patch("pathlib.Path.write_bytes", side_effect=PermissionError("read-only file system")):
             root, err = resolve_root({"path": str(self.d / "x")})

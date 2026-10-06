@@ -101,6 +101,14 @@ def resolve_root(rc: dict, f1_recordings: Optional[Path] = None) -> tuple[Option
     if not raw:
         return None, "[voyo.recording] path is empty"
     root = resolve_path(raw).resolve()
+    mount = str(rc.get("require_mount") or "").strip()
+    if mount:
+        mnt = Path(mount).expanduser().resolve()
+        if root != mnt and mnt not in root.parents:
+            return root, f"path {root} is not on require_mount {mnt}"
+        if not os.path.ismount(mnt):
+            return root, (f"no disk mounted at {mnt} (require_mount) - VOYO stream recording waits for it "
+                          f"(checked again every {RECHECK_S:.0f} s; nothing is written to the system disk)")
     if f1_recordings is not None:
         f1 = Path(f1_recordings).resolve()
         if root == f1 or f1 in root.parents:
@@ -207,7 +215,7 @@ class VoyoStreamRecorder:
         if err:
             return
         self.root, self.error = root, None
-        log.info("VOYO stream recording: %s writable again - continuing", root)
+        log.info("VOYO stream recording: %s is usable now - recording on", root)
         if self.cur is not None:
             self._open_files(self.cur["stream_instance_id"])
             self._obs({"type": "note", "text": "recording interrupted by a write error and continued - gap"})

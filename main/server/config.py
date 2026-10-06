@@ -74,7 +74,7 @@ DEFAULTS: dict[str, Any] = {
              "fallback_when_unreachable": True, "capture_compat": "no-gpu",
              "recording": {"enabled": True, "record_metadata": True, "record_timeline": True, "record_sync": True,
                            "timeline_interval_seconds": 1.0, "pair_interval_seconds": 10.0,
-                           "path": "data/voyo_streams", "create_path_if_missing": True,
+                           "path": "data/voyo_streams", "create_path_if_missing": True, "require_mount": "",
                            "min_free_bytes": 2 * 1024 ** 3, "record_video_capture": False, "ffmpeg": "ffmpeg",
                            "capture_fps": 30, "capture_crf": 23, "capture_segment_seconds": 60,
                            "capture_audio_device": "", "capture_max_segment_bytes": 4 * 1024 ** 3,

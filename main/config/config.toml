@@ -312,6 +312,8 @@ pair_interval_seconds = 10.0    # while synced: one (position, wall time, F1 tim
 #   path = "D:/F1Recordings/voyo_streams"          # Windows PC variant
 path = "data/voyo_streams"
 create_path_if_missing = true   # false: the folder (e.g. the USB disk's) must exist - nothing is created on the root disk
+require_mount = ""              # e.g. "/mnt/f1disk": record only while a disk is mounted there (the folder in
+                                # `path` is then created on that disk); re-checked every 60 s - mount it any time
 min_free_bytes = 2147483648     # below this free space nothing more is written (2 GiB); 0 = no check
 
 # OPT-IN window capture of the VOYO player window you are watching (default OFF). It is a plain
