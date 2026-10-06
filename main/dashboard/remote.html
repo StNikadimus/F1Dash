@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#05070a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>F1 Remote</title>
+<style>
+  /* the phone remote: another WebSocket client of the dashboard server (/ws?client=remote). It sends the
+   * same commands as the IR remote and shows the state the server sends - it keeps no state of its own. */
+  :root { color-scheme: dark; --bg: #05070a; --panel: #0d1218; --btn: #141b24; --btn-2: #1b2430; --line: #26313d;
+    --text: #eef2f6; --text-2: #a9b4bf; --text-3: #6f7c89; --acc: #3d8bff; --red: #ff2d3d; --green: #00d278;
+    --amber: #ffb000; --yellow: #ffd600; --purple: #b060ff; --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body { font: 700 15px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; overscroll-behavior: none;
+    padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
+  input, select { -webkit-user-select: text; user-select: text; }
+  /* ---- header: connection + what the dashboard shows now */
+  header { position: sticky; top: 0; z-index: 5; background: var(--bg); padding-bottom: 8px; }
+  .top { display: flex; align-items: center; gap: 10px; }
+  .top h1 { margin: 0; font-size: 16px; letter-spacing: .16em; font-weight: 900; }
+  .top h1 b { color: var(--red); }
+  #conn { margin-left: auto; font-size: 12px; font-weight: 900; letter-spacing: .12em; color: var(--text-3); display: flex; align-items: center; gap: 6px; }
+  #conn i { width: 9px; height: 9px; border-radius: 50%; background: var(--text-3); transition: background-color .3s; }
+  body.on #conn { color: var(--green); } body.on #conn i { background: var(--green); box-shadow: 0 0 8px rgba(0,210,120,.6); }
+  body.off #conn { color: var(--red); } body.off #conn i { background: var(--red); animation: blink 1.6s ease-in-out infinite alternate; }
+  @keyframes blink { from { opacity: .35; } to { opacity: 1; } }
+  .now { margin-top: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
+    display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center; }
+  .now .sess { font-size: 14px; font-weight: 900; letter-spacing: .04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .now .sub { font-size: 12px; color: var(--text-2); letter-spacing: .06em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .now .lap { font: 900 18px var(--mono); text-align: right; }
+  .flag { font-size: 11px; font-weight: 900; letter-spacing: .12em; padding: 2px 7px; border-radius: 3px; justify-self: end; color: var(--text-2);
+    box-shadow: inset 0 0 0 1px var(--line); transition: background-color .3s, color .3s; }
+  .flag.f-GREEN { color: var(--green); box-shadow: inset 0 0 0 1px rgba(0,210,120,.5); }
+  .flag.f-YELLOW, .flag.f-DOUBLE_YELLOW { background: var(--yellow); color: #111; box-shadow: none; }
+  .flag.f-SC, .flag.f-SAFETY_CAR, .flag.f-VSC, .flag.f-VSC_ENDING { background: var(--amber); color: #111; box-shadow: none; }
+  .flag.f-RED, .flag.f-RED_FLAG { background: var(--red); color: #fff; box-shadow: none; }
+  .flag.f-CHEQUERED { color: #111; background: repeating-conic-gradient(#fff 0 25%, #cfd4da 0 50%) 0 0 / 10px 10px; box-shadow: none; }
+  #toast { min-height: 18px; margin-top: 6px; font-size: 12px; color: var(--text-2); text-align: center; letter-spacing: .04em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* ---- controls */
+  main { display: grid; gap: 14px; }
+  section h2 { margin: 0 0 6px; font-size: 11px; letter-spacing: .18em; color: var(--text-3); font-weight: 900; }
+  .g { display: grid; gap: 8px; }
+  .g2 { grid-template-columns: repeat(2, 1fr); } .g3 { grid-template-columns: repeat(3, 1fr); } .g4 { grid-template-columns: repeat(4, 1fr); }
+  button { font: 900 14px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; letter-spacing: .08em; color: var(--text);
+    background: var(--btn); border: 1px solid var(--line); border-radius: 12px; min-height: 56px; padding: 6px;
+    touch-action: manipulation; transition: transform .1s, background-color .15s, border-color .15s, opacity .2s; }
+  button small { display: block; font-size: 10px; color: var(--text-3); letter-spacing: .1em; margin-top: 2px; }
+  button.pressed { transform: scale(.95); background: var(--btn-2); border-color: var(--acc); }
+  button.active { background: #10233f; border-color: var(--acc); box-shadow: inset 0 0 0 1px var(--acc); }
+  button.active small { color: #8fbaff; }
+  button.m-LIVE.active { background: #3a0a10; border-color: var(--red); box-shadow: inset 0 0 0 1px var(--red); }
+  button.m-VOD.active { background: #241747; border-color: #6b4bd8; box-shadow: inset 0 0 0 1px #6b4bd8; }
+  body.off button:not(.always) { opacity: .4; }
+  /* d-pad */
+  .pad { display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(3, 72px); gap: 8px; }
+  .pad button { min-height: 0; font-size: 22px; }
+  .pad .ok { background: #12284a; border-color: #2b5aa8; font-size: 18px; }
+  .pad .back, .pad .help { font-size: 12px; color: var(--text-2); }
+  .info { font-size: 12px; color: var(--text-2); margin-top: 6px; line-height: 1.4; letter-spacing: .03em; }
+  .info b { color: var(--text); }
+  details { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+  details summary { font-size: 11px; letter-spacing: .18em; color: var(--text-3); font-weight: 900; padding: 6px 0; list-style: none; }
+  details summary::before { content: "▸ "; } details[open] summary::before { content: "▾ "; }
+  .row { display: flex; gap: 8px; margin-top: 8px; }
+  .row > * { flex: 1; min-width: 0; }
+  input, select { background: #0b1017; color: var(--text); border: 1px solid var(--line); border-radius: 10px; min-height: 48px;
+    padding: 10px; font: 800 17px var(--mono); }
+  select { font: 700 15px system-ui, sans-serif; }
+  label { display: block; font-size: 11px; color: var(--text-3); margin: 10px 0 0; letter-spacing: .06em; }
+  .drivers { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; margin-top: 8px; }
+  .drivers button { min-height: 44px; font-size: 13px; border-left: 4px solid var(--line); }
+  /* landscape: d-pad + state on the left, the rest on the right */
+  @media (orientation: landscape) and (min-width: 600px) {
+    main { grid-template-columns: minmax(260px, 38%) 1fr; align-items: start; }
+    .col-left { position: sticky; top: 112px; }
+  }
+  @media (max-width: 340px) { button { font-size: 12px; min-height: 50px; } .pad { grid-template-rows: repeat(3, 62px); } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body class="off">
+<header>
+  <div class="top"><h1><b>F1</b> REMOTE</h1><div id="conn"><i></i><span id="connt">CONNECTING…</span></div></div>
+  <div class="now">
+    <div class="sess" id="sess">—</div><div class="lap" id="lap"></div>
+    <div class="sub" id="sub">waiting for the dashboard</div><div class="flag" id="flag">—</div>
+  </div>
+  <div id="toast"></div>
+</header>
+<main>
+  <div class="col-left g">
+    <section>
+      <div class="pad">
+        <button class="help" data-k="KEY_H">HELP</button><button data-k="KEY_UP" data-repeat>▲</button><button class="back" data-k="KEY_BACK">BACK</button>
+        <button data-k="KEY_LEFT">◀</button><button class="ok" data-k="KEY_OK">OK</button><button data-k="KEY_RIGHT">▶</button>
+        <button data-c="PREVIOUS_DRIVER"><small>DRIVER</small>◀</button><button data-k="KEY_DOWN" data-repeat>▼</button><button data-c="NEXT_DRIVER"><small>DRIVER</small>▶</button>
+      </div>
+      <div class="info" id="selinfo"></div>
+    </section>
+  </div>
+  <div class="g" style="gap:14px">
+    <section>
+      <h2>VIEW</h2>
+      <div class="g g3">
+        <button data-view="overview">MAP<small>OVERVIEW</small></button>
+        <button data-view="telemetry">DATA<small>TELEMETRY</small></button>
+        <button data-view="strategy">TYRES<small>STRATEGY</small></button>
+        <button data-view="racecontrol">RACE<small>CONTROL</small></button>
+        <button data-view="weather">WEATHER<small>VIEW</small></button>
+        <button data-c="WEATHER_REPORT">WEATHER<small>REPORT</small></button>
+      </div>
+    </section>
+    <section>
+      <h2>TV LAYOUT</h2>
+      <div class="g g3">
+        <button data-tv="FULL_DASHBOARD">STATS<small>FULL</small></button>
+        <button data-tv="RACE_VIEW">VOYO<small>+ STATS</small></button>
+        <button data-tv="VIDEO_FOCUS">VIDEO<small>FOCUS</small></button>
+      </div>
+    </section>
+    <section>
+      <h2>MODE</h2>
+      <div class="g g3">
+        <button class="m-AUTO" data-mode="AUTO">AUTO</button>
+        <button class="m-LIVE" data-mode="LIVE">LIVE</button>
+        <button class="m-VOD" data-mode="VOD">VOD</button>
+      </div>
+      <div class="info" id="modeinfo"></div>
+    </section>
+    <section>
+      <h2>VOYO SYNC</h2>
+      <div class="g g3">
+        <button data-c="SYNC_MINUS" data-repeat>SYNC −<small>LESS DELAY</small></button>
+        <button data-c="SYNC_MARK">MARK<small>CAR ON LINE</small></button>
+        <button data-c="SYNC_PLUS" data-repeat>SYNC +<small>MORE DELAY</small></button>
+        <button data-c="SYNC_START">START<small>LIGHTS OUT</small></button>
+        <button data-c="SYNC_RESYNC">RESYNC</button>
+        <button data-c="SYNC_MENU">MENU<small>ON TV</small></button>
+      </div>
+      <div class="g g2">
+        <button data-c="SYNC_STREAM_START">MARK STREAM START<small>VOYO AT 0:00 (STREAM BEGINNING)</small></button>
+        <button data-c="SYNC_STREAM_RESET">RESET STREAM START</button>
+        <button data-c="SYNC_EVENT_MENU">EVENT SYNC<small>ON TV · ▲▼ OK BACK</small></button>
+      </div>
+      <div class="info" id="syncinfo"></div>
+      <div class="info" id="startinfo"></div>
+    </section>
+    <section>
+      <h2>VIDEO</h2>
+      <div class="g g3">
+        <button data-c="VIDEO_PLAY_PAUSE">⏯<small>PLAY / PAUSE</small></button>
+        <button data-c="VIDEO_MUTE">MUTE</button>
+        <button data-c="TOGGLE_AUTO_CYCLE">AUTO<small>CYCLE VIEWS</small></button>
+      </div>
+    </section>
+    <details id="drvbox"><summary>SELECT DRIVER</summary><div class="drivers" id="drivers"></div></details>
+    <details id="advsync"><summary>ADVANCED SYNC (VOYO)</summary>
+      <div class="info" id="md"></div>
+      <label>Select session (if AUTO MEDIA SYNC failed or picked the wrong one)</label>
+      <div class="row"><select id="yr"></select><select id="gp"><option value="">Grand Prix…</option></select></div>
+      <div class="row"><select id="ss"><option value="">Session…</option></select><button id="usess" class="always">USE</button></div>
+      <div id="timedbox" hidden>
+        <label>Session clock (pause VOYO on it, or tap Capture when you read it)</label>
+        <div class="row"><select id="qph"></select><select id="qmode"><option value="remaining">remaining</option><option value="elapsed">elapsed</option></select></div>
+        <div class="row"><input id="qclk" placeholder="07:32" inputmode="text"><button data-a="clock">APPLY</button></div>
+        <label>Phase marker: pause VOYO exactly on the moment, then SYNC HERE</label>
+        <div class="row"><select id="qmk"></select><button data-a="marker">SYNC HERE</button></div>
+      </div>
+      <div id="racebox">
+        <label>VOYO countdown to the session start</label>
+        <div class="row"><input id="cd" placeholder="23:47" inputmode="text"><button data-cap>CAPTURE</button><button data-a="countdown">APPLY</button></div>
+      </div>
+      <label>Manual exact time the video shows</label>
+      <div class="row"><input id="ex" placeholder="14:48:32"><select id="tz"><option value="slo">Slovenia</option><option value="track">Track</option></select></div>
+      <div class="row"><select id="fmt"><option value="24">24-hour</option><option value="12">12-hour</option></select><select id="ap" hidden><option value="am">AM</option><option value="pm">PM</option></select><button data-a="exact">APPLY</button></div>
+      <div class="info" id="exprev"></div>
+      <div id="estbox">
+        <label>Session start estimate: the video runs this long before the start (marked Estimated)</label>
+        <div class="row"><input id="es" placeholder="28:50"><button data-a="estimate">APPLY</button></div>
+      </div>
+      <div class="row"><button data-a="auto">AUTO</button><button data-a="clear">CLEAR</button></div>
+      <div class="row" id="driftrow" hidden><button data-a="keep_old">KEEP OLD</button><button data-a="use_new">USE NEW</button></div>
+      <div class="info" id="sr"></div>
+    </details>
+    <details><summary>TEST MODE TOOLS</summary>
+      <label>Simulated weather report</label>
+      <div class="row"><select id="wxsc"><option value="">Scenario…</option>
+        <option>dry</option><option>drizzle</option><option>light</option><option>medium</option><option>heavy</option>
+        <option>stopping</option><option>noforecast</option><option>disagree</option>
+        <option value="norain">radar: no rain</option><option value="approaching">radar: rain approaching</option>
+        <option value="over">radar: rain over circuit</option><option value="away">radar: rain moving away</option>
+        <option value="heavyrain">radar: heavy rain</option><option value="radaroff">radar: unavailable</option></select></div>
+      <label>Simulated race event</label>
+      <div class="row"><select id="simev"><option value="">Event…</option>
+        <option value="green">GREEN / track clear</option><option value="yellow">YELLOW (sector)</option>
+        <option value="dy">DOUBLE YELLOW</option><option value="vsc">VIRTUAL SAFETY CAR</option>
+        <option value="sc">SAFETY CAR</option><option value="red">RED FLAG</option><option value="chequered">CHEQUERED FLAG</option>
+        <option value="overtake">OVERTAKE (P5 passes P4)</option><option value="pit">PIT STOP (P3)</option>
+        <option value="fastest">FASTEST LAP (P2 speeds up)</option><option value="longrc">LONG RACE CONTROL MESSAGE</option></select></div>
+      <div class="info">Only in TEST mode (python main.py --test); the dashboard reacts exactly as to a live feed.</div>
+    </details>
+  </div>
+</main>
+<script src="/static/components/f1time.js"></script>
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const mmss = (v) => { const t = Math.round(v), h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), x = t % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0"); };
+  const token = new URLSearchParams(location.search).get("token");
+  const R = { ui: {}, mode: {}, remote: {}, sync: null, hello: {} };     // only what the server sent
+
+  // ------------------------------------------------------------ connection (the dashboard's /ws)
+  let ws = null, retry = 0, retryTimer = null;
+  function connect() {
+    clearTimeout(retryTimer);
+    const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws?client=remote" +
+      (token ? "&token=" + encodeURIComponent(token) : "");
+    ws = new WebSocket(url);
+    ws.onopen = () => { retry = 0; setConn(true); };
+    ws.onclose = (ev) => {
+      setConn(false, ev.code === 4401 ? "WRONG TOKEN" : null);
+      const d = Math.min(10000, 600 * 2 ** Math.min(retry++, 4));
+      retryTimer = setTimeout(connect, ev.code === 4401 ? 15000 : d);
+    };
+    ws.onerror = () => { try { ws.close(); } catch (e) { /* closing */ } };
+    ws.onmessage = (ev) => { let m; try { m = JSON.parse(ev.data); } catch (e) { return; } handle(m); };
+  }
+  function setConn(on, why) {
+    document.body.classList.toggle("on", on);
+    document.body.classList.toggle("off", !on);
+    $("connt").textContent = on ? "CONNECTED" : why || "DISCONNECTED";
+    if (!on) toast(why === "WRONG TOKEN" ? "The remote token is wrong - open the URL with ?token=…" : "Reconnecting… commands are not sent");
+  }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && (!ws || ws.readyState > 1)) connect(); });
+  function send(obj) {
+    if (!ws || ws.readyState !== 1) { toast("Not connected - command not sent"); return false; }
+    ws.send(JSON.stringify(obj));
+    if (navigator.vibrate) { try { navigator.vibrate(8); } catch (e) { /* optional */ } }
+    return true;
+  }
+  let toastT = null;
+  function toast(t) { $("toast").textContent = t || ""; clearTimeout(toastT); if (t) toastT = setTimeout(() => { $("toast").textContent = ""; }, 4000); }
+
+  // ------------------------------------------------------------ state from the server
+  function handle(m) {
+    switch (m.type) {
+      case "hello": R.hello = m; break;
+      case "ui": {
+        const prev = (R.ui.toast || {}).n;
+        R.ui = m;
+        if (m.toast && m.toast.text && prev !== undefined && m.toast.n !== prev) toast(m.toast.text);
+        break;
+      }
+      case "mode": R.mode = m; break;
+      case "remote": R.remote = m; break;
+      case "sync": R.sync = m; break;
+      case "sync_result": onSyncResult(m); return;
+      default: return;
+    }
+    render();
+  }
+  const FLAGTXT = { GREEN: "GREEN", YELLOW: "YELLOW", DOUBLE_YELLOW: "DOUBLE YELLOW", SAFETY_CAR: "SAFETY CAR", VSC: "VSC",
+    VSC_ENDING: "VSC ENDING", RED_FLAG: "RED FLAG", CHEQUERED: "CHEQUERED", UNKNOWN: "—" };
+  function render() {
+    const s = (R.remote.session || {}), f = (R.remote.flag || {}), ui = R.ui || {}, md = R.mode || {};
+    $("sess").textContent = (s.meeting_name ? s.meeting_name + " · " : "") + (s.session_name || "No session");
+    $("lap").textContent = s.lap ? `L${s.lap}${s.total_laps ? "/" + s.total_laps : ""}` : "";
+    const fl = f.state || f.status || "UNKNOWN";
+    $("flag").className = "flag f-" + fl;
+    $("flag").textContent = FLAGTXT[fl] || fl;
+    $("sub").textContent = [(md.effective_mode ? md.effective_mode + (md.selected_mode === "AUTO" ? " (AUTO)" : " (MANUAL)") : ""),
+      ui.view ? "VIEW " + ui.view.toUpperCase() : "", f.pit_exit ? "PIT EXIT " + f.pit_exit : ""].filter(Boolean).join(" · ");
+    // the active controls are the server's state, never a local guess
+    for (const b of document.querySelectorAll("[data-view]")) b.classList.toggle("active", ui.view === b.dataset.view);
+    for (const b of document.querySelectorAll("[data-tv]")) b.classList.toggle("active", (ui.tv_mode || "") === b.dataset.tv);
+    for (const b of document.querySelectorAll("[data-mode]")) b.classList.toggle("active", md.selected_mode === b.dataset.mode);
+    for (const b of document.querySelectorAll('[data-c="TOGGLE_AUTO_CYCLE"]')) b.classList.toggle("active", !!ui.auto_cycle);
+    $("modeinfo").innerHTML = md.selected_mode ? `DETECTED <b>${esc(md.detected_mode)}</b> · RUNNING <b>${esc(md.effective_mode)}</b>` +
+      (md.switching ? " · switching…" : "") + (md.notice ? ` · <b style="color:var(--amber)">${esc(md.notice)}</b>` : "") : "";
+    const sel = R.remote.selected;
+    $("selinfo").innerHTML = sel ? `SELECTED <b style="border-left:4px solid ${esc(sel.team_color || "#444")};padding-left:6px">${esc(sel.tla || sel.num)}</b>` +
+      (sel.position ? ` · P${esc(sel.position)}` : "") : "No driver selected";
+    const y = R.sync || {};
+    $("syncinfo").innerHTML = y.mode ? `SYNC <b>${esc(y.confidence || "—")}</b> · ${esc(y.mode)}` +
+      (y.offsetDisplay !== undefined && y.offsetDisplay !== null ? ` · ${esc((y.offsetDisplayLabel || "offset").toLowerCase())} <b>${Number.isFinite(+y.offsetDisplay) ? (+y.offsetDisplay).toFixed(1) + " s" : esc(y.offsetDisplay)}</b>` : "") +
+      (y.health ? ` · health ${esc(y.health)}` : "") : "Sync status not available";
+    // the two delays, never mixed: F1 START DELAY = the event was late; STREAM DELAY = the video is behind
+    const si = y.startInfo, ss = y.streamStart;
+    const sg = (v) => (v >= 0 ? "+" : "−") + mmss(Math.abs(v));
+    $("startinfo").innerHTML = si ? [
+      `F1 START <b${si.state === "DELAYED" ? ' style="color:var(--amber)"' : ""}>${esc((si.state || "").replace("_", "-"))}</b>` +
+        (si.state === "DELAYED" ? " · scheduled start not used" : ""),
+      si.f1DelaySeconds !== null && si.f1DelaySeconds !== undefined ? `F1 START DELAY <b>${sg(si.f1DelaySeconds)}</b>` : "",
+      y.streamDelaySeconds !== null && y.streamDelaySeconds !== undefined ? `STREAM DELAY <b>${sg(y.streamDelaySeconds)}</b>` :
+        ss && ss.streamDelaySeconds !== null && ss.streamDelaySeconds !== undefined ? `STREAM DELAY <b>${sg(ss.streamDelaySeconds)}</b>` : "",
+      ss ? (ss.originUtc ? `STREAM START <b>0:00 SET</b> = <b>${esc(ss.originUtc.slice(0, 8))} UTC</b>` +
+        (ss.actualAtVideo !== null && ss.actualAtVideo !== undefined ? ` · actual start at <b>${sg(ss.actualAtVideo)}</b>` : "") +
+        ` · CONFIDENCE <b>${esc(ss.confidence || "—")}</b>` : `STREAM START <b>0:00 SET</b> · ${esc(ss.reason || "")}`) : "",
+    ].filter(Boolean).join(" · ") : "";
+    const es = y.eventSync, ui2 = R.ui || {};
+    if (es && ui2.sync_events) {
+      const cur = (es.events || []).find((e) => e.id === es.sel);
+      const npts = (es.points || []).filter((p) => p.state !== "replaced").length;
+      const nout = (es.points || []).filter((p) => p.state === "outlier").length;
+      $("startinfo").innerHTML += `<br>EVENT SYNC ▶ <b>${cur ? esc(cur.label) + " " + esc((cur.utc || "").slice(0, 8)) : "—"}</b>` +
+        ` · ${npts} point(s)${nout ? ` · <b style="color:var(--amber)">${nout} outlier</b>` : ""} · ▲▼ select · OK = SET · BACK`;
+    }
+    const au = y.autoSync;
+    if (au) {
+      const dd = au.liveDataDelay;
+      $("startinfo").innerHTML += `<br>AUTO SYNC <b>${esc(au.state)}</b>` +
+        (dd && dd.seconds !== null && dd.seconds !== undefined ? ` · LIVE DATA <b>${dd.seconds.toFixed(1)}s</b> ${esc(dd.state)}` : "") +
+        (au.voyoSyncSeconds !== null && au.voyoSyncSeconds !== undefined ? ` · VOYO SYNC <b>${au.voyoSyncSeconds >= 0 ? "+" : "−"}${Math.abs(au.voyoSyncSeconds).toFixed(1)}s</b>` : "");
+    }
+    const lo = y.lightsOut, ll = lo && lo.last;
+    const hm = (u) => u ? esc(String(u).slice(0, 8)) : "—";
+    if (lo) $("startinfo").innerHTML += "<br>" + (ll && ll.found ?
+      `LIGHTS OUT ✓ · F1 EVENT <b>${hm(ll.f1Utc)}</b>` + (ll.voyoUtc ? ` · VOYO <b>${hm(ll.voyoUtc)}</b>` : "") +
+        (ll.streamDelaySeconds !== null && ll.streamDelaySeconds !== undefined ? ` · STREAM DELAY <b>${sg(ll.streamDelaySeconds)}</b>` : "") +
+        ` · CONFIDENCE <b>${esc(y.confidence || "—")}</b>` :
+      ll && !ll.found ? `LIGHTS OUT <b style="color:var(--amber)">NOT FOUND</b> · ${esc(ll.reason || "")}` :
+      lo.available ? `LIGHTS OUT in data <b>${hm(lo.f1Utc)} UTC</b> · press START when the video shows it` :
+      `LIGHTS OUT <b style="color:var(--amber)">not available</b> · ${esc(lo.reason || "")}`);
+    renderDrivers();
+    renderAdvSync();
+  }
+  function renderDrivers() {
+    const order = R.remote.order || [], sel = (R.remote.selected || {}).num;
+    const h = order.map(([num, tla, pos]) => `<button data-drv="${esc(num)}" class="${num === sel ? "active" : ""}">${pos ? esc(pos) + " " : ""}${esc(tla)}</button>`).join("");
+    if ($("drivers").dataset.h !== h) { $("drivers").dataset.h = h; $("drivers").innerHTML = h; }
+  }
+
+  // ------------------------------------------------------------ buttons: tap = one command; hold = repeat
+  function fire(b) {
+    if (b.dataset.k) return send({ type: "key", key: b.dataset.k });
+    if (b.dataset.c) return send({ type: "command", command: b.dataset.c });
+    if (b.dataset.view) return send({ type: "command", command: "CHANGE_VIEW", arg: b.dataset.view });
+    if (b.dataset.tv) return send({ type: "command", command: "SET_TV_MODE", arg: b.dataset.tv });
+    if (b.dataset.mode) return send({ type: "mode", value: b.dataset.mode });
+    if (b.dataset.drv) return send({ type: "command", command: "SELECT_DRIVER", arg: b.dataset.drv });
+    return false;
+  }
+  let holdT = null, held = false;
+  document.addEventListener("pointerdown", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    b.classList.add("pressed"); held = false;
+    if (b.hasAttribute("data-repeat")) {
+      clearInterval(holdT);
+      holdT = setTimeout(() => { held = true; fire(b); holdT = setInterval(() => fire(b), 160); }, 450);
+    }
+  });
+  const release = () => { clearTimeout(holdT); clearInterval(holdT); document.querySelectorAll("button.pressed").forEach((b) => b.classList.remove("pressed")); };
+  document.addEventListener("pointerup", release); document.addEventListener("pointercancel", release);
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    if (held) { held = false; return; }                   // a hold already repeated the command
+    fire(b);
+  });
+  document.addEventListener("contextmenu", (e) => { if (e.target.closest("button")) e.preventDefault(); });
+
+  // ------------------------------------------------------------ TEST tools (existing commands)
+  $("wxsc").addEventListener("change", (e) => { const v = e.target.value; e.target.value = ""; if (v) send({ type: "command", command: "WEATHER_REPORT", arg: v }); });
+  $("simev").addEventListener("change", (e) => { const v = e.target.value; e.target.value = ""; if (v) send({ type: "command", command: "SIM_EVENT", arg: v }); });
+
+  // ------------------------------------------------------------ ADVANCED SYNC: the dashboard's SYNC menu actions
+  const pend = [];
+  function act(action, value) {
+    return new Promise((res) => { if (!send({ type: "sync_action", action, value: value ?? null })) return res({ ok: false, error: "not connected" }); pend.push({ action, res }); });
+  }
+  function onSyncResult(m) {
+    const i = pend.findIndex((p) => p.action === m.action);
+    if (i >= 0) pend.splice(i, 1)[0].res(m);
+  }
+  function vid(s) { if (s == null) return "N/A"; s = Math.max(0, Math.floor(s)); const h = Math.floor(s / 3600), mi = Math.floor(s % 3600 / 60), x = s % 60;
+    return (h ? h + ":" + String(mi).padStart(2, "0") : mi) + ":" + String(x).padStart(2, "0"); }
+  function renderAdvSync() {
+    if (!$("advsync").open) return;
+    const y = R.sync || {}, mm = y.media;
+    const ok = ["HIGH", "MEDIUM", "MANUAL"].includes(y.confidence) && y.synced;
+    $("md").innerHTML = (mm ? `MEDIA <b>${esc(mm.label || "Unknown F1 session")}</b> · ${esc(mm.state || "")}<br>` : "") +
+      `<b>${esc(y.sessionName ? (y.meetingName || "") + " — " + y.sessionName : "session not identified")}</b><br>` +
+      `video ${vid(y.voyo && y.voyo.playback)} · SYNC <b>${ok ? "SYNCED — " + esc(y.confidence) : esc(y.confidence || "—")}</b> · ${esc(y.method || "")}` +
+      (y.drift ? `<br><b style="color:var(--amber)">POSSIBLE SYNC DRIFT: ${Math.abs(y.drift.shift).toFixed(2)} s - not applied</b>` : "");
+    $("driftrow").hidden = !y.drift;
+    const timed = ["qualifying", "practice"].includes(y.sessionKind);
+    const tl = y.sessionTimeline || {};
+    $("timedbox").hidden = !(timed || (tl.phases || []).length);
+    $("racebox").hidden = timed; $("estbox").hidden = timed;
+    const ph = (tl.phases || []).filter((p) => p.clock).map((p) => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join("");
+    if ($("qph").dataset.h !== ph) { $("qph").dataset.h = ph; $("qph").innerHTML = ph; if (tl.current && tl.current.phase) $("qph").value = tl.current.phase; }
+    const mk = (tl.markers || []).filter((x) => x.sync).map((x) => `<option value="${esc(x.id)}">${esc(x.label)}</option>`).join("");
+    if ($("qmk").dataset.h !== mk) { $("qmk").dataset.h = mk; $("qmk").innerHTML = mk; }
+  }
+  $("advsync").addEventListener("toggle", () => { renderAdvSync(); if ($("advsync").open && !cat) loadCat(); });
+  function parseDur(t) { t = (t || "").trim().toLowerCase(); let m = t.match(/^(?:(\d{1,2}):)?(\d{1,3}):(\d{1,2})$/);
+    if (m) return (+(m[1] || 0)) * 3600 + (+m[2]) * 60 + (+m[3]);
+    m = t.match(/^(?:(\d{1,2})\s*h)?\s*(?:(\d{1,3})\s*m(?:in)?)?\s*(?:(\d{1,2})\s*s)?$/);
+    return m && (m[1] || m[2] || m[3]) ? (+(m[1] || 0)) * 3600 + (+(m[2] || 0)) * 60 + (+(m[3] || 0)) : null; }
+  function exactRes() {
+    const y = R.sync || {};
+    if (!y.sessionStart) return { error: "session not known yet - select it first" };
+    return F1Time.exactTime($("ex").value, $("tz").value, $("fmt").value, $("ap").value, y.sessionStart, y.gmtOffset);
+  }
+  function exPreview() {
+    $("ap").hidden = $("fmt").value !== "12";
+    if (!$("ex").value.trim()) { $("exprev").textContent = ""; return; }
+    const r = exactRes();
+    $("exprev").textContent = r.error || (r.preview + (r.warn ? " · " + r.warn : ""));
+  }
+  $("ex").addEventListener("input", exPreview);
+  for (const id of ["tz", "fmt", "ap"]) $(id).addEventListener("change", exPreview);
+  const capture = () => act("capture").then((j) => { if (j.ok) $("sr").textContent = "Captured video position " + vid(j.video_time); });
+  document.querySelector("[data-cap]").addEventListener("click", (e) => { e.stopPropagation(); capture(); });
+  for (const id of ["cd", "qclk", "ex"]) $(id).addEventListener("focus", capture);
+  document.querySelectorAll("#advsync [data-a]").forEach((b) => b.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const a = b.dataset.a; let j;
+    if (a === "countdown") j = await act("countdown", $("cd").value.trim());
+    else if (a === "exact") { const r = exactRes(); if (r.error) { $("sr").textContent = r.error; return; } j = await act("exact", r.iso); }
+    else if (a === "clock") {
+      if (parseDur($("qclk").value) === null) { $("sr").textContent = "Enter the clock as MM:SS"; return; }
+      j = await act("clock", `${$("qph").value}|${$("qmode").value}|${$("qclk").value.trim()}`);
+    } else if (a === "marker") j = await act("marker", $("qmk").value);
+    else if (a === "estimate") { const v = parseDur($("es").value); if (v === null) { $("sr").textContent = "Enter MM:SS"; return; } j = await act("estimate", v); }
+    else j = await act(a);
+    $("sr").textContent = j.result || j.error || "";
+  }));
+  // select the session: the season list once on demand (public data), the choice as a sync action
+  let cat = null;
+  const yr = $("yr"), now = new Date().getUTCFullYear();
+  for (let y = now; y >= 2023; y--) yr.insertAdjacentHTML("beforeend", `<option>${y}</option>`);
+  async function loadCat() {
+    try { cat = await (await fetch("/api/media/catalog?year=" + yr.value)).json(); } catch (e) { cat = { meetings: [] }; }
+    $("gp").innerHTML = `<option value="">Grand Prix…</option>` + (cat.meetings || []).map((m, i) => `<option value="${i}">${esc(m.name)}</option>`).join("");
+    $("ss").innerHTML = `<option value="">Session…</option>`;
+    if (cat.error) $("sr").textContent = "Season list not available: " + cat.error;
+  }
+  yr.addEventListener("change", loadCat);
+  $("gp").addEventListener("change", () => {
+    const m = (cat && cat.meetings || [])[+$("gp").value];
+    $("ss").innerHTML = `<option value="">Session…</option>` + (m ? m.sessions.map((x) => `<option value="${esc(x.session_key)}">${esc(x.session_name)}</option>`).join("") : "");
+  });
+  $("usess").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const k = $("ss").value; if (!k) { $("sr").textContent = "Choose a Grand Prix and a session"; return; }
+    const j = await act("select_session", +k);
+    $("sr").textContent = j.result || j.error || "Session selected - SYNC REQUIRED";
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>

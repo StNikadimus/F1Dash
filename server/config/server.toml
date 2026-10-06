@@ -1,0 +1,17 @@
+# Linux server overlay - only these values change compared with main/config/config.toml
+# (the shared defaults, also used by the Windows "pc variant"). Applied by server/launch.sh
+# (F1DASH_CONFIG_OVERLAY) / main.py --overlay.
+
+[server]
+host = "0.0.0.0"            # reachable from the TV, the PC with VOYO and the phone
+port = 8080
+
+[f1_tv]
+# a headless server has no browser to open: sign in through an SSH tunnel (server/README.md)
+open_browser = false
+
+[sync]
+# the VOYO window and its playback-clock bridge (tools/voyo_clock.py) run on the PC / TV box that
+# shows VOYO, not on this server: accept their samples from the LAN. Set [remote] token below
+# (or F1DASH_REMOTE_TOKEN) so only your launcher may post them.
+allow_remote_clock = true

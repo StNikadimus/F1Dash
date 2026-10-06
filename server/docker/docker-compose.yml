@@ -1,0 +1,17 @@
+# docker compose -f server/docker/docker-compose.yml up -d --build      (from the repository root)
+services:
+  f1-dashboard:
+    build:
+      context: ../..
+      dockerfile: server/docker/Dockerfile
+    container_name: f1-dashboard
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: ../.env            # server/.env (copy server/.env.example) - optional
+        required: false
+    environment:
+      TZ: "${TZ:-Europe/Ljubljana}"
+    volumes:
+      - ../../data:/data           # sign-in, sync state, F1-feed recordings, caches (shared with launch.sh)
