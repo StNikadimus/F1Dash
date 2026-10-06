@@ -1,5 +1,8 @@
 # server/ — Linux deployment (primary)
 
+> **Setting up a new server from scratch? Follow [`SETUP.md`](SETUP.md)**: every step from a fresh
+> Linux install (users, disk, GitHub access, services, F1 TV and VOYO sign-in), nothing left out.
+
 This folder holds only Linux deployment files. All code is shared in `../main/`
 (the backend, dashboard, phone remote, tools and tests). The server runs the
 complete backend:
@@ -107,8 +110,7 @@ recommended sync and persistence. See `main/README.md` §9c.
 ## systemd service
 
 ```bash
-sudo useradd --system --home /opt/f1-dashboard f1          # once (User=f1 in the unit)
-sudo chown -R f1: /opt/f1-dashboard
+# user f1, /opt/f1-dashboard, /var/lib/f1-dashboard: see SETUP.md steps 3-7
 sudo cp server/systemd/f1-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now f1-dashboard
