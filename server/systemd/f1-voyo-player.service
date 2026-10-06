@@ -1,0 +1,29 @@
+# systemd unit - the server VOYO player: opens VOYO on a virtual screen around every F1 session and
+# records it (main/tools/voyo_server_player.py). Needs f1-dashboard.service (it writes the recordings).
+#   sudo ./server/setup-voyo-player.sh                 # Chrome, Xvfb, PulseAudio, ffmpeg, x11vnc
+#   sudo -u f1 F1DASH_DATA_DIR=/var/lib/f1-dashboard HOME=/var/lib/f1-dashboard ./server/voyo-player.sh login
+#   sudo cp server/systemd/f1-voyo-player.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now f1-voyo-player
+#   journalctl -u f1-voyo-player -f
+[Unit]
+Description=F1 dashboard - server VOYO player (records VOYO around F1 sessions)
+After=f1-dashboard.service network-online.target
+Wants=network-online.target
+Requires=f1-dashboard.service
+#RequiresMountsFor=/mnt/f1disk
+
+[Service]
+User=f1
+WorkingDirectory=/opt/f1-dashboard/main
+Environment=F1DASH_DATA_DIR=/var/lib/f1-dashboard
+# Chrome keeps its own files under HOME
+Environment=HOME=/var/lib/f1-dashboard
+EnvironmentFile=-/opt/f1-dashboard/server/.env
+ExecStart=/opt/f1-dashboard/server/voyo-player.sh run
+Restart=always
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

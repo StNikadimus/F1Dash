@@ -47,7 +47,7 @@ MAP_REPORT_S = 300.0         # map validation summary in the log          # live
 
 class Engine:
     def __init__(self, cfg: dict[str, Any], source: Source, tracks: TrackProvider, hub: Hub,
-                 token_configured: bool = False) -> None:
+                 token_configured: bool = False, stream_recorder=None) -> None:
         self.cfg = cfg
         self.source = source
         self.tracks = tracks
@@ -70,6 +70,10 @@ class Engine:
             if source.mode == "live" else "F1 archive" if source.mode == "replay" else "Simulator")
         # LIVE DATA DELAY: receive time - F1 message timestamp of every live feed message
         self.timeline.on_latency = lambda ms: self.sync.live_delay.add(time.monotonic(), ms / 1000)
+        # VOYO stream recordings (server/voyo_recording.py) - one per process, outlives LIVE <-> VOD switches
+        self.stream_recorder = stream_recorder
+        if stream_recorder is not None:
+            self.sync.on_record = lambda kind, data: stream_recorder.sync_event(kind, data, self.sync)
         self._lo_probe = None                                     # public F1 SignalR LIGHTS OUT fallback
         self._lo_check = 0.0
         self._lo_cfg = cfg.get("live") or {}
@@ -289,6 +293,12 @@ class Engine:
     # ------------------------------------------------------------------ VOYO clock / sync commands
     def voyo_sample(self, sample: VoyoSample) -> None:
         self.sync.update(sample, self._src_now_ms())
+        if self.stream_recorder is not None:
+            try:
+                self.stream_recorder.observe(sample, self.sync.tracker.current, self.sync.last_instance_reason,
+                                             self.sync)
+            except Exception:  # noqa: BLE001 - the recording never breaks the dashboard
+                log.exception("VOYO stream recording failed")
         if not self.vod:
             return
         page = sample.page or {}

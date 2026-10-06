@@ -34,3 +34,28 @@ read-only and posts it to the server for AUTO SYNC). Set the same remote token o
 
 Closing the window (or the dashboard / VOYO window) closes everything and restores the taskbar.
 Logs: `data\server.log`.
+
+## VOYO stream recordings and the opt-in window capture
+
+The server writes the VOYO stream recordings, not this PC. This PC only sends the VOYO clock
+samples it already sends for the sync (`POST /api/sync/voyo`).
+
+- **Everything on one PC:** the "server" is this PC. Choose the disk with `[voyo.recording] path`
+  in `main\config\config.toml`, e.g. `path = "D:/F1Recordings/voyo_streams"`, or with the
+  `F1DASH_VOYO_RECORDING_PATH` environment variable.
+- **With the Linux server:** the recordings go to the server's configured path.
+
+The window capture is **off** unless the server's `[voyo.recording] record_video_capture = true`.
+When it is on, the launcher records the VOYO window with ffmpeg (`gdigrab`):
+- AirParrot `capture3` stays the default.
+- The capture is a screen recording only. The result is black if the browser blanks protected video.
+- Segments are buffered in `data\voyo_capture_spool\` and uploaded to the server, then deleted
+  here. Failed uploads are retried, also after the next start.
+
+Setup and options:
+- Install ffmpeg (e.g. `winget install ffmpeg`). If it is not on PATH, set
+  `[voyo.recording] ffmpeg = "C:/ffmpeg/bin/ffmpeg.exe"`.
+- Audio is optional: `capture_audio_device = "Stereo Mix (Realtek(R) Audio)"`. `ffmpeg -list_devices true -f dshow -i dummy`
+  lists the device names.
+- Keep the VOYO window on screen (not minimized) while recording.
+- `python main\tools\tv_launcher.py --no-capture ...` never captures on this PC.

@@ -62,7 +62,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .autosync import LiveDataDelay, StreamTracker, evaluate as autosync_evaluate
 from .lights_out import LightsOutResult, resolve_lights_out
@@ -634,6 +634,9 @@ class SyncManager:
         self._lat_hist: deque = deque()             # (mono, stream latency s) while playing - drift note
         self._inst_saved = 0.0
         self.auto_state: dict = {"state": "SEARCHING"}
+        self.last_instance_reason: Optional[str] = None
+        # VOYO stream recordings: on_record(kind, data) - every sync observation of the open stream
+        self.on_record: Optional[Callable[[str, dict], None]] = None
         self._start_key: Optional[tuple] = None      # last logged start state
         self._solve()
 
@@ -691,9 +694,12 @@ class SyncManager:
         self.edge.observe(s)
         if s.page:
             self.page = s.page
-        reason = self.tracker.observe(s, info, time.time()) if self.auto_enabled else None
-        new_instance = reason not in (None, "first stream seen", "resumed")
-        if reason:
+        # the instance is always tracked (VOYO stream recordings, server/voyo_recording.py); it only
+        # resets the sync when AUTO SYNC is on
+        reason = self.tracker.observe(s, info, time.time())
+        self.last_instance_reason = reason
+        new_instance = self.auto_enabled and reason not in (None, "first stream seen", "resumed")
+        if reason and self.auto_enabled:
             inst = self.tracker.current
             log.info("[SYNC] AUTO SYNC stream instance %s: %s - %s, server time %s (%s)", inst.id, reason,
                      "live" if inst.live else "recording", utc_str(inst.first_seen_wall * 1000), inst.origin_how)
@@ -753,7 +759,7 @@ class SyncManager:
         if not self.vod and age > 12 * 3600:
             return False                        # a live channel page is a different broadcast tomorrow
         inst = self.tracker.current
-        if not self.vod and inst is not None and saved.get("instance_id") not in (None, inst.id):
+        if not self.vod and self.auto_enabled and inst is not None and saved.get("instance_id") not in (None, inst.id):
             return False                        # live: another stream instance has another timeline
         if saved.get("session_key") != (self.session or {}).get("session_key"):
             return False                        # other GP / session: never reuse
@@ -776,7 +782,15 @@ class SyncManager:
             log.info("Sync: %s", self.note)
         return bool(restored)
 
+    def _rec(self, kind: str, **data) -> None:
+        if self.on_record is not None:
+            try:
+                self.on_record(kind, data)
+            except Exception:  # noqa: BLE001 - recording never breaks the sync
+                log.exception("VOYO stream recording hook failed")
+
     def _save_asset(self) -> None:
+        self._rec("anchors")
         if not self.asset:
             return
         if self.origin is not None:
@@ -1386,6 +1400,7 @@ class SyncManager:
         for x in hit:
             x.status = "removed"
             self.history.append(x)
+            self._rec("anchor", anchor=x.to_json(), status="removed")
         del self.history[:-30]
         self.anchors = [x for x in self.anchors if x not in hit]
         self.pending = None
@@ -1700,6 +1715,8 @@ class SyncManager:
                    f"CONFIDENCE {o.get('conf')}")
             log.info("[SYNC] Stream origin: %s UTC (%s, %s)", utc_str(o["utc_ms"]), o.get("method"), o.get("conf"))
         self.last_result = txt
+        self._rec("stream_start", video_time=o.get("video_time"), utc_ms=o.get("utc_ms"), conf=o.get("conf"),
+                  method=o.get("method"), source=o.get("source"))
         return txt
 
     def reset_stream_start(self) -> str:
@@ -1722,6 +1739,7 @@ class SyncManager:
         self._pending_jump = True
         self._save_asset()
         log.info("[SYNC] Stream start reset for %s - sync from the remaining anchors (%s)", key, m.confidence)
+        self._rec("stream_start_reset", key=key)
         return self._result(m, "STREAM START RESET")
 
     # ------------------------------------------------------------------ qualifying / practice
@@ -1926,6 +1944,10 @@ class SyncManager:
                             "video": video, "agree": len(anchors) if agree_prev else 1, "wall": time.time()}
             log.warning("Sync: possible drift - new %s anchor would move the shown time by %+.2f s "
                         "(not applied; waiting for Keep old / Use new)", a.kind, shift)
+            if not a.instance_id and self.tracker.current is not None:
+                a.instance_id = self.tracker.current.id
+            self._rec("anchor", anchor=a.to_json(), status="pending", shift=round(shift, 3))
+            self._rec("anchors")
             return cur
         if not a.instance_id and self.tracker.current is not None:
             a.instance_id = self.tracker.current.id
@@ -1933,6 +1955,7 @@ class SyncManager:
             self.anchors = [x for x in self.anchors if x.kind != "pin"]
         self.anchors.append(a)
         del self.anchors[:-20]
+        self._rec("anchor", anchor=a.to_json(), status="applied")
         self.trim = 0.0
         if a.grounded and a.kind != "pin":
             self._rematch_ungrounded(a.offset, video)
@@ -1957,6 +1980,7 @@ class SyncManager:
         for x in p["anchors"]:
             x.status = "rejected"
             self.history.append(x)
+            self._rec("anchor", anchor=x.to_json(), status="rejected")
         del self.history[:-30]
         self.pending = None
         self._save_asset()
@@ -1973,6 +1997,8 @@ class SyncManager:
                 self.history.append(x)
         del self.history[:-30]
         self.anchors = [x for x in self.anchors if (x.video_time is not None) != video] + p["anchors"]
+        for x in p["anchors"]:
+            self._rec("anchor", anchor=x.to_json(), status="used_new")
         self.pending = None
         self.trim = 0.0
         self.deviation_note = None

@@ -287,6 +287,91 @@ fallback_when_unreachable = true
 capture_compat = "no-gpu"
 
 # ---------------------------------------------------------------------------
+# VOYO STREAM RECORDINGS - one package per detected VOYO stream instance (stream_instance_id):
+# identity, the playback timeline, sync anchors / observations, LIVE DATA DELAY, a manifest and
+# an index - written by the SERVER (the Linux server is the system of record; the PC only sends
+# the VOYO clock samples). Separate from the F1 timing recordings ([live] record -> data/recordings).
+# README "VOYO stream recordings" (main/README.md §9d) has the file contract and the load API.
+# ---------------------------------------------------------------------------
+[voyo.recording]
+enabled = true
+record_metadata = true          # meta.json / manifest.json / anchors.json
+record_timeline = true          # timeline.jsonl: VOYO position samples + play / pause / seek / buffering
+record_sync = true              # sync_observations.jsonl: anchors, (position, wall, F1 time) pairs, LIVE DATA DELAY
+timeline_interval_seconds = 1.0 # while playing: one position sample per N s (every state change always)
+pair_interval_seconds = 10.0    # while synced: one (position, wall time, F1 time) pair per N s
+
+# Where the packages go - choose the disk / mount here. Absolute paths are used as they are
+# (any disk, also outside the project); relative ones: "data/..." = the data directory
+# (F1DASH_DATA_DIR, default <repo>/data), anything else relative to main/.
+# Environment override: F1DASH_VOYO_RECORDING_PATH=/mnt/usb/f1-voyo-streams
+# Examples:
+#   path = "/mnt/data/f1-voyo-streams"             # Linux data disk
+#   path = "/media/usb/voyo"                       # external USB disk (mount it with nofail, see server/README.md)
+#   path = "/var/lib/f1-dashboard/voyo_streams"    # system data dir
+#   path = "D:/F1Recordings/voyo_streams"          # Windows PC variant
+path = "data/voyo_streams"
+create_path_if_missing = true   # false: the folder (e.g. the USB disk's) must exist - nothing is created on the root disk
+require_mount = ""              # e.g. "/mnt/f1disk": record only while a disk is mounted there (the folder in
+                                # `path` is then created on that disk); re-checked every 60 s - mount it any time
+min_free_bytes = 2147483648     # below this free space nothing more is written (2 GiB); 0 = no check
+
+# OPT-IN window capture of the VOYO player window you are watching (default OFF). It is a plain
+# screen recording of that window by ffmpeg on the PC that shows VOYO (gdigrab on Windows, x11grab
+# on Linux/X11): what the screen shows, nothing else - it never reads the protected stream or its
+# buffers, and if the browser / OS blanks protected video the recording is black (not worked
+# around). The PC uploads finished segments to the server, stored in <package>/capture/.
+# For your own use - check VOYO's terms of service.
+record_video_capture = false
+ffmpeg = "ffmpeg"               # on the PC: path to ffmpeg(.exe) or just "ffmpeg" if it is on PATH
+capture_fps = 30
+capture_crf = 23                # x264 quality (lower = better / bigger)
+capture_segment_seconds = 60
+capture_audio_device = ""       # Windows: a DirectShow audio device, e.g. "Stereo Mix (Realtek(R) Audio)"; "" = no audio
+capture_max_segment_bytes = 4294967296
+
+# How long captured VIDEO files are kept, per session type, in days (0 = keep forever). The
+# metadata, timeline and sync data of a package are always kept.
+keep_practice1_days = 7
+keep_practice2_days = 7
+keep_practice3_days = 7
+keep_sprint_qualifying_days = 14
+keep_sprint_days = 14
+keep_qualifying_days = 14
+keep_race_days = 30             # Grand Prix
+keep_other_days = 7             # session not identified
+
+# ---------------------------------------------------------------------------
+# SERVER VOYO PLAYER - the server opens VOYO itself and records it, with no PC switched on
+# (tools/voyo_server_player.py, service server/systemd/f1-voyo-player.service; server/README.md
+# "Recording VOYO on the server"). Google Chrome runs on a virtual screen (Xvfb), signed in to your
+# VOYO account (sign in once over VNC: voyo_server_player.py login); before each F1 session of
+# record_sessions it opens stream_url, starts playback, and ffmpeg records that screen (+ sound) -
+# what Chrome displays, like any screen recording; it never touches VOYO's stream, keys or DRM.
+# The packages are VOYO stream recordings of channel "server_player" in [voyo.recording] path.
+# For your own use - check VOYO's terms (e.g. how many streams your account may play at once).
+# ---------------------------------------------------------------------------
+[voyo.server_player]
+enabled = false
+# the VOYO page of the F1 live stream (the address you open on the PC). "" = the page that was open
+# when you last closed "voyo_server_player.py login"
+stream_url = ""
+when = "schedule"               # schedule = F1 sessions below | always | off
+record_sessions = ["practice1", "practice2", "practice3", "sprint_qualifying", "sprint", "qualifying", "race"]
+lead_minutes = 15               # open the stream this long before the scheduled start
+trail_minutes = 30              # ... and keep it until this long after the scheduled end
+keep_open_while_feed_live = true  # longer while the dashboard's live feed says the session still runs (red flags)
+record_video = true             # screen + sound recording into the package (capture/)
+fullscreen_video = true         # show only the video (the player's own fullscreen) - the recording is the picture
+browser = ""                    # "" = google-chrome (needed for VOYO's DRM on Linux), else a path
+display = ":90"                 # the virtual screen
+resolution = "1920x1080"
+cdp_port = 9224                 # Chrome's local DevTools port (127.0.0.1 only) - reads the video clock
+profile = "data/browser-profiles/voyo-server"
+audio = true                    # PulseAudio null sink "f1voyo" (needs pulseaudio); false = video only
+vnc_port = 5900                 # "login": x11vnc on 127.0.0.1 only - reach it through an SSH tunnel
+
+# ---------------------------------------------------------------------------
 # VOYO video <-> F1 data synchronisation. See README "VOYO sync".
 #
 # Clocks: A = F1 event time (canonical, from the feed's own timestamps),

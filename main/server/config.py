@@ -71,7 +71,23 @@ DEFAULTS: dict[str, Any] = {
                "keymap_video": {}, "keymap_video_focus": {}},
     "voyo": {"enabled": False, "mode": "window", "url": "https://voyo.si/", "hls_url": "",
              "default_tv_mode": "RACE_VIEW", "check_reachability": True, "check_interval_seconds": 60,
-             "fallback_when_unreachable": True, "capture_compat": "no-gpu"},
+             "fallback_when_unreachable": True, "capture_compat": "no-gpu",
+             "recording": {"enabled": True, "record_metadata": True, "record_timeline": True, "record_sync": True,
+                           "timeline_interval_seconds": 1.0, "pair_interval_seconds": 10.0,
+                           "path": "data/voyo_streams", "create_path_if_missing": True, "require_mount": "",
+                           "min_free_bytes": 2 * 1024 ** 3, "record_video_capture": False, "ffmpeg": "ffmpeg",
+                           "capture_fps": 30, "capture_crf": 23, "capture_segment_seconds": 60,
+                           "capture_audio_device": "", "capture_max_segment_bytes": 4 * 1024 ** 3,
+                           "keep_practice1_days": 7, "keep_practice2_days": 7, "keep_practice3_days": 7,
+                           "keep_sprint_qualifying_days": 14, "keep_sprint_days": 14,
+                           "keep_qualifying_days": 14, "keep_race_days": 30, "keep_other_days": 7},
+             "server_player": {"enabled": False, "stream_url": "", "when": "schedule",
+                               "record_sessions": ["practice1", "practice2", "practice3", "sprint_qualifying",
+                                                   "sprint", "qualifying", "race"],
+                               "lead_minutes": 15, "trail_minutes": 30, "keep_open_while_feed_live": True,
+                               "record_video": True, "fullscreen_video": True, "browser": "", "display": ":90",
+                               "resolution": "1920x1080", "cdp_port": 9224,
+                               "profile": "data/browser-profiles/voyo-server", "audio": True, "vnc_port": 5900}},
     "sync": {"enabled": True, "mode": "AUTO", "buffer_seconds": 120.0, "broadcast_delay_seconds": 5.0,
              "adjustment_step": 0.25, "auto_drift_correction": True, "voyo_playback_clock": True,
              "drift_slew_seconds_per_second": 0.05, "mark_reaction_seconds": 0.2,
@@ -127,19 +143,25 @@ def load_config(path: str | os.PathLike | None = None, overlays: list | None = N
         else:
             log.warning("Configuration overlay %s not found - ignored", ov_path)
 
-    # Environment overrides: F1DASH_<SECTION>_<KEY>
-    for section, values in cfg.items():
-        if not isinstance(values, dict):
-            continue
+    # Environment overrides: F1DASH_<SECTION>_<KEY>, and for a sub-section ([voyo.recording])
+    # F1DASH_<SECTION>_<SUB>_<KEY>, e.g. F1DASH_VOYO_RECORDING_PATH
+    def _env_overrides(values: dict, prefix: str, depth: int) -> None:
         for key, current in list(values.items()):
             if isinstance(current, dict):
+                if depth == 0:
+                    _env_overrides(current, f"{prefix}_{key}", 1)
                 continue
-            env = os.environ.get(f"F1DASH_{section}_{key}".upper())
+            name = f"{prefix}_{key}".upper()
+            env = os.environ.get(name)
             if env is not None:
                 try:
                     values[key] = _coerce(env, current)
                 except ValueError:
-                    log.error("Invalid value for F1DASH_%s_%s: %r", section.upper(), key.upper(), env)
+                    log.error("Invalid value for %s: %r", name, env)
+
+    for section, values in cfg.items():
+        if isinstance(values, dict):
+            _env_overrides(values, f"F1DASH_{section}", 0)
 
     # Convenience: plain F1TV_TOKEN env var
     if os.environ.get("F1TV_TOKEN"):

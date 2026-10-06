@@ -27,6 +27,7 @@ from .sources.base import Source
 from .sync import parse_voyo_sample
 from .track import TrackProvider
 from .video import VideoMonitor
+from .voyo_recording import CAPTURE_NAME as VOYO_CAPTURE_NAME, VoyoStreamRecorder, load_package, recalibrate
 
 log = logging.getLogger("app")
 
@@ -69,8 +70,10 @@ class Runtime:
     server/mode.py) stops both and starts the other pair in the same process - the HTTP server,
     the dashboards' WebSockets, the remote, the VOYO monitor and the F1 TV sign-in stay."""
 
-    def __init__(self, cfg: dict[str, Any], hub: Hub, tracks: TrackProvider, auth: AuthManager) -> None:
+    def __init__(self, cfg: dict[str, Any], hub: Hub, tracks: TrackProvider, auth: AuthManager,
+                 stream_recorder: VoyoStreamRecorder | None = None) -> None:
         self.cfg = cfg
+        self.stream_recorder = stream_recorder
         self.hub = hub
         self.tracks = tracks
         self.auth = auth
@@ -113,7 +116,8 @@ class Runtime:
         """Build the source + engine of ``mode`` (not started) and reset the dashboards."""
         c = self.mode_cfg(mode)
         source, token_ok = build_source(c, self.tracks, self.auth)
-        engine = Engine(c, source, self.tracks, self.hub, token_configured=token_ok)
+        engine = Engine(c, source, self.tracks, self.hub, token_configured=token_ok,
+                        stream_recorder=self.stream_recorder)
         self.source, self.engine = source, engine
         hello = dict(self.hub.hello)
         hello["mode"] = source.mode
@@ -133,7 +137,23 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     hub = Hub()
     tracks = TrackProvider(DATA_DIR, cfg["tracks"])
     auth = make_auth(cfg)                     # one F1 TV sign-in for every LIVE period of this process
-    rt = Runtime(cfg, hub, tracks, auth)
+    # VOYO stream recordings: written on this server under [voyo.recording] path (checked now)
+    rec_cfg = (cfg.get("voyo") or {}).get("recording") or {}
+    stream_rec = VoyoStreamRecorder(rec_cfg, DATA_DIR / "recordings").start()
+    # the server's own VOYO player (tools/voyo_server_player.py): its own stream instances + packages
+    sp_cfg = (cfg.get("voyo") or {}).get("server_player") or {}
+    player_rec = player_tracker = None
+    if sp_cfg.get("enabled"):
+        from .autosync import StreamTracker
+        player_rec = VoyoStreamRecorder(rec_cfg, DATA_DIR / "recordings", channel="server_player",
+                                        capture=bool(sp_cfg.get("record_video", True))).start()
+        player_store_path = DATA_DIR / "voyo_server_player_instances.json"
+        try:
+            player_store = json.loads(player_store_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            player_store = {}
+        player_tracker = StreamTracker(player_store)
+    rt = Runtime(cfg, hub, tracks, auth, stream_rec)
 
     async def publish_ui(msg: dict) -> None:
         if rt.engine is not None:
@@ -203,6 +223,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return (rt.engine.feed_state.get("SessionStatus") or {}).get("Status")
 
     mode = ModeController(selected, fixed=fixed, switch=switch, publish=hub.set_mode, feed_status=feed_status)
+    stream_rec.mode_info = mode.state
     # an engine exists from the start (API requests); the lifespan starts the mode actually wanted
     rt.prepare(fixed.lower() if fixed else "vod" if selected == "VOD" else "live")
     remote.mode_hook = mode.select
@@ -234,6 +255,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         for t in tasks:
             t.cancel()
         await rt.stop()
+        stream_rec.close()
+        if player_rec is not None:
+            player_rec.close()
 
     # ---------------------------------------------------------------- HTTP
     async def index(request: Request) -> Response:
@@ -486,11 +510,163 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         if len(raw) > MAX_CLOCK_BODY:
             return JSONResponse({"ok": False, "error": "too large"}, status_code=413)
         try:
-            sample = parse_voyo_sample(json.loads(raw or b"{}"), time.time(), time.monotonic())
+            body = json.loads(raw or b"{}")
+            sample = parse_voyo_sample(body, time.time(), time.monotonic())
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)[:80]}, status_code=400)
+        if isinstance(body, dict) and body.get("channel") == "server_player":
+            return server_player_sample(request, body, sample)
         rt.engine.voyo_sample(sample)
-        return JSONResponse({"ok": True})
+        # the open VOYO stream recording + whether the PC should run the opt-in window capture for it
+        return JSONResponse({"ok": True, "recording": stream_rec.clock_reply()})
+
+    # ---------------------------------------------------------------- VOYO stream recordings
+    class PlayerView:
+        """What the recorder reads for a server-player sample: the F1 session (the live engine's,
+        else the player's schedule hint), LIVE DATA DELAY of the live feed - never the dashboard's
+        sync of the VOYO window you watch (that is another stream instance)."""
+
+        def __init__(self, inst, hint: dict) -> None:
+            eng = rt.engine
+            live_eng = eng is not None and not eng.vod and rt.source is not None and rt.source.mode == "live"
+            sess = (eng.sync.session if live_eng else None) or {}
+            if not sess.get("session_key") and hint.get("session_name"):
+                sess = {"session_key": None, "meeting_name": hint.get("meeting"),
+                        "session_name": hint.get("session_name"), "date_start": hint.get("start"),
+                        "source": "server player schedule"}
+            self.session = sess or None
+            self.vod = not (inst is not None and inst.live)
+            self.live_delay = eng.sync.live_delay if live_eng else None
+            self.auto_state, self.mapping, self.K, self.page = {}, None, None, None
+
+    def server_player_sample(request: Request, body: dict, sample) -> Response:
+        if player_rec is None:
+            return JSONResponse({"ok": False, "error": "[voyo.server_player] enabled = false"}, status_code=409)
+        host = request.client.host if request.client else ""
+        if host not in LOOPBACK:
+            return JSONResponse({"ok": False, "error": "the server player runs on this server only"},
+                                status_code=403)
+        if body.get("close"):
+            # the player closed the stream (session window over): its package is complete
+            player_rec.finalize(str(body.get("why") or "server player closed the stream")[:80])
+            player_tracker.current = None
+            return JSONResponse({"ok": True, "recording": player_rec.clock_reply()})
+        reason = player_tracker.observe(sample, {}, time.time())
+        inst = player_tracker.current
+        if reason and inst is not None:
+            player_tracker.store.setdefault("instances", {})[inst.id] = inst.to_json()
+            with contextlib.suppress(OSError):
+                (DATA_DIR / "voyo_server_player_instances.json").write_text(
+                    json.dumps(player_tracker.store, default=str), encoding="utf-8")
+        hint = body.get("session_hint") if isinstance(body.get("session_hint"), dict) else {}
+        hint = {k: str(v)[:120] for k, v in hint.items() if k in ("meeting", "session_name", "start", "end")}
+        try:
+            player_rec.observe(sample, inst, reason, PlayerView(inst, hint))
+        except Exception:  # noqa: BLE001
+            log.exception("VOYO server player recording failed")
+        return JSONResponse({"ok": True, "recording": player_rec.clock_reply()})
+
+    def _rec_for(iid: str) -> VoyoStreamRecorder:
+        if player_rec is not None:
+            pkg = player_rec.package_dir(iid)
+            if pkg is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    if json.loads((pkg / "manifest.json").read_text(encoding="utf-8")).get("channel") == \
+                            "server_player":
+                        return player_rec
+        return stream_rec
+
+    def _voyo_poster_ok(request: Request) -> JSONResponse | None:
+        host = request.client.host if request.client else ""
+        if host not in LOOPBACK and not allow_remote_clock:
+            return JSONResponse({"ok": False, "error": "only accepted from this computer"}, status_code=403)
+        if not remote.check_token(_token(request)):
+            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        return None
+
+    async def api_voyo_recordings(request: Request) -> Response:
+        """List of the VOYO stream recordings on this server (index.json of [voyo.recording] path)."""
+        return JSONResponse({"status": stream_rec.status(),
+                             "server_player": player_rec.status() if player_rec is not None else None,
+                             "recordings": stream_rec.list(also=(player_rec,))})
+
+    async def api_voyo_recording(request: Request) -> Response:
+        """One package: manifest + meta + anchors + the AUTO SYNC calibration re-run from its anchors
+        (?full=1 also returns the timeline and observations)."""
+        pkg = stream_rec.package_dir(request.path_params["iid"])
+        if pkg is None:
+            return JSONResponse({"ok": False, "error": "unknown stream instance"}, status_code=404)
+        data = load_package(pkg)
+        out = {k: data[k] for k in ("manifest", "meta", "anchors", "capture")}
+        out["calibration"] = recalibrate(data)
+        if request.query_params.get("full"):
+            out["timeline"], out["observations"] = data["timeline"], data["observations"]
+        return JSONResponse(out)
+
+    async def api_voyo_recording_file(request: Request) -> Response:
+        """A file of a package (timeline.jsonl, ..., capture/<segment>) - remote token required when set."""
+        if not remote.check_token(_token(request)):
+            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        pkg = stream_rec.package_dir(request.path_params["iid"])
+        name = request.path_params["name"]
+        if pkg is None:
+            return JSONResponse({"ok": False, "error": "unknown stream instance"}, status_code=404)
+        parts = name.split("/")
+        allowed = (len(parts) == 1 and parts[0] in ("manifest.json", "meta.json", "timeline.jsonl", "anchors.json",
+                                                     "sync_observations.jsonl")) or \
+            (len(parts) == 2 and parts[0] == "capture" and (parts[1] == "capture.jsonl" or
+                                                            VOYO_CAPTURE_NAME.match(parts[1])))
+        path = pkg.joinpath(*parts)
+        if not allowed or not path.is_file():
+            return JSONResponse({"ok": False, "error": "no such file"}, status_code=404)
+        return FileResponse(path)
+
+    async def api_voyo_capture_upload(request: Request) -> Response:
+        """PUT one finished window-capture segment from the PC (tools/voyo_capture.py) into the package."""
+        denied = _voyo_poster_ok(request)
+        if denied is not None:
+            return denied
+        iid, name = request.path_params["iid"], request.path_params["name"]
+        try:
+            size = int(request.headers.get("content-length") or 0) or None
+        except ValueError:
+            size = None
+        rec = _rec_for(iid)
+        target, err = rec.capture_target(iid, name, size)
+        if target is None:
+            return JSONResponse({"ok": False, "error": err}, status_code=409 if "off" in (err or "") else 400)
+        if target.exists():
+            return JSONResponse({"ok": True, "stored": target.name, "duplicate": True})
+        limit = int(((cfg.get("voyo") or {}).get("recording") or {}).get("capture_max_segment_bytes", 4 * 1024 ** 3))
+        tmp = target.with_name(target.name + ".part")
+        n = 0
+        try:
+            with open(tmp, "wb") as fh:
+                async for chunk in request.stream():
+                    n += len(chunk)
+                    if n > limit:
+                        raise ValueError("segment too large")
+                    fh.write(chunk)
+            if size is not None and n != size:
+                raise ValueError(f"incomplete upload ({n} of {size} bytes)")
+            tmp.replace(target)
+        except (OSError, ValueError) as exc:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            log.warning("VOYO capture upload %s/%s failed: %s", iid, name, exc)
+            return JSONResponse({"ok": False, "error": str(exc)[:120]}, status_code=400)
+        info = {}
+        for h, k in (("x-capture-start", "pc_start_epoch"), ("x-capture-end", "pc_end_epoch"),
+                     ("x-pc-now", "pc_now_epoch")):
+            with contextlib.suppress(TypeError, ValueError):
+                info[k] = float(request.headers.get(h))
+        if "pc_now_epoch" in info:              # PC clock - server clock (upload time ignored): for alignment
+            info["pc_clock_minus_server_s"] = round(info["pc_now_epoch"] - time.time(), 3)
+        try:
+            rec.capture_stored(iid, target, info)
+        except OSError as exc:
+            log.warning("VOYO capture index %s: %s", iid, exc)
+        return JSONResponse({"ok": True, "stored": target.name, "bytes": n})
 
     # ---------------------------------------------------------------- WebSocket
     async def ws_endpoint(ws: WebSocket) -> None:
@@ -580,6 +756,10 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/api/remote/command", remote_command, methods=["POST"]),
         Route("/api/sync", api_sync),
         Route("/api/sync/voyo", api_sync_voyo, methods=["POST"]),
+        Route("/api/voyo/recordings", api_voyo_recordings),
+        Route("/api/voyo/recordings/{iid}", api_voyo_recording),
+        Route("/api/voyo/recordings/{iid}/capture/{name}", api_voyo_capture_upload, methods=["PUT"]),
+        Route("/api/voyo/recordings/{iid}/files/{name:path}", api_voyo_recording_file),
         Route("/api/sync/session", api_sync_session, methods=["POST"]),
         Route("/api/media/catalog", api_media_catalog),
         Route("/api/sync/{action}", api_sync_action, methods=["POST"]),

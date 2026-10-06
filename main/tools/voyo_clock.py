@@ -35,7 +35,7 @@ PROBE = (Path(__file__).resolve().parent / "voyo_clock_probe.js").read_text(enco
 
 class VoyoClockBridge:
     def __init__(self, server: str, port: int = 9223, token: str = "", hz: float = 5.0,
-                 match: str = "voyo", log: Callable[[str], None] = print) -> None:
+                 match: str = "voyo", log: Callable[[str], None] = print, channel: str = "") -> None:
         self.server = server.rstrip("/").replace("://localhost", "://127.0.0.1")
         self.port = int(port)
         self.token = token
@@ -54,6 +54,11 @@ class VoyoClockBridge:
         # leaves letter / digit keys to the page while this is True (fresh samples only)
         self._typing = (False, 0.0)
         self._page_diag: Optional[tuple] = None
+        self.on_reply: Optional[Callable[[Optional[dict]], None]] = None
+        # "server_player": samples of the server's own VOYO player (tools/voyo_server_player.py) -
+        # recorded as their own stream instances, never used for the dashboard's sync
+        self.channel = channel
+        self.extra: Callable[[], dict] = lambda: {}
 
     @property
     def typing(self) -> bool:
@@ -135,12 +140,20 @@ class VoyoClockBridge:
                      "the stream.")
 
     def _post(self, sample: dict) -> None:
+        if self.channel:
+            sample = {**sample, "channel": self.channel, **(self.extra() or {})}
         req = urllib.request.Request(self.server + "/api/sync/voyo", method="POST",
                                      data=json.dumps(sample).encode(),
                                      headers={"Content-Type": "application/json"})
         if self.token:
             req.add_header("X-Remote-Token", self.token)
-        urllib.request.urlopen(req, timeout=1.5).read()
+        body = urllib.request.urlopen(req, timeout=1.5).read()
+        if self.on_reply is not None:
+            # the server's open VOYO stream recording (+ opt-in window capture) - tools/voyo_capture.py
+            try:
+                self.on_reply((json.loads(body or b"{}") or {}).get("recording"))
+            except ValueError:
+                pass
 
     def run(self) -> None:
         from websockets.sync.client import connect      # websockets >= 13 (requirements.txt)

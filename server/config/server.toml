@@ -15,3 +15,22 @@ open_browser = false
 # shows VOYO, not on this server: accept their samples from the LAN. Set [remote] token below
 # (or F1DASH_REMOTE_TOKEN) so only your launcher may post them.
 allow_remote_clock = true
+
+[voyo.recording]
+# VOYO stream recordings go to the external disk mounted at /mnt/f1disk (server/README.md
+# "External USB hard drive"). Until a disk is mounted there, recording waits (logged, re-checked
+# every 60 s) and nothing is written to the system disk; after mounting, it starts by itself and
+# creates the voyo_streams folder on the disk. Another mount point: change both lines.
+path = "/mnt/f1disk/voyo_streams"
+require_mount = "/mnt/f1disk"
+# other examples:
+# path = "/mnt/data/f1-voyo-streams"          # data disk
+# path = "/var/lib/f1-dashboard/voyo_streams" # system data dir (then require_mount = "")
+# record_video_capture = true                 # opt-in window capture by the PC that shows VOYO
+
+[voyo.server_player]
+# the server opens VOYO itself around every F1 session and records it - no PC needed
+# (server/README.md "Recording VOYO on the server"; ./server/voyo-player.sh login once)
+enabled = true
+# the F1 live page in VOYO; "" = the page open when you last finished "voyo-player.sh login"
+stream_url = ""

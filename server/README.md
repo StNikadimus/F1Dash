@@ -17,6 +17,7 @@ complete backend:
 | `config/server.toml` | overlay on `main/config/config.toml`; only the server-specific values (`0.0.0.0:8080`, no browser, remote VOYO clock allowed) |
 | `.env.example` | copy to `.env`: token, start mode, remote token, time zone |
 | `systemd/f1-dashboard.service` | systemd unit (installed under `/opt/f1-dashboard`) |
+| `systemd/f1-voyo-player.service`, `voyo-player.sh`, `setup-voyo-player.sh` | the server VOYO player: opens VOYO and records it around F1 sessions (see below) |
 | `systemd/f1dash-ir-bridge.service` | optional IR remote → dashboard bridge (`bridge/`) |
 | `docker/` | Dockerfile + docker compose (build context = repo root) |
 | `bridge/`, `wdtv/` | IR bridge and WD TV Live client scripts |
@@ -106,8 +107,8 @@ recommended sync and persistence. See `main/README.md` §9c.
 ## systemd service
 
 ```bash
-sudo useradd --system --home /opt/f1-dashboard f1dash      # once
-sudo chown -R f1dash: /opt/f1-dashboard
+sudo useradd --system --home /opt/f1-dashboard f1          # once (User=f1 in the unit)
+sudo chown -R f1: /opt/f1-dashboard
 sudo cp server/systemd/f1-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now f1-dashboard
@@ -132,6 +133,158 @@ docker compose logs -f
 The image uses the repo root as its build context. Data lives on the
 `../../data:/data` volume (the same `data/` folder as a plain start).
 
+## VOYO stream recordings — choosing the disk
+
+The server writes one package per detected VOYO stream instance: identity, playback timeline, sync
+anchors and observations, LIVE DATA DELAY, a manifest and `index.json`, plus the opt-in window
+capture. The file contract and load API are in `main/README.md` §9d. These packages are kept
+**separate** from the F1 timing recordings in `data/recordings/`. A path inside that folder is
+refused.
+
+Set the path in `server/config/server.toml` (`[voyo.recording] path`) or in `server/.env`:
+
+```bash
+F1DASH_VOYO_RECORDING_PATH=/mnt/data/f1-voyo-streams     # any disk / mount, absolute = as is
+```
+
+How the path is resolved:
+- An absolute path is used as is.
+- `data/...` goes into `$F1DASH_DATA_DIR`.
+- Any other relative path is relative to `main/`.
+- The default is `data/voyo_streams`.
+
+At startup the server resolves the path, creates it (if `create_path_if_missing = true`), write-tests it
+and logs it:
+
+    VOYO stream recordings: /mnt/usb/f1-voyo (free 812.4 GB)
+
+If the path is not usable, the server logs `VOYO stream recording DISABLED: <reason>` (also shown
+in `GET /api/voyo/recordings`) and **writes nowhere else**. The dashboard keeps working.
+
+If a write fails later (disk full, USB disk unplugged), recording stops and the error is logged.
+The server re-checks the path every 60 s and continues the open package once it is writable again.
+`min_free_bytes` (default 2 GiB) stops writing before the disk fills.
+
+### External USB hard drive (configured: `/mnt/f1disk`)
+
+`server/config/server.toml` already points the recordings at the disk:
+
+```toml
+[voyo.recording]
+path = "/mnt/f1disk/voyo_streams"
+require_mount = "/mnt/f1disk"
+```
+
+Until a disk is mounted at `/mnt/f1disk`, the log shows `VOYO stream recording DISABLED: no disk
+mounted at /mnt/f1disk ...`. The dashboard works normally and **nothing is written to the system
+disk**. The path is checked again every 60 s while VOYO samples arrive. Once the disk is mounted,
+recording starts on its own and creates `voyo_streams/` on the disk; no restart is needed.
+
+Mounting it (once):
+
+```bash
+lsblk -f                                   # find the disk, e.g. /dev/sdb1, and its UUID + type
+sudo mkdir -p /mnt/f1disk
+# /etc/fstab - nofail: the server still boots without the disk
+UUID=<uuid>  /mnt/f1disk  ext4  defaults,nofail,x-systemd.device-timeout=10  0  2
+#   NTFS:  UUID=<uuid>  /mnt/f1disk  ntfs3  defaults,nofail,uid=f1,gid=f1  0  0
+#   exFAT: UUID=<uuid>  /mnt/f1disk  exfat  defaults,nofail,uid=f1,gid=f1  0  0
+sudo systemctl daemon-reload && sudo mount /mnt/f1disk
+sudo chown f1: /mnt/f1disk                 # ext4 only (NTFS/exFAT: uid=f1 above)
+```
+
+Here `f1` is the service user from `systemd/f1-dashboard.service`; when started by hand, it is your
+own user. To use another mount point, change both lines in `server.toml`, or set
+`F1DASH_VOYO_RECORDING_PATH` and `F1DASH_VOYO_RECORDING_REQUIRE_MOUNT`.
+
+### Window capture (opt-in)
+
+Set `record_video_capture = true` (or `F1DASH_VOYO_RECORDING_RECORD_VIDEO_CAPTURE=true`). The server
+then asks the PC that shows VOYO to record that window with ffmpeg (the PC needs ffmpeg; see
+`pc variant/README.md`). The PC uploads finished segments to `<path>/<stream_instance_id>/capture/`.
+
+- It is a screen recording of the window. It never reads the protected stream, and the result is
+  black if the browser or OS blanks protected video.
+- Video is deleted after `keep_<session>_days`; the metadata of the package stays.
+- A segment of 60 s at 1080p30 is about 30–60 MB, so plan on several GB per race.
+
+## Recording VOYO on the server (no PC needed)
+
+The server can open VOYO itself and record it, so your PC doesn't need to be on.
+`main/tools/voyo_server_player.py`, run as the `f1-voyo-player` service, does this:
+
+1. **Before each F1 session** of `record_sessions`, it starts a virtual screen (Xvfb, no monitor
+   needed) with Google Chrome signed in to **your** VOYO account. The session times come from the
+   official schedule; the default window is 15 min before the start until 30 min after the end, and
+   longer while the live feed says the session still runs.
+2. **It plays the stream:** it opens the F1 live page and presses play, sound on and the player's
+   own fullscreen, the same buttons you would press.
+3. **The F1 data side:** the read-only clock posts the video position to the dashboard server. The
+   server writes it as a VOYO stream recording on the disk (`[voyo.recording] path`, channel
+   `server_player`), with the F1 session and LIVE DATA DELAY attached.
+4. **The video side:** ffmpeg records that screen and its sound into the recording's `capture/` folder.
+5. **After the session** it closes VOYO. That package is complete and appears in `GET /api/voyo/recordings`.
+
+The recording is a screen recording of what Chrome displays. The tool never touches VOYO's stream,
+keys or DRM. VOYO needs Chrome's Widevine module, which Google Chrome has; if Chrome can't play the
+stream, nothing gets recorded. While it records, the server's stream counts as one of your
+account's devices/streams, so check VOYO's limit if you also watch on the PC. The recordings are
+for your own use.
+
+Your Windows PC is not involved. When it is on and showing VOYO, its window is a separate stream
+(channel `viewer`) for the dashboard sync, and the two are never mixed.
+
+### Setup (once)
+
+```bash
+sudo ./server/setup-voyo-player.sh            # Google Chrome, Xvfb, PulseAudio, ffmpeg, x11vnc
+# sign in to VOYO on the server's virtual screen - as the service user, with the service's data dir:
+sudo -u f1 env F1DASH_DATA_DIR=/var/lib/f1-dashboard HOME=/var/lib/f1-dashboard ./server/voyo-player.sh login
+```
+
+`login` prints an SSH tunnel command and a one-time VNC password.
+
+1. On your PC, run `ssh -L 5900:127.0.0.1:5900 <user>@<server>`.
+2. Open a VNC viewer (e.g. RealVNC Viewer or TigerVNC) to `127.0.0.1:5900`.
+3. Sign in to VOYO and open the **F1 live stream page** you want recorded.
+4. Press Ctrl+C in the `login` terminal. The page that is open becomes the stream page, saved in
+   `voyo_server_player.json`. Instead of steps 3–4 you can set `[voyo.server_player] stream_url` in
+   `server/config/server.toml`.
+
+VNC listens only on 127.0.0.1 and only while `login` runs. Your password is typed into VOYO's own
+page; the tool doesn't store it, and Chrome keeps its normal sign-in cookie in its profile
+(`data/browser-profiles/voyo-server`). Repeat `login` if VOYO ever signs you out; the log says
+"no video on the page yet ... signed in?".
+
+```bash
+./server/voyo-player.sh status                # Chrome + Widevine, tools, stream page, disk, next sessions
+./server/voyo-player.sh test --minutes 3      # open + record now, then prints the recording
+sudo cp server/systemd/f1-voyo-player.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now f1-voyo-player
+journalctl -u f1-voyo-player -f
+```
+
+### Settings (`[voyo.server_player]`, `main/config/config.toml`; server values in `server/config/server.toml`)
+
+| Key | Default | |
+|---|---|---|
+| `enabled` | true on the server | |
+| `stream_url` | "" | the F1 live page; "" = learned at `login` |
+| `when` | schedule | `schedule` / `always` / `off` |
+| `record_sessions` | all seven | `practice1/2/3, sprint_qualifying, sprint, qualifying, race` |
+| `lead_minutes`, `trail_minutes` | 15, 30 | |
+| `keep_open_while_feed_live` | true | |
+| `record_video` | true | false = only the metadata/timeline package |
+| `fullscreen_video` | true | |
+| `audio` | true | |
+| `resolution` | 1920x1080 | |
+| `display` | :90 | |
+| `cdp_port` | 9224 | |
+| `browser` | Google Chrome | |
+
+Video retention uses the same `keep_<session>_days` as the other recordings. A race at 1080p30 is
+roughly 3–6 GB.
+
 ## Where things are stored
 
 `$F1DASH_DATA_DIR` defaults to `<repo>/data`:
@@ -141,6 +294,7 @@ The image uses the repo root as its build context. Data lives on the
 | Logs | systemd: `journalctl -u f1-dashboard`; docker: `docker compose logs`; by hand: `data/logs/server.log` |
 | F1 TV sign-in | `data/auth/f1tv_auth.json` (never commit it; git-ignored) |
 | Sync state | `data/sync_calibration.json`, which holds per-video calibrations, sessions, Event Sync points, MARK STREAM START, and the `autosync` section (stream instances, learned live latency) |
+| VOYO stream recordings | `[voyo.recording] path` (default `data/voyo_streams/`): one folder per stream instance + `index.json` |
 | Recordings | `data/recordings/*.jsonl.gz`, the F1 timing feed. They are recorded automatically in LIVE mode (`[live] record = true`) and replayed with `./server/launch.sh --replay [file]` |
 | Caches | `data/` (OpenF1 / archive caches, track maps) |
 
