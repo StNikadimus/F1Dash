@@ -81,6 +81,10 @@ def slot_rects(screen_w: int, screen_h: int) -> dict[str, tuple[int, int, int, i
 # window backends
 # ---------------------------------------------------------------------------
 class NullOps:
+    def capture_spec(self, win) -> Optional[dict]:
+        """The VOYO window for the opt-in window capture (tools/voyo_capture.py)."""
+        return None
+
     name = "none"
     dpi_scale = 1.0
 
@@ -158,6 +162,12 @@ class WinOps(NullOps):
 
     def find_voyo(self, pid: Optional[int], title_hint: str):
         return self._find(pid, title_hint, dashboard=False)
+
+    def capture_spec(self, win) -> Optional[dict]:
+        if not self.is_valid(win):
+            return None
+        title = self._text(self.user32.GetWindowTextW, win)
+        return {"title": title} if title else None
 
     def _find(self, pid: Optional[int], title_hint: str, dashboard: bool):
         ct, wt, u = self.ct, self.wt, self.user32
@@ -307,6 +317,9 @@ class WmctrlOps(NullOps):
             if title_hint.lower() in parts[4].lower():
                 best = parts[0]
         return best
+
+    def capture_spec(self, win) -> Optional[dict]:
+        return {"window_id": win, "display": os.environ.get("DISPLAY") or ":0"} if win else None
 
     def is_valid(self, win) -> bool:
         try:
@@ -573,6 +586,7 @@ class Session:
         self.server_proc: Optional[subprocess.Popen] = None
         self.browser_pids: list[int] = []
         self.clock = None                                         # VoyoClockBridge
+        self.capture = None                                       # VoyoWindowCapture (opt-in, server decides)
         self.close_browsers = True
         self._done = threading.Lock()
         self._finished = False
@@ -586,6 +600,9 @@ class Session:
         self.ops.set_taskbar_hidden(False)                      # first: the taskbar always comes back
         if self.clock:
             self.clock.stop.set()
+        if self.capture:
+            print("Finishing the VOYO window capture (uploading the last segment) ...")
+            self.capture.stop()
         if self.close_browsers and self.agent:
             for win in (self.agent.win, self.agent.dash_win):
                 try:
@@ -789,6 +806,8 @@ def main() -> None:
                     help="screen-capture compatibility of the VOYO window for AirParrot / Miracast mirroring: "
                          "off | no-overlays | no-hw-decode | no-gpu (or 0-3); default from [voyo] capture_compat")
     ap.add_argument("--print", action="store_true", help="print the browser commands and exit")
+    ap.add_argument("--no-capture", action="store_true",
+                    help="never run the opt-in VOYO window capture on this PC (even if the server asks for it)")
     args = ap.parse_args()
     args.server = args.server.rstrip("/").replace("://localhost", "://127.0.0.1")
     use_clock = not args.no_clock and bool(sync.get("enabled", True)) and bool(sync.get("voyo_playback_clock", True))
@@ -882,6 +901,13 @@ def main() -> None:
                                         float(sync.get("clock_poll_hz", 5.0))).start()
         agent.title_hints = lambda: [session.clock.page_title] if session.clock and session.clock.page_title else []
         agent.typing = lambda: bool(session.clock and session.clock.typing)
+        if not args.no_capture:
+            # opt-in window capture for the server's VOYO stream recordings: idle unless the server's
+            # [voyo.recording] record_video_capture = true (it says so in its clock replies)
+            from tools.voyo_capture import VoyoWindowCapture
+            session.capture = VoyoWindowCapture(args.server, args.token, (voyo.get("recording") or {}),
+                                                DATA / "voyo_capture_spool", lambda: ops.capture_spec(agent.win)).start()
+            session.clock.on_reply = session.capture.on_reply
     reason = "Ctrl+C"
     try:
         agent.run()

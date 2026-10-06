@@ -106,8 +106,8 @@ recommended sync and persistence. See `main/README.md` §9c.
 ## systemd service
 
 ```bash
-sudo useradd --system --home /opt/f1-dashboard f1dash      # once
-sudo chown -R f1dash: /opt/f1-dashboard
+sudo useradd --system --home /opt/f1-dashboard f1          # once (User=f1 in the unit)
+sudo chown -R f1: /opt/f1-dashboard
 sudo cp server/systemd/f1-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now f1-dashboard
@@ -132,6 +132,76 @@ docker compose logs -f
 The image uses the repo root as its build context. Data lives on the
 `../../data:/data` volume (the same `data/` folder as a plain start).
 
+## VOYO stream recordings — choosing the disk
+
+The server writes one package per detected VOYO stream instance: identity, playback timeline, sync
+anchors and observations, LIVE DATA DELAY, a manifest and `index.json`, plus the opt-in window
+capture. The file contract and load API are in `main/README.md` §9d. These packages are kept
+**separate** from the F1 timing recordings in `data/recordings/`. A path inside that folder is
+refused.
+
+Set the path in `server/config/server.toml` (`[voyo.recording] path`) or in `server/.env`:
+
+```bash
+F1DASH_VOYO_RECORDING_PATH=/mnt/data/f1-voyo-streams     # any disk / mount, absolute = as is
+```
+
+How the path is resolved:
+- An absolute path is used as is.
+- `data/...` goes into `$F1DASH_DATA_DIR`.
+- Any other relative path is relative to `main/`.
+- The default is `data/voyo_streams`.
+
+At startup the server resolves the path, creates it (if `create_path_if_missing = true`), write-tests it
+and logs it:
+
+    VOYO stream recordings: /mnt/usb/f1-voyo (free 812.4 GB)
+
+If the path is not usable, the server logs `VOYO stream recording DISABLED: <reason>` (also shown
+in `GET /api/voyo/recordings`) and **writes nowhere else**. The dashboard keeps working.
+
+If a write fails later (disk full, USB disk unplugged), recording stops and the error is logged.
+The server re-checks the path every 60 s and continues the open package once it is writable again.
+`min_free_bytes` (default 2 GiB) stops writing before the disk fills.
+
+### External USB hard drive
+
+```bash
+lsblk -f                                   # find the disk, e.g. /dev/sdb1 (ext4 recommended)
+sudo mkdir -p /mnt/usb
+# /etc/fstab - nofail: the server still boots without the disk
+UUID=<uuid-of-sdb1>  /mnt/usb  ext4  defaults,nofail,x-systemd.device-timeout=10  0  2
+sudo mount /mnt/usb
+sudo mkdir -p /mnt/usb/f1-voyo && sudo chown f1: /mnt/usb/f1-voyo
+```
+
+Then add these lines to `server/.env`:
+
+```
+F1DASH_VOYO_RECORDING_PATH=/mnt/usb/f1-voyo
+F1DASH_VOYO_RECORDING_CREATE_PATH_IF_MISSING=false
+```
+
+`create_path_if_missing = false` matters here. If the disk is not mounted, `/mnt/usb/f1-voyo` does
+not exist, so recording is switched off with a clear message instead of silently filling the
+system disk under `/mnt/usb`.
+
+- **NTFS/exFAT disks:** mount them with `uid=f1,gid=f1` so the service user can write.
+- **To start the service only once the disk is mounted:** uncomment `RequiresMountsFor=` in
+  `systemd/f1-dashboard.service`.
+- **Docker:** add the disk as a volume (commented example in `docker/docker-compose.yml`).
+
+### Window capture (opt-in)
+
+Set `record_video_capture = true` (or `F1DASH_VOYO_RECORDING_RECORD_VIDEO_CAPTURE=true`). The server
+then asks the PC that shows VOYO to record that window with ffmpeg (the PC needs ffmpeg; see
+`pc variant/README.md`). The PC uploads finished segments to `<path>/<stream_instance_id>/capture/`.
+
+- It is a screen recording of the window. It never reads the protected stream, and the result is
+  black if the browser or OS blanks protected video.
+- Video is deleted after `keep_<session>_days`; the metadata of the package stays.
+- A segment of 60 s at 1080p30 is about 30–60 MB, so plan on several GB per race.
+
 ## Where things are stored
 
 `$F1DASH_DATA_DIR` defaults to `<repo>/data`:
@@ -141,6 +211,7 @@ The image uses the repo root as its build context. Data lives on the
 | Logs | systemd: `journalctl -u f1-dashboard`; docker: `docker compose logs`; by hand: `data/logs/server.log` |
 | F1 TV sign-in | `data/auth/f1tv_auth.json` (never commit it; git-ignored) |
 | Sync state | `data/sync_calibration.json`, which holds per-video calibrations, sessions, Event Sync points, MARK STREAM START, and the `autosync` section (stream instances, learned live latency) |
+| VOYO stream recordings | `[voyo.recording] path` (default `data/voyo_streams/`): one folder per stream instance + `index.json` |
 | Recordings | `data/recordings/*.jsonl.gz`, the F1 timing feed. They are recorded automatically in LIVE mode (`[live] record = true`) and replayed with `./server/launch.sh --replay [file]` |
 | Caches | `data/` (OpenF1 / archive caches, track maps) |
 

@@ -287,6 +287,59 @@ fallback_when_unreachable = true
 capture_compat = "no-gpu"
 
 # ---------------------------------------------------------------------------
+# VOYO STREAM RECORDINGS - one package per detected VOYO stream instance (stream_instance_id):
+# identity, the playback timeline, sync anchors / observations, LIVE DATA DELAY, a manifest and
+# an index - written by the SERVER (the Linux server is the system of record; the PC only sends
+# the VOYO clock samples). Separate from the F1 timing recordings ([live] record -> data/recordings).
+# README "VOYO stream recordings" (main/README.md §9d) has the file contract and the load API.
+# ---------------------------------------------------------------------------
+[voyo.recording]
+enabled = true
+record_metadata = true          # meta.json / manifest.json / anchors.json
+record_timeline = true          # timeline.jsonl: VOYO position samples + play / pause / seek / buffering
+record_sync = true              # sync_observations.jsonl: anchors, (position, wall, F1 time) pairs, LIVE DATA DELAY
+timeline_interval_seconds = 1.0 # while playing: one position sample per N s (every state change always)
+pair_interval_seconds = 10.0    # while synced: one (position, wall time, F1 time) pair per N s
+
+# Where the packages go - choose the disk / mount here. Absolute paths are used as they are
+# (any disk, also outside the project); relative ones: "data/..." = the data directory
+# (F1DASH_DATA_DIR, default <repo>/data), anything else relative to main/.
+# Environment override: F1DASH_VOYO_RECORDING_PATH=/mnt/usb/f1-voyo-streams
+# Examples:
+#   path = "/mnt/data/f1-voyo-streams"             # Linux data disk
+#   path = "/media/usb/voyo"                       # external USB disk (mount it with nofail, see server/README.md)
+#   path = "/var/lib/f1-dashboard/voyo_streams"    # system data dir
+#   path = "D:/F1Recordings/voyo_streams"          # Windows PC variant
+path = "data/voyo_streams"
+create_path_if_missing = true   # false: the folder (e.g. the USB disk's) must exist - nothing is created on the root disk
+min_free_bytes = 2147483648     # below this free space nothing more is written (2 GiB); 0 = no check
+
+# OPT-IN window capture of the VOYO player window you are watching (default OFF). It is a plain
+# screen recording of that window by ffmpeg on the PC that shows VOYO (gdigrab on Windows, x11grab
+# on Linux/X11): what the screen shows, nothing else - it never reads the protected stream or its
+# buffers, and if the browser / OS blanks protected video the recording is black (not worked
+# around). The PC uploads finished segments to the server, stored in <package>/capture/.
+# For your own use - check VOYO's terms of service.
+record_video_capture = false
+ffmpeg = "ffmpeg"               # on the PC: path to ffmpeg(.exe) or just "ffmpeg" if it is on PATH
+capture_fps = 30
+capture_crf = 23                # x264 quality (lower = better / bigger)
+capture_segment_seconds = 60
+capture_audio_device = ""       # Windows: a DirectShow audio device, e.g. "Stereo Mix (Realtek(R) Audio)"; "" = no audio
+capture_max_segment_bytes = 4294967296
+
+# How long captured VIDEO files are kept, per session type, in days (0 = keep forever). The
+# metadata, timeline and sync data of a package are always kept.
+keep_practice1_days = 7
+keep_practice2_days = 7
+keep_practice3_days = 7
+keep_sprint_qualifying_days = 14
+keep_sprint_days = 14
+keep_qualifying_days = 14
+keep_race_days = 30             # Grand Prix
+keep_other_days = 7             # session not identified
+
+# ---------------------------------------------------------------------------
 # VOYO video <-> F1 data synchronisation. See README "VOYO sync".
 #
 # Clocks: A = F1 event time (canonical, from the feed's own timestamps),

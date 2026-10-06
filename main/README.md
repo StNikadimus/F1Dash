@@ -1164,6 +1164,109 @@ AUTO SYNC is part of the sync above, not a second engine (`server/autosync.py`):
   seeking (never taken for drift). A LIVE stream's latency change without a seek (player catch-up)
   is reported but does not move the sync - it follows the video position.
 
+## 9d. VOYO stream recordings (one package per stream instance)
+
+Separate from the F1 timing recordings (`[live] record` → `data/recordings/*.jsonl.gz`, replayed with
+`--replay`): every VOYO stream instance AUTO SYNC detects (§9c) gets a **recording package** with
+what is needed to use that stream again later without the VOYO window - its identity, the playback
+timeline, the sync anchors and observations, LIVE DATA DELAY - and, opt-in, a window capture.
+
+**Written by the server.** The PC that shows VOYO only sends what it already sent for the sync:
+
+```
+PC (VOYO window, --remote-debugging-port on 127.0.0.1)
+  tools/voyo_clock.py  --Runtime.evaluate(voyo_clock_probe.js, read-only)-->  <video> state
+  POST /api/sync/voyo  (5/s while playing, X-Remote-Token)                 -->  server
+        { playback_time, paused, playback_rate, ready_state, seeking, ended, duration,
+          seekable_start/end, buffered_end, events[loadstart/emptied/seeking/seeked/waiting/
+          playing/pause/ratechange/ended/...], meta{length,startAt,drmProtected},
+          page{title, og_title, media_title, media_id, url_path, published, options_fp, load_id},
+          timestamp_local }
+server: parse_voyo_sample -> SyncManager.update -> StreamTracker (new instance?) -> VoyoStreamRecorder
+  <-- reply { ok, recording: { instance, capture, segment_seconds, fps, crf } }
+```
+
+Stream-instance detection runs on the server (`server/autosync.py`); the server clock is the time
+base (receive time of each sample). A new package starts only when the tracker reports a new
+instance (another video / media id / shorter recording / live reload) - never on position updates,
+pause, buffering, seek or a lost clock (that is written as a `gap`). The previous package is
+closed first; the new one inherits no offset and no MARK STREAM START (the sync of a reopened
+recording comes back through the per-video+session store, and a "resumed" instance appends to its
+old package).
+
+### Layout under `[voyo.recording] path`
+
+```
+<path>/
+  index.json                      { schema, recordings: { <id>: summary } }      - the fast listing
+  <stream_instance_id>/
+    manifest.json                 summary - see below (status recording / closed / interrupted)
+    meta.json                     identity in full: tracker instance, VOYO ids (asset, media_id, title,
+                                  options_fp, load_id, url_path, page fields), detection reason / time / mode
+    timeline.jsonl                {"t": server epoch s, "pb": s, "state": playing|paused|buffering|seeking|
+                                   ended, "rate", "events": [...], "dur", "edge"}  - one line per state change,
+                                  per event and every timeline_interval_seconds while playing;
+                                  {"t", "type": "gap", "seconds"} when the clock was lost
+    anchors.json                  { stream_start_wall_time (automatic base anchor), stream_start_marks
+                                    (MARK STREAM START / RESET events), stream_start_mark (active one),
+                                    anchors (applied), pending, history, mapping, session }
+    sync_observations.jsonl       {"type": "anchor", status applied|pending|rejected|used_new|removed, ...anchor}
+                                  {"type": "pair", "t", "pb", "f1_ms", "offset", "confidence", "quality"}
+                                  {"type": "live_data_delay", "t", "seconds", "spread", "state", ...}  (LIVE)
+                                  {"type": "autosync", "state", "reason", "confidence"}
+                                  {"type": "stream_start" | "stream_start_reset", ...}
+                                  {"type": "note", "text"}   (clock lost, session changed, write error ...)
+    capture/                      opt-in window capture: run<time>_seg_NNNNN.mp4 + capture.jsonl
+                                  {name, bytes, pc_start_epoch, pc_end_epoch, pc_clock_minus_server_s}
+```
+
+`manifest.json`: `stream_instance_id, status, detected_at, stream_start_wall_time (+ _epoch, _how),
+detection_reason, live, asset, media_id, title, mode {selected, effective, source}, session
+{session_key, meeting, session_name, kind, year}, session_history, duration, position {first, min,
+max}, counts {timeline, observations, anchors, pairs, gaps}, sync {confidence, offset, method,
+state}, live_data_delay, stream_start_marks, capture {segments, bytes, deleted_at}, closed_at,
+close_reason, resumes`. Times are UTC ISO (`...Z`) of the server clock; `offset` = F1 epoch s −
+VOYO position s (F1 time of a frame = position + offset).
+
+The stream instance is the identity; the F1 session is a secondary association (learned when the
+session is identified, changes are kept in `session_history`). Packages of different GPs /
+sessions / recordings never share files.
+
+### Load API (served by the server, reads the configured path)
+
+| | |
+|---|---|
+| `GET /api/voyo/recordings` | `{status: {path, ok, error, free_bytes, capture, current}, recordings: [summary...]}` newest first - title, time, session, duration, sync quality, LIVE DATA DELAY, capture size |
+| `GET /api/voyo/recordings/<id>` | manifest + meta + anchors + capture list + `calibration` (AUTO SYNC re-run from the saved anchors); `?full=1` adds timeline + observations |
+| `GET /api/voyo/recordings/<id>/files/<name>` | a file (`timeline.jsonl`, ..., `capture/<segment>`) - remote token required when set |
+| `PUT /api/voyo/recordings/<id>/capture/<name>` | the PC's capture uploads (token, only with `record_video_capture`) |
+
+In Python: `server.voyo_recording.load_package(path)` (all files as data, tolerant of a line cut by a
+crash), `recalibrate(package)` (median offset of the applied anchors, spread, LOCKED / UNSTABLE) and
+`live_delay_history(package)`. With `offset` and `timeline.jsonl` the existing timeline / sync code
+can be driven offline: the F1 time at server time *t* is `pb(t) + offset`.
+
+### Window capture (opt-in, default off)
+
+`record_video_capture = true` on the server → its clock replies say `capture: true` → the launcher
+(`tools/voyo_capture.py`) records the VOYO window with ffmpeg on the PC (Windows `gdigrab` by window
+title, Linux/X11 `x11grab` by window id), in `capture_segment_seconds` fragmented-MP4 segments
+spooled in `data/voyo_capture_spool/<id>/`, and uploads each finished segment to the server.
+A screen recording of what the window shows - it never reads VOYO's stream, buffers or DRM; if the
+browser / OS blanks protected video, the capture is black (not worked around). `launch.bat` / 
+`tv_launcher.py --no-capture` disables it on a PC. Video files are deleted after
+`keep_<practice1|practice2|practice3|sprint_qualifying|sprint|qualifying|race|other>_days`
+(0 = keep); metadata stays.
+
+### Errors
+
+At start the path is resolved, created (if `create_path_if_missing`), write-tested and logged
+(`VOYO stream recordings: /mnt/usb/voyo (free 812.4 GB)`). Not writable / missing mount / inside
+the F1 recordings folder → `VOYO stream recording DISABLED: <why>` and nothing is written anywhere
+else. A write error later (disk full, USB unplugged) stops the writer with an error in the log and
+in `/api/voyo/recordings`; the path is re-checked every 60 s and the open package continues (a
+`note` marks the gap). `min_free_bytes` stops writing before a disk is full.
+
 ## 10. Troubleshooting
 
 | Symptom | Check |

@@ -10,6 +10,7 @@ REM   launch.bat capture1 VOYO video black on the TV when mirroring (AirParrot)?
 REM                       video overlays, capture2 = + no hardware video decode, capture3 = no GPU
 REM                       (combine: launch.bat live capture1), capture0 = browser default.
 REM                       Default: [voyo] capture_compat = "no-gpu" (same as capture3, needed for AirParrot)
+REM   launch.bat nocapture  never run the opt-in VOYO window capture on this PC (even if the server asks)
 REM   launch.bat server http://192.168.1.10:8080   use the Linux server's backend (server/): this PC only
 REM                       shows the dashboard + VOYO and runs the VOYO clock bridge for AUTO SYNC
 REM Closing this window (or the dashboard / VOYO window) closes everything and restores the taskbar.
@@ -27,6 +28,7 @@ python -m pip install -q -r main\requirements.txt
 set MODE=
 set CAPTURE=
 set SERVER=--start-server
+set NOCAP=
 set NEXT=
 for %%A in (%*) do (
   if defined NEXT set SERVER=--server %%~A& set NEXT=
@@ -39,8 +41,9 @@ for %%A in (%*) do (
   if /i "%%~A"=="capture1" set CAPTURE=--capture no-overlays
   if /i "%%~A"=="capture2" set CAPTURE=--capture no-hw-decode
   if /i "%%~A"=="capture3" set CAPTURE=--capture no-gpu
+  if /i "%%~A"=="nocapture" set NOCAP=--no-capture
 )
-python main\tools\tv_launcher.py %SERVER% %MODE% %CAPTURE%
+python main\tools\tv_launcher.py %SERVER% %MODE% %CAPTURE% %NOCAP%
 REM safety net: taskbar back even if the launcher crashed
 python main\tools\tv_launcher.py --restore-taskbar >nul 2>&1
 exit

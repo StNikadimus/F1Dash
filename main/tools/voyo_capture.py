@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""OPT-IN window capture of the VOYO player window - for the VOYO stream recordings on the server.
+
+Off unless the SERVER's ``[voyo.recording] record_video_capture = true``: the server answers every
+VOYO clock sample (tools/voyo_clock.py -> POST /api/sync/voyo) with the open stream recording
+(``stream_instance_id``) and whether to capture it. This module then runs ffmpeg on THIS PC (the one
+that shows VOYO) as a plain screen recording of the VOYO window you are watching:
+
+* Windows: ``gdigrab`` of the window by its title; Linux/X11: ``x11grab`` of the window id.
+* It records what the screen shows. It never reads VOYO's stream, its buffers or its DRM; if the
+  browser / OS blanks protected video in screen captures, the recording is black - not worked around.
+* Segments (fragmented MP4, ``capture_segment_seconds`` long) are spooled in
+  data/voyo_capture_spool/<stream_instance_id>/ and uploaded when finished to
+  ``PUT /api/voyo/recordings/<id>/capture/<name>`` - the server stores them in that package's
+  capture/ folder ([voyo.recording] path). Uploaded segments are deleted here; failed uploads are
+  retried (also after a restart of the launcher).
+* A new stream instance on the server = ffmpeg restarts into the new package.
+
+For your own use - check VOYO's terms of service.
+"""
+from __future__ import annotations
+
+import csv
+import platform
+import shutil
+import subprocess
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Callable, Optional
+
+
+def ffmpeg_cmd(ffmpeg: str, spec: dict, out_dir: Path, run: str, fps: int = 30, crf: int = 23,
+               segment_s: int = 60, audio: str = "") -> list[str]:
+    """ffmpeg command for one capture run of the window ``spec`` ({"title": ...} on Windows,
+    {"window_id": "0x..."} on X11) into fragmented-MP4 segments listed in <run>_list.csv."""
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]          # stdin stays open: "q" stops it cleanly
+    if spec.get("title"):
+        cmd += ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "0", "-i", f"title={spec['title']}"]
+    elif spec.get("window_id"):
+        cmd += ["-f", "x11grab", "-framerate", str(fps), "-draw_mouse", "0", "-window_id", str(int(str(spec["window_id"]), 0)),
+                "-i", spec.get("display") or ":0"]
+    else:
+        raise ValueError("no window to capture")
+    if audio:
+        cmd += ["-f", "dshow", "-i", f"audio={audio}"]
+    # a keyframe at every segment boundary: segments can only be cut there
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p",
+            "-force_key_frames", f"expr:gte(t,n_forced*{int(segment_s)})",
+            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]
+    if audio:
+        cmd += ["-c:a", "aac", "-b:a", "160k"]
+    cmd += ["-f", "segment", "-segment_time", str(segment_s), "-reset_timestamps", "1",
+            "-segment_list", str(out_dir / f"{run}_list.csv"), "-segment_list_type", "csv",
+            "-segment_format", "mp4",
+            "-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof",
+            str(out_dir / f"{run}_seg_%05d.mp4")]
+    return cmd
+
+
+class VoyoWindowCapture:
+    def __init__(self, server: str, token: str, rc: dict, spool: Path,
+                 window: Callable[[], Optional[dict]], log: Callable[[str], None] = print) -> None:
+        self.server = server.rstrip("/").replace("://localhost", "://127.0.0.1")
+        self.token = token
+        self.rc = rc or {}
+        self.spool = spool
+        self.window = window
+        self.log = log
+        self.ffmpeg = shutil.which(str(self.rc.get("ffmpeg") or "ffmpeg")) or \
+            (str(self.rc.get("ffmpeg")) if Path(str(self.rc.get("ffmpeg") or "")).is_file() else None)
+        self.stop_ev = threading.Event()
+        self._lock = threading.Lock()
+        self._reply: tuple[Optional[dict], float] = (None, 0.0)
+        self.proc: Optional[subprocess.Popen] = None
+        self.instance: Optional[str] = None
+        self.run_id: Optional[str] = None
+        self.run_start = 0.0
+        self._retry_at = 0.0
+        self._said: set[str] = set()
+        self.thread: Optional[threading.Thread] = None
+
+    def _once(self, key: str, text: str) -> None:
+        if key not in self._said:
+            self._said.add(key)
+            self.log(text)
+
+    def on_reply(self, rec: Optional[dict]) -> None:
+        """The server's answer to a clock sample: {"instance": id, "capture": bool, ...}."""
+        with self._lock:
+            self._reply = (rec if isinstance(rec, dict) else None, time.monotonic())
+
+    def wanted(self) -> Optional[dict]:
+        with self._lock:
+            rec, at = self._reply
+        if rec is None or not rec.get("capture") or not rec.get("instance") or time.monotonic() - at > 15:
+            return None
+        return rec
+
+    # ------------------------------------------------------------------
+    def start(self) -> "VoyoWindowCapture":
+        self.thread = threading.Thread(target=self.run, name="voyo-capture", daemon=True)
+        self.thread.start()
+        return self
+
+    def run(self) -> None:
+        while not self.stop_ev.is_set():
+            try:
+                self.step()
+            except Exception as exc:  # noqa: BLE001
+                self._once(f"err:{exc}", f"  VOYO capture: {exc}")
+            self.stop_ev.wait(1.0)
+        self._stop_ffmpeg()
+        self.upload_pending(deadline=time.monotonic() + 30)
+
+    def step(self) -> None:
+        want = self.wanted()
+        iid = want.get("instance") if want else None
+        if self.proc is not None and (iid != self.instance or self.proc.poll() is not None):
+            if self.proc.poll() is not None and iid == self.instance:
+                err = (self.proc.stderr.read() if self.proc.stderr else b"")[-400:].decode(errors="replace")
+                self.log(f"  VOYO capture: ffmpeg stopped ({self.proc.returncode}) {err.strip()} - retrying in 30 s")
+                self._retry_at = time.monotonic() + 30
+            self._stop_ffmpeg()
+        if iid and self.proc is None and time.monotonic() >= self._retry_at:
+            self._start_ffmpeg(iid, want)
+        self.upload_pending()
+
+    def _start_ffmpeg(self, iid: str, want: dict) -> None:
+        if not self.ffmpeg:
+            self._once("noffmpeg", "  VOYO capture: the server asks for the window capture "
+                                   "([voyo.recording] record_video_capture) but ffmpeg was not found - install it "
+                                   "and/or set [voyo.recording] ffmpeg = \"C:/ffmpeg/bin/ffmpeg.exe\"")
+            return
+        spec = self.window()
+        if not spec:
+            self._once("nowin", "  VOYO capture: VOYO window not found yet - waiting")
+            return
+        self._said.discard("nowin")
+        out = self.spool / iid
+        out.mkdir(parents=True, exist_ok=True)
+        self.run_id = time.strftime("run%Y%m%d-%H%M%S")
+        cmd = ffmpeg_cmd(self.ffmpeg, spec, out, self.run_id, int(want.get("fps") or self.rc.get("capture_fps", 30)),
+                         int(want.get("crf") or self.rc.get("capture_crf", 23)),
+                         int(want.get("segment_seconds") or self.rc.get("capture_segment_seconds", 60)),
+                         str(self.rc.get("capture_audio_device") or ""))
+        flags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+        self.run_start = time.time()
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                     creationflags=flags)
+        self.instance = iid
+        self.log(f"  VOYO capture: recording the VOYO window for stream {iid} (opt-in window capture) -> "
+                 f"{self.server}")
+
+    def _stop_ffmpeg(self) -> None:
+        p, self.proc = self.proc, None
+        if p is None:
+            return
+        if p.poll() is None:
+            try:
+                p.stdin.write(b"q")                 # ffmpeg finishes the current segment cleanly
+                p.stdin.flush()
+                p.wait(15)
+            except Exception:  # noqa: BLE001
+                p.terminate()
+                try:
+                    p.wait(5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+        self.log(f"  VOYO capture: stopped for stream {self.instance}")
+
+    # ------------------------------------------------------------------ upload
+    def _finished(self, d: Path) -> list[tuple[Path, float, float]]:
+        """Segments ffmpeg has finished (listed in a <run>_list.csv), with their PC start / end epoch."""
+        out = []
+        for lst in d.glob("*_list.csv"):
+            run = lst.name[:-len("_list.csv")]
+            try:
+                t0 = time.mktime(time.strptime(run, "run%Y%m%d-%H%M%S"))
+            except ValueError:
+                t0 = 0.0
+            try:
+                rows = list(csv.reader(lst.read_text(encoding="utf-8").splitlines()))
+            except OSError:
+                continue
+            for row in rows:
+                if len(row) >= 3 and (d / row[0]).exists():
+                    try:
+                        out.append((d / row[0], t0 + float(row[1]), t0 + float(row[2])))
+                    except ValueError:
+                        continue
+        return out
+
+    def upload_pending(self, deadline: Optional[float] = None) -> None:
+        if not self.spool.exists():
+            return
+        for d in [x for x in self.spool.iterdir() if x.is_dir()]:
+            for seg, t0, t1 in self._finished(d):
+                if deadline is not None and time.monotonic() > deadline:
+                    return
+                self._upload(d.name, seg, t0, t1)
+            if not any(d.glob("*.mp4")) and (self.proc is None or self.instance != d.name):
+                for f in d.glob("*_list.csv"):
+                    f.unlink(missing_ok=True)
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
+
+    def _upload(self, iid: str, seg: Path, t0: float, t1: float) -> bool:
+        size = seg.stat().st_size
+        req = urllib.request.Request(f"{self.server}/api/voyo/recordings/{iid}/capture/{seg.name}", method="PUT",
+                                     data=open(seg, "rb"), headers={
+                                         "Content-Type": "video/mp4", "Content-Length": str(size),
+                                         "X-Capture-Start": f"{t0:.3f}", "X-Capture-End": f"{t1:.3f}",
+                                         "X-PC-Now": f"{time.time():.3f}"})
+        if self.token:
+            req.add_header("X-Remote-Token", self.token)
+        try:
+            with urllib.request.urlopen(req, timeout=max(30, size / 2e6)) as r:
+                r.read()
+        except urllib.error.HTTPError as exc:
+            self._once(f"http{exc.code}:{iid}", f"  VOYO capture: upload of {seg.name} refused ({exc.code}: "
+                                                f"{exc.read()[:120]!r}) - kept in {seg.parent}")
+            return False
+        except OSError as exc:
+            self._once(f"net:{iid}", f"  VOYO capture: server not reachable for uploads ({exc}) - retrying")
+            return False
+        finally:
+            req.data.close()
+        seg.unlink(missing_ok=True)
+        return True
+
+    def stop(self) -> None:
+        self.stop_ev.set()
+        if self.thread is not None:
+            self.thread.join(50)

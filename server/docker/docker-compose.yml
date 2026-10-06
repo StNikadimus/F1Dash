@@ -15,3 +15,5 @@ services:
       TZ: "${TZ:-Europe/Ljubljana}"
     volumes:
       - ../../data:/data           # sign-in, sync state, F1-feed recordings, caches (shared with launch.sh)
+      # VOYO stream recordings on another disk: mount it and point [voyo.recording] path at it
+      # - /mnt/usb/f1-voyo:/voyo        (+ F1DASH_VOYO_RECORDING_PATH=/voyo in server/.env)

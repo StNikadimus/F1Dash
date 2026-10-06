@@ -54,6 +54,7 @@ class VoyoClockBridge:
         # leaves letter / digit keys to the page while this is True (fresh samples only)
         self._typing = (False, 0.0)
         self._page_diag: Optional[tuple] = None
+        self.on_reply: Optional[Callable[[Optional[dict]], None]] = None
 
     @property
     def typing(self) -> bool:
@@ -140,7 +141,13 @@ class VoyoClockBridge:
                                      headers={"Content-Type": "application/json"})
         if self.token:
             req.add_header("X-Remote-Token", self.token)
-        urllib.request.urlopen(req, timeout=1.5).read()
+        body = urllib.request.urlopen(req, timeout=1.5).read()
+        if self.on_reply is not None:
+            # the server's open VOYO stream recording (+ opt-in window capture) - tools/voyo_capture.py
+            try:
+                self.on_reply((json.loads(body or b"{}") or {}).get("recording"))
+            except ValueError:
+                pass
 
     def run(self) -> None:
         from websockets.sync.client import connect      # websockets >= 13 (requirements.txt)
