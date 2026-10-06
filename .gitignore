@@ -8,3 +8,6 @@ data/auth/
 **/f1tv_auth.json
 **/signin_key
 .env
+
+# Python environment
+.venv/

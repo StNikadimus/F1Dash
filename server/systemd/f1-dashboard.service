@@ -1,0 +1,27 @@
+# systemd unit - the F1 dashboard backend on a Linux server, permanently (whole race weekend).
+#   sudo cp server/systemd/f1-dashboard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now f1-dashboard
+#   journalctl -u f1-dashboard -f          # logs
+#   sudo systemctl restart f1-dashboard    # restart (e.g. after git pull)
+# Adjust User and the /opt/f1-dashboard path (the repository checkout) below.
+[Unit]
+Description=F1 TV live timing dashboard (backend, AUTO SYNC, recording)
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+User=f1
+WorkingDirectory=/opt/f1-dashboard/main
+# runtime data (F1 TV sign-in, sync state, recordings, caches) - outside the checkout
+Environment=F1DASH_DATA_DIR=/var/lib/f1-dashboard
+StateDirectory=f1-dashboard
+EnvironmentFile=-/opt/f1-dashboard/server/.env
+ExecStart=/opt/f1-dashboard/server/launch.sh
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
