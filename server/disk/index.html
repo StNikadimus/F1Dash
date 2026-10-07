@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1 Recorder · Disk</title>
+<link rel="stylesheet" href="/disk-static/disk.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="tb-title">
+    <div class="tb-label">F1 SERVER</div>
+    <div class="tb-big">RECORDER · DISK</div>
+  </div>
+  <div class="tb-state st-idle" id="state">
+    <div id="st-main">…</div>
+    <div id="st-sub">connecting to the server</div>
+  </div>
+  <div class="tb-clock">
+    <div class="tb-label">SERVER TIME</div>
+    <div id="clock" class="mono">--:--:--</div>
+  </div>
+  <div class="tb-links">
+    <a href="/" class="btn">DASHBOARD</a>
+    <button class="btn" id="tok-btn" title="remote token (needed to change settings, delete, play)">TOKEN</button>
+  </div>
+</header>
+
+<main id="grid">
+  <section class="panel" id="p-disk">
+    <div class="panel-title">DISK <span class="panel-hint" id="disk-path"></span></div>
+    <div class="pad">
+      <div class="bar"><div class="bar-rec" id="bar-rec"></div><div class="bar-other" id="bar-other"></div></div>
+      <div class="bar-legend"><span><i class="lg-rec"></i>recordings</span><span><i class="lg-other"></i>other files</span><span><i class="lg-free"></i>free</span></div>
+      <div class="tiles" id="disk-tiles"></div>
+      <div class="kvlist" id="disk-kv"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="p-now">
+    <div class="panel-title">NOW <span class="panel-hint" id="now-hint"></span></div>
+    <div class="pad">
+      <div class="now-big" id="now-big">…</div>
+      <div class="now-detail" id="now-detail"></div>
+      <div class="tiles" id="now-tiles"></div>
+      <div class="kvlist" id="player-kv"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="p-ret">
+    <div class="panel-title">KEEP VIDEO <span class="panel-hint">days · 0 = forever · data always kept</span></div>
+    <div class="pad">
+      <table class="ret" id="ret-table"></table>
+      <div class="ret-actions">
+        <button class="btn primary" id="ret-save">SAVE</button>
+        <span class="msg" id="ret-msg"></span>
+      </div>
+      <div class="sub-title">CONFIGURATION</div>
+      <div class="kvlist small" id="cfg-kv"></div>
+    </div>
+  </section>
+
+  <section class="panel wide" id="p-rec">
+    <div class="panel-title">RECORDINGS
+      <span class="filters" id="rec-filters">
+        <button class="chip sel" data-f="all">ALL</button>
+        <button class="chip" data-f="video">WITH VIDEO</button>
+        <button class="chip" data-f="server_player">SERVER</button>
+        <button class="chip" data-f="viewer">PC / TV</button>
+      </span>
+      <span class="panel-hint" id="rec-hint"></span>
+    </div>
+    <div class="table-wrap">
+      <table class="rec" id="rec-table">
+        <thead><tr><th>DATE</th><th>SESSION</th><th>SOURCE</th><th class="r">LENGTH</th><th class="r">VIDEO</th><th class="r">KEPT UNTIL</th><th>SYNC</th><th>STATUS</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="rec-empty" hidden>No recordings yet.</div>
+    </div>
+  </section>
+
+  <section class="panel wide" id="p-log">
+    <div class="panel-title">LOG <span class="panel-hint">last 48 hours · older entries are deleted</span>
+      <span class="filters" id="log-filters">
+        <button class="chip sel" data-l="INFO">ALL</button>
+        <button class="chip" data-l="WARNING">WARNINGS + ERRORS</button>
+      </span>
+    </div>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<dialog id="viewer">
+  <div class="v-head">
+    <div><div class="tb-label" id="v-label">RECORDING</div><div class="v-title" id="v-title"></div></div>
+    <button class="btn" id="v-close">CLOSE ✕</button>
+  </div>
+  <video id="v-video" controls playsinline></video>
+  <div class="v-nav">
+    <button class="btn" id="v-prev">◀ PREV</button>
+    <span id="v-pos" class="mono"></span>
+    <button class="btn" id="v-next">NEXT ▶</button>
+    <a class="btn" id="v-dl" download>DOWNLOAD SEGMENT</a>
+  </div>
+</dialog>
+
+<script src="/disk-static/disk.js"></script>
+</body>
+</html>

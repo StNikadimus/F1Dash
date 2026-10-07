@@ -164,6 +164,7 @@ class VoyoStreamRecorder:
         self.error: Optional[str] = None
         self.mode_info: Callable[[], dict] = lambda: {}       # set by the app: AUTO / LIVE / VOD selection
         self.cur: Optional[dict] = None                       # the open package (manifest dict)
+        self.last_sample_wall = 0.0                           # server time of the last sample written
         self._fh: dict[str, Any] = {}
         self._last_sample: Optional[dict] = None
         self._last_tl = -1e18
@@ -217,9 +218,9 @@ class VoyoStreamRecorder:
                   self.error, RECHECK_S)
         self._close_files()
 
-    def _recheck(self) -> None:
+    def _recheck(self, force: bool = False) -> None:
         """After a write error (disk full / unplugged): writable again -> continue the open package."""
-        if self.error is None or not self.enabled or time.monotonic() - self._last_recheck < RECHECK_S:
+        if self.error is None or not self.enabled or (not force and time.monotonic() - self._last_recheck < RECHECK_S):
             return
         self._last_recheck = time.monotonic()
         root, err = resolve_root(self.rc, self.f1_recordings)
@@ -242,6 +243,7 @@ class VoyoStreamRecorder:
             return
         try:
             wall = self.now() - max(0.0, time.monotonic() - s.mono)
+            self.last_sample_wall = wall
             if self.cur is None or self.cur["stream_instance_id"] != inst.id:
                 self._switch(inst, reason or "first stream seen", sync, s, wall)
             else:
@@ -698,6 +700,15 @@ class VoyoStreamRecorder:
             log.info("VOYO recordings retention: video of %s (%s) deleted after %g days - metadata kept",
                      m.get("stream_instance_id"), kind, days)
         return removed
+
+    def housekeeping(self) -> None:
+        """Without any VOYO sample (nothing playing): still notice the disk coming back, delete expired
+        video, and close a package whose stream stopped sending long ago."""
+        self._recheck()
+        if self.cur is not None and self.last_sample_wall and self.now() - self.last_sample_wall > 1800:
+            self.finalize("no VOYO samples for 30 min")
+        if time.monotonic() - self._last_retention >= RETENTION_EVERY_S:
+            self.apply_retention()
 
     def close(self) -> None:
         self.finalize("server stopped")

@@ -5,7 +5,7 @@ Self-hosted F1 live timing dashboard for a TV screen, synchronised with the offi
 | Folder | What it is |
 |---|---|
 | **`main/`** | the shared code: Python backend (`main/server/`), dashboard + phone remote (`main/dashboard/`), tools (VOYO window launcher, VOYO playback-clock bridge), tests, shared config `main/config/config.toml`. **The full manual is `main/README.md`.** |
-| **`server/`** | **Linux server deployment (primary)**: `launch.sh`, `config/server.toml` overlay, systemd units, Docker, IR remote bridges, server VOYO player → `server/README.md`; **new server from scratch: `server/SETUP.md`** |
+| **`server/`** | **Linux server deployment (primary)**: `launch.sh`, `config/server.toml` overlay, systemd units, Docker, IR remote bridges, server VOYO player → `server/README.md`; **new server from scratch: `server/SETUP.md`**; the recorder page `/disk` (`server/disk/`) |
 | **`pc variant/`** | **Windows / local-PC deployment**: `launch.bat` → `pc variant/README.md` |
 | `launch.bat` | shortcut to `pc variant\launch.bat` |
 | `data/` | runtime data (git-ignored): F1 TV sign-in, VOYO browser profile, sync state, F1-feed recordings, caches |

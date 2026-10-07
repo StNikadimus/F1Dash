@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r /app/main/requirements.txt
 
 COPY main /app/main
 COPY server/config /app/server/config
+COPY server/disk /app/server/disk
 
 RUN useradd --create-home --uid 1000 f1 && mkdir -p /data && chown -R f1:f1 /app /data
 USER f1

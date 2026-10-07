@@ -73,8 +73,32 @@ PLAY_JS = r"""(() => {
 })()"""
 
 
+_FORWARD = {"server": None, "token": "", "off_until": 0.0}
+
+
+def _post(path: str, body: dict, timeout: float = 1.5) -> bool:
+    """POST to the dashboard server (local); quiet and short when it is not running."""
+    srv = _FORWARD["server"]
+    if not srv or time.monotonic() < _FORWARD["off_until"]:
+        return False
+    try:
+        req = urllib.request.Request(srv + path, method="POST", data=json.dumps(body, default=str).encode(),
+                                     headers={"Content-Type": "application/json",
+                                              **({"X-Remote-Token": _FORWARD["token"]} if _FORWARD["token"] else {})})
+        urllib.request.urlopen(req, timeout=timeout).read()
+        return True
+    except OSError:
+        _FORWARD["off_until"] = time.monotonic() + 30            # server down: don't slow the player
+        return False
+
+
 def log(msg: str) -> None:
     print(time.strftime("%Y-%m-%d %H:%M:%S ") + msg, flush=True)
+    text = msg.strip()
+    low = text.lower()
+    level = "WARNING" if any(w in low for w in ("warning", "failed", "not reachable", "no video", "lost", "error",
+                                                 "missing", "not installed", "not found", "not set")) else "INFO"
+    _post("/api/voyo/player/log", {"text": text, "level": level})      # -> the /disk page's activity log
 
 
 def load_state() -> dict:
@@ -144,6 +168,8 @@ class Player:
         self.rc = (cfg.get("voyo") or {}).get("recording") or {}
         self.server = f"http://127.0.0.1:{int(cfg['server'].get('port', 8080))}"
         self.token = str((cfg.get("remote") or {}).get("token") or "")
+        _FORWARD.update(server=self.server, token=self.token)
+        self.note = ""                                         # last thing the page said (for the heartbeat)
         self.display = str(self.sp.get("display") or ":90")
         self.cdp_port = int(self.sp.get("cdp_port", 9224))
         self.profile = resolve_path(str(self.sp.get("profile") or "data/browser-profiles/voyo-server"))
@@ -260,11 +286,13 @@ class Player:
         if not st:
             return
         if not st.get("video"):
+            self.note = f"no video on the page yet ({st.get('title') or st.get('url')})"
             if time.monotonic() - self.last_play > 120:
                 self.last_play = time.monotonic()
                 log(f"no video on the page yet ({st.get('title')!r}, {st.get('url')}) - signed in? the F1 stream "
                     "page? (voyo_server_player.py login)")
             return
+        self.note = f"{'paused' if st.get('paused') else 'playing'} at {st.get('t', 0):.0f} s"
         if st.get("did"):
             log(f"player: {', '.join(st['did'])} - position {st.get('t', 0):.0f} s, "
                 f"{'paused' if st.get('paused') else 'playing'}")
@@ -386,6 +414,19 @@ class Schedule:
 # ---------------------------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------------------------
+def heartbeat(player: Player, nxt: Optional[dict], problem: str = "") -> None:
+    """Tell the dashboard server what the player is doing (the /disk page's status)."""
+    _post("/api/voyo/player/status", {
+        "state": "open" if player.is_open else "idle", "pid": os.getpid(), "at": time.time(),
+        "session": " ".join(x for x in ((player.hint or {}).get("meeting"), (player.hint or {}).get("session_name"))
+                            if x) if player.is_open else None,
+        "note": player.note if player.is_open else None, "problem": problem or None,
+        "stream_url_set": bool(player.stream_url()), "browser": find_browser(player.sp),
+        "widevine": has_widevine(find_browser(player.sp)),
+        "next": None if not nxt else {k: nxt.get(k) for k in ("meeting", "session_name", "kind", "start", "end",
+                                                              "open_from", "open_until")}})
+
+
 def cmd_run(player: Player) -> None:
     sp = player.sp
     if not sp.get("enabled"):
@@ -416,6 +457,11 @@ def cmd_run(player: Player) -> None:
                     player.close("session window over")
             if player.is_open:
                 player.tick()
+            upcoming = [w for w in sched.windows(now) if w["open_until"] > now] if when == "schedule" else []
+            problem = "" if player.stream_url() else "VOYO not set up: no stream page yet (voyo-player.sh login)"
+            if not find_browser(sp):
+                problem = "Google Chrome is not installed (setup-voyo-player.sh)"
+            heartbeat(player, upcoming[0] if upcoming else None, problem)
             for _ in range(15):
                 if stop["now"]:
                     break
@@ -425,6 +471,7 @@ def cmd_run(player: Player) -> None:
     finally:
         if player.is_open:
             player.close("stopped")
+        heartbeat(player, None, "the server VOYO player was stopped")
 
 
 def cmd_test(player: Player, minutes: float, url: Optional[str]) -> None:
@@ -436,11 +483,13 @@ def cmd_test(player: Player, minutes: float, url: Optional[str]) -> None:
     try:
         while time.monotonic() < end:
             player.tick()
+            heartbeat(player, None)
             time.sleep(5)
     except KeyboardInterrupt:
         pass
     finally:
         player.close("test finished")
+        heartbeat(player, None)
     try:
         with urllib.request.urlopen(f"{player.server}/api/voyo/recordings", timeout=5) as r:
             recs = [x for x in json.loads(r.read())["recordings"] if x.get("channel") == "server_player"][:1]
