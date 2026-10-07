@@ -287,6 +287,31 @@ journalctl -u f1-voyo-player -f
 Video retention uses the same `keep_<session>_days` as the other recordings. A race at 1080p30 is
 roughly 3–6 GB.
 
+## The recorder page: `http://<server-ip>:8080/disk`
+
+Open **http://`<server-ip>`:8080/disk** in a browser. It works on a laptop and on a phone, and uses
+the same style as the dashboard. It shows:
+
+| Part | What it shows |
+|---|---|
+| **State** (top bar + *NOW*) | `RECORDING` (session, how long, video size), `OPENING` (VOYO opened, waiting for the video), `REST · nothing to do · next: <GP> <session>`, `WAITING FOR DISK`, `PLAYER OFF` (the `f1-voyo-player` service isn't running), `WATCHING (PC)`, `DISK ERROR` |
+| **Disk** | used / free / total of the recording disk, how much the recordings take, ≈ hours of video still fitting, writable or not, the reserve (`min_free_bytes`) |
+| **Keep video** | how many days the video of each session type is kept (Practice 1–3, Sprint Qualifying, Sprint, Qualifying, Grand Prix, other; 0 = forever); you can change it there, see below |
+| **Configuration** | recording path, encoder (Quick Sync / CPU), picture size, which sessions, the window before/after |
+| **Recordings** | every recording: date, session, source (server / PC), length, video size, kept until, sync quality, status; click one to play its video segments in the browser (one after another), download segments or the data files, or delete only the video or the whole recording |
+| **Log** | what the server did in the last **48 hours**: recordings started / closed, the VOYO player opening / closing, disk problems, mode changes, settings changed, warnings and errors; entries older than 48 h are deleted from the file |
+
+- **Changing or deleting** (keep-video days, delete) and **playing / downloading video** need the
+  remote token (`F1DASH_REMOTE_TOKEN` in `server/.env`). Click **TOKEN** on the page and enter it
+  once; the browser remembers it.
+- Keep-video days changed on the page are stored in `<data>/voyo_recording_settings.json` and
+  override `server/config/server.toml`; the table marks them with **PAGE**. A shorter time deletes
+  older video at once, after the page asks you to confirm.
+- The log is `<data>/logs/activity.jsonl`. It is fed by the dashboard server and the server VOYO
+  player.
+- The page is served over **http** on port 8080, like the dashboard. For `https://<server-ip>/disk`
+  you would need a certificate and a reverse proxy, e.g. Caddy; tell me if you want that.
+
 ## Where things are stored
 
 `$F1DASH_DATA_DIR` defaults to `<repo>/data`:
@@ -296,6 +321,7 @@ roughly 3–6 GB.
 | Logs | systemd: `journalctl -u f1-dashboard`; docker: `docker compose logs`; by hand: `data/logs/server.log` |
 | F1 TV sign-in | `data/auth/f1tv_auth.json` (never commit it; git-ignored) |
 | Sync state | `data/sync_calibration.json`, which holds per-video calibrations, sessions, Event Sync points, MARK STREAM START, and the `autosync` section (stream instances, learned live latency) |
+| Activity log (the /disk page, 48 h) | `data/logs/activity.jsonl` |
 | VOYO stream recordings | `[voyo.recording] path` (default `data/voyo_streams/`): one folder per stream instance + `index.json` |
 | Recordings | `data/recordings/*.jsonl.gz`, the F1 timing feed. They are recorded automatically in LIVE mode (`[live] record = true`) and replayed with `./server/launch.sh --replay [file]` |
 | Caches | `data/` (OpenF1 / archive caches, track maps) |

@@ -15,7 +15,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from .config import DASHBOARD_DIR, DATA_DIR, resolve_path
+from .config import DASHBOARD_DIR, DATA_DIR, REPO_ROOT, resolve_path
 from .engine import Engine
 from .f1tv_auth import AuthManager, AuthStore, login_page, result_page
 from .hub import Hub
@@ -28,11 +28,14 @@ from .sync import parse_voyo_sample
 from .track import TrackProvider
 from .video import VideoMonitor
 from .voyo_recording import CAPTURE_NAME as VOYO_CAPTURE_NAME, VoyoStreamRecorder, load_package, recalibrate
+from . import activity as activity_mod
+from . import recordings_admin as admin
 
 log = logging.getLogger("app")
 
 MAX_WS_MESSAGE = 1024
 MAX_CLOCK_BODY = 8192
+DISK_PAGE_DIR = REPO_ROOT / "server" / "disk"      # the /disk page (Linux server deployment folder)
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -138,7 +141,12 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     tracks = TrackProvider(DATA_DIR, cfg["tracks"])
     auth = make_auth(cfg)                     # one F1 TV sign-in for every LIVE period of this process
     # VOYO stream recordings: written on this server under [voyo.recording] path (checked now)
-    rec_cfg = (cfg.get("voyo") or {}).get("recording") or {}
+    # the /disk page: activity log (48 h), retention settings changed on the page
+    activity = activity_mod.install(DATA_DIR / "logs" / "activity.jsonl", 48.0)
+    rec_settings = admin.Settings(DATA_DIR / "voyo_recording_settings.json")
+    rec_cfg = rec_settings.apply((cfg.get("voyo") or {}).get("recording") or {})
+    rec_sizes = admin.Sizes()
+    player_hb: dict = {"data": None, "at": None}
     stream_rec = VoyoStreamRecorder(rec_cfg, DATA_DIR / "recordings").start()
     # the server's own VOYO player (tools/voyo_server_player.py): its own stream instances + packages
     sp_cfg = (cfg.get("voyo") or {}).get("server_player") or {}
@@ -240,6 +248,19 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                  st["detected_reason"], st["effective_mode"])
         await mode.apply()
         tasks.append(asyncio.create_task(mode.run(), name="mode"))
+        log.info("Server started - dashboard on port %s, recordings: %s", cfg["server"].get("port"),
+                 stream_rec.root if stream_rec.ok else (stream_rec.error or "off"))
+
+        async def recorder_housekeeping():
+            while True:
+                await asyncio.sleep(60)
+                for r in (stream_rec, player_rec):
+                    if r is not None:
+                        with contextlib.suppress(Exception):
+                            r.housekeeping()
+                with contextlib.suppress(Exception):
+                    activity.prune()
+        tasks.append(asyncio.create_task(recorder_housekeeping(), name="rec-housekeeping"))
         try:
             pr = phone_remote()
             log.info("PHONE REMOTE: %s", pr["url"].split("?")[0] + (" (+ ?token=...)" if pr["token_required"] else ""))
@@ -255,6 +276,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         for t in tasks:
             t.cancel()
         await rt.stop()
+        log.info("Server stopping")
         stream_rec.close()
         if player_rec is not None:
             player_rec.close()
@@ -566,6 +588,109 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             log.exception("VOYO server player recording failed")
         return JSONResponse({"ok": True, "recording": player_rec.clock_reply()})
 
+    # ---------------------------------------------------------------- the /disk page
+    def _loopback(request: Request) -> bool:
+        return (request.client.host if request.client else "") in LOOPBACK
+
+    async def api_player_status(request: Request) -> Response:
+        """Heartbeat of the server VOYO player (every 15 s): idle / open, next session, problems."""
+        if not _loopback(request):
+            return JSONResponse({"ok": False, "error": "local only"}, status_code=403)
+        try:
+            body = json.loads((await request.body())[:8192] or b"{}")
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "json"}, status_code=400)
+        if isinstance(body, dict):
+            player_hb.update(data=body, at=time.monotonic())
+        return JSONResponse({"ok": True})
+
+    async def api_player_log(request: Request) -> Response:
+        """A line of the server VOYO player's own log -> the activity log."""
+        if not _loopback(request):
+            return JSONResponse({"ok": False, "error": "local only"}, status_code=403)
+        try:
+            body = json.loads((await request.body())[:4096] or b"{}")
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "json"}, status_code=400)
+        lvl = str(body.get("level") or "INFO").upper()
+        activity.add(str(body.get("text") or "")[:600], lvl if lvl in ("INFO", "WARNING", "ERROR") else "INFO",
+                     "voyo-player")
+        return JSONResponse({"ok": True})
+
+    def _hb_age():
+        return None if player_hb["at"] is None else time.monotonic() - player_hb["at"]
+
+    async def disk_page(request: Request) -> Response:
+        return FileResponse(DISK_PAGE_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+    async def api_disk_status(request: Request) -> Response:
+        sizes = rec_sizes.get(stream_rec.root if stream_rec.ok else None)
+        rc = stream_rec.rc
+        return JSONResponse({
+            "now": time.time(), "token_required": bool(remote.token),
+            "state": admin.current_state(stream_rec, player_rec, player_rec is not None, player_hb["data"], _hb_age()),
+            "disk": admin.disk_info(stream_rec, sizes),
+            "player": {"enabled": player_rec is not None, "heartbeat": player_hb["data"],
+                       "heartbeat_age_s": None if _hb_age() is None else round(_hb_age(), 1)},
+            "retention": admin.retention_table(rc, rec_settings.values),
+            "config": {"path": rc.get("path"), "require_mount": rc.get("require_mount"),
+                       "mount_marker": rc.get("mount_marker"), "capture_encoder": rc.get("capture_encoder"),
+                       "capture_fps": rc.get("capture_fps"), "capture_segment_seconds": rc.get("capture_segment_seconds"),
+                       "record_video_pc": bool(rc.get("record_video_capture")),
+                       "record_video_server": bool(sp_cfg.get("record_video", True)) if player_rec is not None else None,
+                       "record_sessions": sp_cfg.get("record_sessions") if player_rec is not None else None,
+                       "lead_minutes": sp_cfg.get("lead_minutes"), "trail_minutes": sp_cfg.get("trail_minutes"),
+                       "resolution": sp_cfg.get("resolution"), "min_free_bytes": stream_rec.min_free,
+                       "log_keep_hours": 48}})
+
+    async def api_disk_log(request: Request) -> Response:
+        try:
+            limit = min(2000, int(request.query_params.get("limit") or 400))
+        except ValueError:
+            limit = 400
+        return JSONResponse({"entries": activity.entries(limit, request.query_params.get("level") or "INFO"),
+                             "keep_hours": 48})
+
+    async def api_disk_recordings(request: Request) -> Response:
+        fresh = bool(request.query_params.get("fresh"))
+        if fresh and stream_rec.ok:
+            with contextlib.suppress(OSError):
+                stream_rec.rebuild_index()              # also packages copied onto the disk by hand
+        sizes = rec_sizes.get(stream_rec.root if stream_rec.ok else None, force=fresh)
+        recs = stream_rec.list(also=(player_rec,))
+        for r in recs:
+            r.update(sizes.get(r["stream_instance_id"]) or {"video_bytes": 0, "data_bytes": 0, "segments": 0})
+            r["keep_days"] = stream_rec.keep_days(r.get("session_kind") or "other")
+        return JSONResponse({"recordings": recs, "ok": stream_rec.ok, "error": stream_rec.error})
+
+    async def api_disk_settings(request: Request) -> Response:
+        if not remote.check_token(_token(request)):
+            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        try:
+            body = json.loads((await request.body())[:8192] or b"{}")
+            changed = rec_settings.update(body if isinstance(body, dict) else {}, (stream_rec, player_rec))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        removed = 0
+        for r in (stream_rec, player_rec):
+            if r is not None and r.ok:
+                removed += r.apply_retention()
+        rec_sizes.get(stream_rec.root if stream_rec.ok else None, force=True)
+        return JSONResponse({"ok": True, "changed": changed, "video_files_deleted": removed})
+
+    async def api_disk_delete(request: Request) -> Response:
+        if not remote.check_token(_token(request)):
+            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        try:
+            msg = admin.delete_package(stream_rec, (player_rec,), request.path_params["iid"],
+                                       request.query_params.get("what") or "video")
+        except KeyError as exc:
+            return JSONResponse({"ok": False, "error": str(exc).strip("'")}, status_code=404)
+        except (PermissionError, ValueError, OSError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+        rec_sizes.get(stream_rec.root if stream_rec.ok else None, force=True)
+        return JSONResponse({"ok": True, "message": msg})
+
     def _rec_for(iid: str) -> VoyoStreamRecorder:
         if player_rec is not None:
             pkg = player_rec.package_dir(iid)
@@ -757,6 +882,15 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/api/sync", api_sync),
         Route("/api/sync/voyo", api_sync_voyo, methods=["POST"]),
         Route("/api/voyo/recordings", api_voyo_recordings),
+        Route("/api/voyo/player/status", api_player_status, methods=["POST"]),
+        Route("/api/voyo/player/log", api_player_log, methods=["POST"]),
+        Route("/disk", disk_page),
+        Route("/disk/", disk_page),
+        Route("/api/disk/status", api_disk_status),
+        Route("/api/disk/log", api_disk_log),
+        Route("/api/disk/recordings", api_disk_recordings),
+        Route("/api/disk/settings", api_disk_settings, methods=["POST"]),
+        Route("/api/disk/recordings/{iid}/delete", api_disk_delete, methods=["POST"]),
         Route("/api/voyo/recordings/{iid}", api_voyo_recording),
         Route("/api/voyo/recordings/{iid}/capture/{name}", api_voyo_capture_upload, methods=["PUT"]),
         Route("/api/voyo/recordings/{iid}/files/{name:path}", api_voyo_recording_file),
@@ -765,6 +899,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/api/sync/{action}", api_sync_action, methods=["POST"]),
         WebSocketRoute("/ws", ws_endpoint),
         Mount("/static", StaticFiles(directory=str(DASHBOARD_DIR)), name="static"),
+        Mount("/disk-static", StaticFiles(directory=str(DISK_PAGE_DIR), check_dir=False), name="disk-static"),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.runtime = rt

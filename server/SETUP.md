@@ -482,6 +482,9 @@ systemctl status f1-dashboard --no-pager        # "active (running)"
 journalctl -u f1-dashboard -n 50 --no-pager     # the log
 ```
 
+The recorder page is at **http://`<SERVER-IP>`:8080/disk**. It shows the disk, what the server is
+doing now (REST / RECORDING / ...), the recordings and the last 48 hours of log.
+
 Open **http://`<SERVER-IP>`:8080** on the PC again. It now runs in AUTO mode (LIVE during an F1
 session, otherwise VOD), and it starts by itself at every boot.
 
@@ -627,7 +630,8 @@ then use "Add to home screen".
 | Restart | `sudo systemctl restart f1-dashboard` (and/or `f1-voyo-player`) |
 | Stop / start | `sudo systemctl stop f1-dashboard` / `sudo systemctl start f1-dashboard` |
 | Is the disk there? How full? | `findmnt /mnt/f1disk && df -h /mnt/f1disk` |
-| List of VOYO recordings | http://`<SERVER-IP>`:8080/api/voyo/recordings |
+| Recorder page: disk, state, recordings, video, log | http://`<SERVER-IP>`:8080/disk |
+| List of VOYO recordings (JSON) | http://`<SERVER-IP>`:8080/api/voyo/recordings |
 | Next sessions the player will record | `sudo -H -u f1 /opt/f1-dashboard/server/voyo-player.sh status` |
 | F1 TV sign-in state | `sudo -H -u f1 /opt/f1-dashboard/server/launch.sh --f1-status` |
 | System updates (monthly) | `sudo apt update && sudo apt full-upgrade -y && sudo reboot` |
