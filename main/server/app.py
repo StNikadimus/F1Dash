@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -30,12 +31,16 @@ from .video import VideoMonitor
 from .voyo_recording import CAPTURE_NAME as VOYO_CAPTURE_NAME, VoyoStreamRecorder, load_package, recalibrate
 from . import activity as activity_mod
 from . import recordings_admin as admin
+from .voyo_account import VoyoAccount
 
 log = logging.getLogger("app")
 
 MAX_WS_MESSAGE = 1024
 MAX_CLOCK_BODY = 8192
 DISK_PAGE_DIR = REPO_ROOT / "server" / "disk"      # the /disk page (Linux server deployment folder)
+TV_PAGE_DIR = REPO_ROOT / "server" / "tv"          # the /tv page: live stream + dashboard
+LIVE_NAME = re.compile(r"^(index\.m3u8|live_\d{5}\.ts)$")
+VIEWER_S = 12.0                                     # a /tv viewer counts while it fetched the playlist this recently
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -147,6 +152,10 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     rec_cfg = rec_settings.apply((cfg.get("voyo") or {}).get("recording") or {})
     rec_sizes = admin.Sizes()
     player_hb: dict = {"data": None, "at": None}
+    live_dir = DATA_DIR / "live"                      # the server VOYO player's live HLS (tools/voyo_capture.py)
+    viewers: dict = {}
+    voyo_account = VoyoAccount(DATA_DIR / "auth" / "voyo_credentials.json", DATA_DIR / "voyo_server_player.json",
+                               str(((cfg.get("voyo") or {}).get("server_player") or {}).get("stream_url") or ""))
     stream_rec = VoyoStreamRecorder(rec_cfg, DATA_DIR / "recordings").start()
     # the server's own VOYO player (tools/voyo_server_player.py): its own stream instances + packages
     sp_cfg = (cfg.get("voyo") or {}).get("server_player") or {}
@@ -581,7 +590,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                 (DATA_DIR / "voyo_server_player_instances.json").write_text(
                     json.dumps(player_tracker.store, default=str), encoding="utf-8")
         hint = body.get("session_hint") if isinstance(body.get("session_hint"), dict) else {}
-        hint = {k: str(v)[:120] for k, v in hint.items() if k in ("meeting", "session_name", "start", "end")}
+        hint = {k: str(v)[:120] for k, v in hint.items()
+                if k in ("meeting", "session_name", "start", "end") and v not in (None, "")}
         try:
             player_rec.observe(sample, inst, reason, PlayerView(inst, hint))
         except Exception:  # noqa: BLE001
@@ -602,7 +612,46 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             return JSONResponse({"ok": False, "error": "json"}, status_code=400)
         if isinstance(body, dict):
             player_hb.update(data=body, at=time.monotonic())
-        return JSONResponse({"ok": True})
+            if isinstance(body.get("login"), dict):
+                voyo_account.last_login = body["login"]
+        return JSONResponse({"ok": True, "commands": voyo_account.take_commands()})
+
+    async def api_disk_voyo(request: Request) -> Response:
+        """GET: the VOYO account (never the password). POST {email, password, stream_url}: save (token)."""
+        if request.method == "GET":
+            return JSONResponse(voyo_account.public())
+        if not remote.check_token(_token(request)):
+            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        try:
+            body = json.loads((await request.body())[:8192] or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("object expected")
+            changed = voyo_account.save(body.get("email"), body.get("password") or None, body.get("stream_url"))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except OSError as exc:
+            return JSONResponse({"ok": False, "error": f"not saved: {exc}"}, status_code=500)
+        logging.getLogger("disk").info("VOYO account changed on the /disk page: %s", ", ".join(changed) or "nothing")
+        return JSONResponse({"ok": True, "changed": changed, "account": voyo_account.public()})
+
+    async def api_disk_voyo_action(request: Request) -> Response:
+        if not remote.check_token(_token(request)):
+            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        action = request.path_params["action"]
+        if action == "forget":
+            voyo_account.forget()
+            logging.getLogger("disk").info("VOYO e-mail / password deleted on the /disk page")
+            return JSONResponse({"ok": True, "account": voyo_account.public()})
+        if action == "login":
+            if player_rec is None:
+                return JSONResponse({"ok": False, "error": "the server VOYO player is not enabled"}, status_code=409)
+            if _hb_age() is None or _hb_age() > 90:
+                return JSONResponse({"ok": False, "error": "the server VOYO player is not running"}, status_code=409)
+            if "login" not in voyo_account.commands:
+                voyo_account.commands.append("login")
+            logging.getLogger("disk").info("LOGIN NOW requested on the /disk page")
+            return JSONResponse({"ok": True, "message": "the player signs in within ~15 s - see the log"})
+        return JSONResponse({"ok": False, "error": "unknown action"}, status_code=404)
 
     async def api_player_log(request: Request) -> Response:
         """A line of the server VOYO player's own log -> the activity log."""
@@ -633,6 +682,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             "player": {"enabled": player_rec is not None, "heartbeat": player_hb["data"],
                        "heartbeat_age_s": None if _hb_age() is None else round(_hb_age(), 1)},
             "retention": admin.retention_table(rc, rec_settings.values),
+            "voyo": voyo_account.public(),
+            "live": live_info(),
             "config": {"path": rc.get("path"), "require_mount": rc.get("require_mount"),
                        "mount_marker": rc.get("mount_marker"), "capture_encoder": rc.get("capture_encoder"),
                        "capture_fps": rc.get("capture_fps"), "capture_segment_seconds": rc.get("capture_segment_seconds"),
@@ -690,6 +741,56 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
         rec_sizes.get(stream_rec.root if stream_rec.ok else None, force=True)
         return JSONResponse({"ok": True, "message": msg})
+
+    # ---------------------------------------------------------------- the /tv page (live stream + dashboard)
+    def live_info() -> dict:
+        idx = live_dir / "index.m3u8"
+        now_m = time.monotonic()
+        for ip in [k for k, v in viewers.items() if now_m - v > VIEWER_S]:
+            viewers.pop(ip, None)
+        out = {"on_air": False, "segments": 0, "lag_s": None, "viewers": len(viewers), "age_s": None}
+        try:
+            st = idx.stat()
+            text = idx.read_text(encoding="utf-8")
+        except OSError:
+            return out
+        age = time.time() - st.st_mtime
+        segs = text.count("#EXTINF")
+        out.update(age_s=round(age, 1), segments=segs, on_air=age < 10 and segs > 0)
+        pdts = re.findall(r"#EXT-X-PROGRAM-DATE-TIME:(\S+)", text)
+        if pdts:
+            with contextlib.suppress(ValueError):
+                from datetime import datetime
+                last = datetime.fromisoformat(pdts[-1].replace("Z", "+00:00").replace("+0000", "+00:00"))
+                out["lag_s"] = round(time.time() - last.timestamp(), 1)
+        return out
+
+    async def tv_page(request: Request) -> Response:
+        return FileResponse(TV_PAGE_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+    async def tv_live_file(request: Request) -> Response:
+        """The live HLS of the server VOYO player (only while it records) - remote token when set."""
+        if not remote.check_token(_token(request)):
+            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        name = request.path_params["name"]
+        path = live_dir / name
+        if not LIVE_NAME.match(name) or not path.is_file():
+            return JSONResponse({"ok": False, "error": "off air"}, status_code=404)
+        if name == "index.m3u8":
+            viewers[request.client.host if request.client else "?"] = time.monotonic()
+            return FileResponse(path, media_type="application/vnd.apple.mpegurl",
+                                headers={"Cache-Control": "no-cache, no-store"})
+        return FileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "max-age=60"})
+
+    async def api_tv_status(request: Request) -> Response:
+        cur = player_rec.cur if player_rec is not None else None
+        sess = (cur or {}).get("session") or {}
+        hb = player_hb["data"] or {}
+        return JSONResponse({
+            "now": time.time(), "token_required": bool(remote.token), "live": live_info(),
+            "state": admin.current_state(stream_rec, player_rec, player_rec is not None, player_hb["data"], _hb_age()),
+            "session": {"meeting": sess.get("meeting"), "session_name": sess.get("session_name")} if cur else None,
+            "next": hb.get("next") if _hb_age() is not None and _hb_age() < 90 else None})
 
     def _rec_for(iid: str) -> VoyoStreamRecorder:
         if player_rec is not None:
@@ -884,12 +985,18 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/api/voyo/recordings", api_voyo_recordings),
         Route("/api/voyo/player/status", api_player_status, methods=["POST"]),
         Route("/api/voyo/player/log", api_player_log, methods=["POST"]),
+        Route("/tv", tv_page),
+        Route("/tv/", tv_page),
+        Route("/tv/live/{name}", tv_live_file),
+        Route("/api/tv/status", api_tv_status),
         Route("/disk", disk_page),
         Route("/disk/", disk_page),
         Route("/api/disk/status", api_disk_status),
         Route("/api/disk/log", api_disk_log),
         Route("/api/disk/recordings", api_disk_recordings),
         Route("/api/disk/settings", api_disk_settings, methods=["POST"]),
+        Route("/api/disk/voyo", api_disk_voyo, methods=["GET", "POST"]),
+        Route("/api/disk/voyo/{action}", api_disk_voyo_action, methods=["POST"]),
         Route("/api/disk/recordings/{iid}/delete", api_disk_delete, methods=["POST"]),
         Route("/api/voyo/recordings/{iid}", api_voyo_recording),
         Route("/api/voyo/recordings/{iid}/capture/{name}", api_voyo_capture_upload, methods=["PUT"]),
@@ -900,6 +1007,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         WebSocketRoute("/ws", ws_endpoint),
         Mount("/static", StaticFiles(directory=str(DASHBOARD_DIR)), name="static"),
         Mount("/disk-static", StaticFiles(directory=str(DISK_PAGE_DIR), check_dir=False), name="disk-static"),
+        Mount("/tv-static", StaticFiles(directory=str(TV_PAGE_DIR), check_dir=False), name="tv-static"),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.runtime = rt

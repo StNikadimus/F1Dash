@@ -4,6 +4,13 @@
  * except the smooth interpolation between two REAL position samples. */
 (() => {
   "use strict";
+  // ?layout=RACE_VIEW | VIDEO_FOCUS | FULL_DASHBOARD: this window only (the /tv page puts the server's
+  // live stream into the video slot) - the remote's TV mode keeps driving every other screen
+  const FORCED_TV = (() => {
+    const l = (new URLSearchParams(location.search).get("layout") || "").toUpperCase();
+    return ["RACE_VIEW", "VIDEO_FOCUS", "FULL_DASHBOARD"].includes(l) ? l : null;
+  })();
+  const tvMode = () => FORCED_TV || (S.ui || {}).tv_mode_effective || "FULL_DASHBOARD";
 
   // ------------------------------------------------------------------ state
   const S = {
@@ -1043,7 +1050,7 @@
     const extra = Object.entries(v.channels || {}).map(([k, x]) => `ch${esc(k)} ${esc(x)}`).join(" · ");
     // VOYO + data view: S1 / S2 / S3 (same component as the stats column) instead of DRS / ERS /
     // OVERTAKE, which the feed does not deliver reliably
-    const video = (S.ui.tv_mode_effective || "FULL_DASHBOARD") !== "FULL_DASHBOARD";
+    const video = tvMode() !== "FULL_DASHBOARD";
     const d = num ? S.drivers[num] : null;
     const stale = a && !a.fresh;
     const age = a && has(a.age_ms) ? (a.age_ms >= 10000 ? Math.round(a.age_ms / 1000) + " s" : (a.age_ms / 1000).toFixed(1) + " s") : null;
@@ -1127,7 +1134,7 @@
   function renderUI() {
     for (const v of ["overview", "telemetry", "strategy", "racecontrol", "weather"]) stage.classList.remove("view-" + v);
     stage.classList.add("view-" + (S.ui.view || "overview"));
-    const tv = S.ui.tv_mode_effective || "FULL_DASHBOARD";
+    const tv = tvMode();
     if (!stage.classList.contains("tv-" + tv)) {
       stage.classList.remove("tv-FULL_DASHBOARD", "tv-RACE_VIEW", "tv-VIDEO_FOCUS");
       stage.classList.add("tv-" + tv);
@@ -1312,7 +1319,7 @@
   }
   const TS_LABEL = { GREEN: "GREEN", YELLOW: "YELLOW", SC: "SAFETY CAR", VSC: "VSC", VSC_ENDING: "VSC ENDING", RED: "RED FLAG", CHEQUERED: "CHEQUERED", UNKNOWN: "N/A" };
   function renderRaceInfo() {
-    const tv = (S.ui || {}).tv_mode_effective;
+    const tv = tvMode();
     if (tv !== "RACE_VIEW" && tv !== "VIDEO_FOCUS") return;
     const s = S.session || {}, ts = S.track_status || {}, w = S.weather || {};
     const timedS = isTimed(s);

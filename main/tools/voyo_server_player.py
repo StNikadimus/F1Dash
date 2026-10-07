@@ -76,20 +76,68 @@ PLAY_JS = r"""(() => {
 _FORWARD = {"server": None, "token": "", "off_until": 0.0}
 
 
-def _post(path: str, body: dict, timeout: float = 1.5) -> bool:
-    """POST to the dashboard server (local); quiet and short when it is not running."""
+def _post(path: str, body: dict, timeout: float = 1.5) -> Optional[dict]:
+    """POST to the dashboard server (local); quiet and short when it is not running. -> its JSON answer"""
     srv = _FORWARD["server"]
     if not srv or time.monotonic() < _FORWARD["off_until"]:
-        return False
+        return None
     try:
         req = urllib.request.Request(srv + path, method="POST", data=json.dumps(body, default=str).encode(),
                                      headers={"Content-Type": "application/json",
                                               **({"X-Remote-Token": _FORWARD["token"]} if _FORWARD["token"] else {})})
-        urllib.request.urlopen(req, timeout=timeout).read()
-        return True
+        raw = urllib.request.urlopen(req, timeout=timeout).read()
+        try:
+            return json.loads(raw or b"{}")
+        except ValueError:
+            return {}
     except OSError:
         _FORWARD["off_until"] = time.monotonic() + 30            # server down: don't slow the player
-        return False
+        return None
+
+
+CREDS = DATA_DIR / "auth" / "voyo_credentials.json"
+
+# VOYO's own sign-in form: find it (or the link that opens it). Reads the page only - the e-mail and
+# password are typed with Chrome's Input.insertText, never put into a script.
+LOGIN_FIND_JS = r"""(() => {
+  const vis = (e) => !!(e && e.offsetParent !== null && e.getBoundingClientRect().width > 0);
+  const pw = [...document.querySelectorAll('input[type=password]')].find(vis);
+  if (pw) {
+    const form = pw.form || document;
+    const cands = [...form.querySelectorAll('input')].filter((i) => vis(i) && i !== pw &&
+      /^(email|text|tel|)$/.test((i.getAttribute('type') || '').toLowerCase()));
+    const em = cands.find((i) => /mail|user|uporab|login/i.test((i.name || '') + (i.id || '') +
+      (i.autocomplete || '') + (i.placeholder || '') + (i.type || ''))) || cands[0];
+    return {form: true, email: !!em, url: location.href, title: document.title};
+  }
+  const words = /^(prijava|prijavi se|vpis|vpiši se|sign in|log ?in|login|moj račun)$/i;
+  const link = [...document.querySelectorAll('a,button,[role=button]')].find((e) => vis(e) &&
+    words.test((e.innerText || e.getAttribute('aria-label') || '').trim()));
+  return {form: false, link: link ? (link.innerText || link.getAttribute('aria-label') || '').trim() : null,
+          url: location.href, title: document.title};
+})()"""
+LOGIN_CLICK_JS = r"""(() => {
+  const vis = (e) => !!(e && e.offsetParent !== null);
+  const words = /^(prijava|prijavi se|vpis|vpiši se|sign in|log ?in|login|moj račun)$/i;
+  const link = [...document.querySelectorAll('a,button,[role=button]')].find((e) => vis(e) &&
+    words.test((e.innerText || e.getAttribute('aria-label') || '').trim()));
+  if (link) { link.click(); return true; } return false;
+})()"""
+LOGIN_FOCUS_JS = r"""((which) => {
+  const vis = (e) => !!(e && e.offsetParent !== null && e.getBoundingClientRect().width > 0);
+  const pw = [...document.querySelectorAll('input[type=password]')].find(vis);
+  if (!pw) return false;
+  let el = pw;
+  if (which === 'email') {
+    const form = pw.form || document;
+    const cands = [...form.querySelectorAll('input')].filter((i) => vis(i) && i !== pw &&
+      /^(email|text|tel|)$/.test((i.getAttribute('type') || '').toLowerCase()));
+    el = cands.find((i) => /mail|user|uporab|login/i.test((i.name || '') + (i.id || '') + (i.autocomplete || '') +
+      (i.placeholder || '') + (i.type || ''))) || cands[0];
+    if (!el) return false;
+  }
+  el.focus(); el.select && el.select(); return true;
+})"""
 
 
 def log(msg: str) -> None:
@@ -170,6 +218,9 @@ class Player:
         self.token = str((cfg.get("remote") or {}).get("token") or "")
         _FORWARD.update(server=self.server, token=self.token)
         self.note = ""                                         # last thing the page said (for the heartbeat)
+        self.last_login_try = -1e9
+        self.last_reload = -1e9
+        self.login_result: Optional[dict] = None
         self.display = str(self.sp.get("display") or ":90")
         self.cdp_port = int(self.sp.get("cdp_port", 9224))
         self.profile = resolve_path(str(self.sp.get("profile") or "data/browser-profiles/voyo-server"))
@@ -257,24 +308,80 @@ class Player:
             return None
         return pages[0].get("url") if pages else None
 
-    def evaluate(self, expr: str) -> Optional[dict]:
+    def cdp(self, calls: list[tuple[str, dict]]) -> list:
+        """Run DevTools calls on the VOYO page (local port), in order; -> their results."""
         from websockets.sync.client import connect
         try:
             pages = self._targets()
         except OSError:
-            return None
+            return []
         if not pages:
-            return None
+            return []
+        out = []
         with connect(pages[0]["webSocketDebuggerUrl"], open_timeout=3, max_size=2 ** 22) as ws:
-            ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
-                                "params": {"expression": expr, "returnByValue": True, "userGesture": True,
-                                           "awaitPromise": False}}))
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                msg = json.loads(ws.recv(timeout=5))
-                if msg.get("id") == 1:
-                    return ((msg.get("result") or {}).get("result") or {}).get("value")
-        return None
+            for i, (method, params) in enumerate(calls, 1):
+                ws.send(json.dumps({"id": i, "method": method, "params": params}))
+                deadline = time.monotonic() + 5
+                res = None
+                while time.monotonic() < deadline:
+                    msg = json.loads(ws.recv(timeout=5))
+                    if msg.get("id") == i:
+                        res = msg.get("result") or {}
+                        break
+                out.append(res)
+        return out
+
+    def evaluate(self, expr: str) -> Optional[dict]:
+        res = self.cdp([("Runtime.evaluate", {"expression": expr, "returnByValue": True, "userGesture": True,
+                                              "awaitPromise": False})])
+        return ((res[0] or {}).get("result") or {}).get("value") if res else None
+
+    # ------------------------------------------------------------------ VOYO sign-in (credentials from /disk)
+    def auto_login(self, why: str) -> dict:
+        """Type the saved e-mail + password into VOYO's sign-in form, like a password manager.
+        -> {"ok": bool, "result": text} (the password never appears in a log or a script)."""
+        c = {}
+        try:
+            c = json.loads(CREDS.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        self.last_login_try = time.monotonic()
+        if not c.get("email") or not c.get("password"):
+            return self._login_done(False, "no VOYO e-mail / password saved (the /disk page, VOYO ACCOUNT)")
+        st = self.evaluate(LOGIN_FIND_JS) or {}
+        if not st.get("form") and st.get("link"):
+            self.evaluate(LOGIN_CLICK_JS)
+            for _ in range(10):
+                time.sleep(1)
+                st = self.evaluate(LOGIN_FIND_JS) or {}
+                if st.get("form"):
+                    break
+        if not st.get("form"):
+            return self._login_done(True, f"no sign-in form on the page - already signed in? ({st.get('title') or st.get('url')})",
+                                    level="INFO")
+        steps = []
+        if st.get("email"):
+            steps += [("Runtime.evaluate", {"expression": LOGIN_FOCUS_JS + "('email')", "returnByValue": True}),
+                      ("Input.insertText", {"text": c["email"]})]
+        steps += [("Runtime.evaluate", {"expression": LOGIN_FOCUS_JS + "('password')", "returnByValue": True}),
+                  ("Input.insertText", {"text": c["password"]}),
+                  ("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter",
+                                              "windowsVirtualKeyCode": 13, "text": "\r"}),
+                  ("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter",
+                                              "windowsVirtualKeyCode": 13})]
+        self.cdp(steps)
+        for _ in range(15):
+            time.sleep(1)
+            st = self.evaluate(LOGIN_FIND_JS) or {}
+            if not st.get("form"):
+                return self._login_done(True, f"signed in to VOYO ({why})", level="INFO")
+        return self._login_done(False, "still on VOYO's sign-in page - wrong e-mail / password, or VOYO asks for an "
+                                       "extra check (code / captcha): sign in once by hand (voyo-player.sh login)")
+
+    def _login_done(self, ok: bool, text: str, level: str = "WARNING") -> dict:
+        log(("VOYO login: " if ok else "VOYO login FAILED: ") + text)
+        self.login_result = {"ok": ok, "result": text, "at": time.time()}
+        return self.login_result
 
     def ensure_playing(self) -> None:
         js = PLAY_JS.replace("FULLSCREEN", "true" if self.sp.get("fullscreen_video", True) else "false")
@@ -287,6 +394,18 @@ class Player:
             return
         if not st.get("video"):
             self.note = f"no video on the page yet ({st.get('title') or st.get('url')})"
+            # network error page (internet down, VOYO unreachable): load the stream page again, once a minute
+            if str(st.get("url") or "").startswith("chrome-error:") and time.monotonic() - self.last_reload > 60:
+                self.last_reload = time.monotonic()
+                log("the VOYO page did not load (network error) - loading it again")
+                self.cdp([("Page.navigate", {"url": self.stream_url() or "https://voyo.si/"})])
+                return
+            # VOYO signed us out: sign in again with the saved account (at most every 10 min)
+            lf = (self.evaluate(LOGIN_FIND_JS) or {}) if CREDS.exists() else {}
+            if CREDS.exists() and time.monotonic() - self.last_login_try > 600 and (lf.get("form") or lf.get("link")):
+                if self.auto_login("VOYO asked for it").get("ok"):
+                    self.cdp([("Page.navigate", {"url": self.stream_url() or "https://voyo.si/"})])
+                return
             if time.monotonic() - self.last_play > 120:
                 self.last_play = time.monotonic()
                 log(f"no video on the page yet ({st.get('title')!r}, {st.get('url')}) - signed in? the F1 stream "
@@ -299,7 +418,26 @@ class Player:
 
     # ------------------------------------------------------------------ open / close
     def stream_url(self) -> Optional[str]:
-        return str(self.sp.get("stream_url") or "") or load_state().get("last_url")
+        """/disk page > [voyo.server_player] stream_url > the page learned at "login"."""
+        st = load_state()
+        return st.get("page_url") or str(self.sp.get("stream_url") or "") or st.get("last_url")
+
+    def login_session(self) -> dict:
+        """LOGIN NOW from the /disk page while VOYO is closed: open it, sign in, close it again."""
+        if self.is_open:
+            return self.auto_login("LOGIN NOW")
+        self.start_display()
+        self.start_chrome(self.stream_url() or "https://voyo.si/")
+        try:
+            for _ in range(20):
+                time.sleep(1)
+                if self.page_url():
+                    break
+            time.sleep(4)                                      # the page's own scripts
+            return self.auto_login("LOGIN NOW")
+        finally:
+            self.chrome.stop()
+            self.xvfb.stop()
 
     def open(self, url: str, hint: dict) -> None:
         from tools.voyo_capture import VoyoWindowCapture
@@ -317,7 +455,8 @@ class Player:
             os.environ.update(PULSE_SERVER=f"unix:{self.pulse_dir / 'native'}")
         self.capture = VoyoWindowCapture(self.server, self.token, self.rc, DATA_DIR / "voyo_server_spool",
                                          lambda: {"window_id": "0", "display": self.display, "audio": audio},
-                                         log=log)
+                                         log=log,
+                                         live_dir=DATA_DIR / "live" if self.sp.get("live_stream", True) else None)
         self.bridge.on_reply = self.capture.on_reply
         self.bridge.start()
         self.capture.start()
@@ -414,9 +553,11 @@ class Schedule:
 # ---------------------------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------------------------
-def heartbeat(player: Player, nxt: Optional[dict], problem: str = "") -> None:
-    """Tell the dashboard server what the player is doing (the /disk page's status)."""
-    _post("/api/voyo/player/status", {
+def heartbeat(player: Player, nxt: Optional[dict], problem: str = "") -> list:
+    """Tell the dashboard server what the player is doing (the /disk page's status); -> its commands
+    for the player (e.g. "login" from the /disk page)."""
+    ans = _post("/api/voyo/player/status", {
+        "login": player.login_result,
         "state": "open" if player.is_open else "idle", "pid": os.getpid(), "at": time.time(),
         "session": " ".join(x for x in ((player.hint or {}).get("meeting"), (player.hint or {}).get("session_name"))
                             if x) if player.is_open else None,
@@ -425,6 +566,7 @@ def heartbeat(player: Player, nxt: Optional[dict], problem: str = "") -> None:
         "widevine": has_widevine(find_browser(player.sp)),
         "next": None if not nxt else {k: nxt.get(k) for k in ("meeting", "session_name", "kind", "start", "end",
                                                               "open_from", "open_until")}})
+    return list((ans or {}).get("commands") or [])
 
 
 def cmd_run(player: Player) -> None:
@@ -461,7 +603,11 @@ def cmd_run(player: Player) -> None:
             problem = "" if player.stream_url() else "VOYO not set up: no stream page yet (voyo-player.sh login)"
             if not find_browser(sp):
                 problem = "Google Chrome is not installed (setup-voyo-player.sh)"
-            heartbeat(player, upcoming[0] if upcoming else None, problem)
+            for c in heartbeat(player, upcoming[0] if upcoming else None, problem):
+                if c == "login":
+                    log("LOGIN NOW (the /disk page)")
+                    player.login_session()
+                    heartbeat(player, upcoming[0] if upcoming else None, problem)
             for _ in range(15):
                 if stop["now"]:
                     break

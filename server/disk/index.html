@@ -60,6 +60,34 @@
     </div>
   </section>
 
+  <section class="panel" id="p-voyo">
+    <div class="panel-title">VOYO ACCOUNT <span class="panel-hint">the server signs in with it</span></div>
+    <div class="pad">
+      <div class="kvlist" id="voyo-kv"></div>
+      <form id="voyo-form" autocomplete="off">
+        <label class="fld"><span>E-MAIL</span><input type="email" id="voyo-email" placeholder="your VOYO e-mail" autocomplete="off"></label>
+        <label class="fld"><span>PASSWORD</span><input type="password" id="voyo-pass" placeholder="leave empty = keep the saved one" autocomplete="new-password"></label>
+        <label class="fld"><span>F1 STREAM PAGE</span><input type="url" id="voyo-url" placeholder="https://voyo.si/... (the page you watch F1 on)"></label>
+        <div class="ret-actions">
+          <button class="btn primary" type="submit">SAVE</button>
+          <button class="btn" type="button" id="voyo-login">LOGIN NOW</button>
+          <button class="btn danger" type="button" id="voyo-forget">FORGET</button>
+        </div>
+        <div class="msg" id="voyo-msg"></div>
+        <div class="note-warn" id="voyo-http" hidden>This page is plain <b>http</b>: the password travels unencrypted over your home network.
+          Use <b>https://&lt;server&gt;/disk</b> (server/README.md "HTTPS") to type it.</div>
+      </form>
+    </div>
+  </section>
+
+  <section class="panel span2" id="p-live">
+    <div class="panel-title">LIVE / TV <span class="panel-hint"><a href="/tv" target="_blank">open /tv</a></span></div>
+    <div class="pad">
+      <div class="tiles" id="live-tiles"></div>
+      <div class="kvlist" id="live-kv"></div>
+    </div>
+  </section>
+
   <section class="panel wide" id="p-rec">
     <div class="panel-title">RECORDINGS
       <span class="filters" id="rec-filters">

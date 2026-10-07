@@ -205,6 +205,7 @@ Your PC, TV and phone reach the server through its IP address, so that address m
 ```bash
 sudo ufw allow OpenSSH            # keep SSH working!
 sudo ufw allow 8080/tcp           # the dashboard (TV, PC, phone)
+sudo ufw allow 443/tcp            # https (/tv, /disk) - see step 9
 sudo ufw enable                   # answer y
 sudo ufw status
 ```
@@ -482,6 +483,17 @@ systemctl status f1-dashboard --no-pager        # "active (running)"
 journalctl -u f1-dashboard -n 50 --no-pager     # the log
 ```
 
+**HTTPS (recommended, needed to type the VOYO password safely):**
+
+```bash
+sudo /opt/f1-dashboard/server/make-https-cert.sh
+sudo ufw allow 443/tcp
+sudo systemctl restart f1-dashboard
+```
+
+From now on **https://`<SERVER-IP>`/disk** and **https://`<SERVER-IP>`/tv** work. The first time,
+the browser warns about the self-made certificate: click *Advanced → Continue*.
+
 The recorder page is at **http://`<SERVER-IP>`:8080/disk**. It shows the disk, what the server is
 doing now (REST / RECORDING / ...), the recordings and the last 48 hours of log.
 
@@ -555,6 +567,11 @@ It prints a VNC **password**. Then:
    From now on, that page is opened for every session.
 
 Close the VNC viewer and the tunnel window.
+
+**Instead of VNC**, if VOYO doesn't ask for a code or captcha: open **https://`<SERVER-IP>`/disk**,
+then in the **VOYO ACCOUNT** panel enter your VOYO e-mail, password and the F1 stream page address.
+Click **SAVE**, then **LOGIN NOW**. The result shows under *LAST LOGIN* and in the log. From then
+on, the server also signs in again by itself when VOYO signs it out.
 
 ### 11.3 Test: record 3 minutes now
 
@@ -630,7 +647,8 @@ then use "Add to home screen".
 | Restart | `sudo systemctl restart f1-dashboard` (and/or `f1-voyo-player`) |
 | Stop / start | `sudo systemctl stop f1-dashboard` / `sudo systemctl start f1-dashboard` |
 | Is the disk there? How full? | `findmnt /mnt/f1disk && df -h /mnt/f1disk` |
-| Recorder page: disk, state, recordings, video, log | http://`<SERVER-IP>`:8080/disk |
+| Recorder page: disk, state, recordings, video, log, VOYO account | https://`<SERVER-IP>`/disk (or http://…:8080/disk) |
+| Stream + dashboard on one page (TV) | https://`<SERVER-IP>`/tv |
 | List of VOYO recordings (JSON) | http://`<SERVER-IP>`:8080/api/voyo/recordings |
 | Next sessions the player will record | `sudo -H -u f1 /opt/f1-dashboard/server/voyo-player.sh status` |
 | F1 TV sign-in state | `sudo -H -u f1 /opt/f1-dashboard/server/launch.sh --f1-status` |

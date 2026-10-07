@@ -57,6 +57,13 @@ a { color: var(--blue); }
 #grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; position: relative; min-width: 0; }
 .panel.wide { grid-column: 1 / -1; }
+.panel.span2 { grid-column: span 2; }
+.fld { display: grid; grid-template-columns: 130px minmax(0, 1fr); align-items: center; gap: 8px; margin-top: 8px; }
+.fld span { font-size: 12px; font-weight: 800; letter-spacing: .12em; color: var(--text-3); }
+.fld input { font: inherit; font-size: 14px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line-2);
+  border-radius: 4px; padding: 6px 8px; min-width: 0; }
+.fld input:focus { outline: none; border-color: var(--text-2); }
+.note-warn { margin-top: 10px; font-size: 12px; color: var(--amber); font-weight: 600; line-height: 1.4; }
 .panel-title { font-size: 15px; font-weight: 800; letter-spacing: .14em; color: var(--text-2); padding: 8px 14px 6px;
   border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .panel-hint { font-size: 12px; color: var(--text-3); letter-spacing: .08em; font-weight: 700; margin-left: auto;
@@ -171,6 +178,7 @@ dialog#viewer::backdrop { background: rgba(0, 0, 0, .75); }
 
 @media (max-width: 1100px) {
   #grid { grid-template-columns: minmax(0, 1fr); }
+  .panel.span2 { grid-column: auto; }
   #topbar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .det-grid { grid-template-columns: minmax(0, 1fr); }
 }
@@ -181,4 +189,5 @@ dialog#viewer::backdrop { background: rgba(0, 0, 0, .75); }
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tb-big { font-size: 22px; } #st-main { font-size: 24px; }
   .log .ln { grid-template-columns: 1fr; gap: 0; }
+  .fld { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 }

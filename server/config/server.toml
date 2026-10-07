@@ -5,6 +5,8 @@
 [server]
 host = "0.0.0.0"            # reachable from the TV, the PC with VOYO and the phone
 port = 8080
+# https://<server>/tv and /disk - once server/make-https-cert.sh made a certificate (http stays on 8080)
+https_port = 443
 
 [f1_tv]
 # a headless server has no browser to open: sign in through an SSH tunnel (server/README.md)

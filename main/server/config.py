@@ -22,7 +22,8 @@ DATA_DIR = Path(os.environ["F1DASH_DATA_DIR"]).expanduser() if os.environ.get("F
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 
 DEFAULTS: dict[str, Any] = {
-    "server": {"host": "0.0.0.0", "port": 8080, "log_level": "INFO"},
+    "server": {"host": "0.0.0.0", "port": 8080, "log_level": "INFO", "https_port": 0,
+               "tls_cert": "data/tls/cert.pem", "tls_key": "data/tls/key.pem"},
     "source": {"mode": "auto", "delay_seconds": 0.0},
     "f1_tv": {"subscription": True, "open_browser": True, "safety_car_position_keys": [],
               "auth_file": "data/auth/f1tv_auth.json"},
@@ -88,7 +89,8 @@ DEFAULTS: dict[str, Any] = {
                                "lead_minutes": 15, "trail_minutes": 30, "keep_open_while_feed_live": True,
                                "record_video": True, "fullscreen_video": True, "browser": "", "display": ":90",
                                "resolution": "1920x1080", "cdp_port": 9224,
-                               "profile": "data/browser-profiles/voyo-server", "audio": True, "vnc_port": 5900}},
+                               "profile": "data/browser-profiles/voyo-server", "audio": True, "vnc_port": 5900,
+                               "live_stream": True}},
     "sync": {"enabled": True, "mode": "AUTO", "buffer_seconds": 120.0, "broadcast_delay_seconds": 5.0,
              "adjustment_step": 0.25, "auto_drift_correction": True, "voyo_playback_clock": True,
              "drift_slew_seconds_per_second": 0.05, "mark_reaction_seconds": 0.2,
