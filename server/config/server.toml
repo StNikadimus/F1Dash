@@ -23,12 +23,18 @@ allow_remote_clock = true
 # creates the voyo_streams folder on the disk. Another mount point: change both lines.
 path = "/mnt/f1disk/voyo_streams"
 require_mount = "/mnt/f1disk"
+# the file /mnt/f1disk/.f1disk must exist on the disk (SETUP.md step 4) - needed in a Proxmox container
+mount_marker = ".f1disk"
+# Intel Quick Sync (HD 530 of the i5-6300HQ): the GPU encodes the recording, the 2 cores stay free
+capture_encoder = "vaapi"
 # other examples:
 # path = "/mnt/data/f1-voyo-streams"          # data disk
 # path = "/var/lib/f1-dashboard/voyo_streams" # system data dir (then require_mount = "")
 # record_video_capture = true                 # opt-in window capture by the PC that shows VOYO
 
 [voyo.server_player]
+# picture size of the recording; if `htop` shows 100 % CPU during a recording: "1280x720"
+resolution = "1920x1080"
 # the server opens VOYO itself around every F1 session and records it - no PC needed
 # (server/README.md "Recording VOYO on the server"; ./server/voyo-player.sh login once)
 enabled = true

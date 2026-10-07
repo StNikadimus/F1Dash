@@ -7,6 +7,10 @@ set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 1; }
 apt-get update
 apt-get install -y xvfb x11vnc ffmpeg fonts-liberation wget gnupg ca-certificates
+# Intel Quick Sync (capture_encoder = "vaapi"): VA-API drivers + vainfo (harmless without an Intel GPU)
+apt-get install -y vainfo i965-va-driver || true
+apt-get install -y intel-media-va-driver-non-free 2>/dev/null || apt-get install -y intel-media-va-driver || true
+if id f1 >/dev/null 2>&1; then for g in render video; do getent group $g >/dev/null && usermod -aG $g f1; done; fi
 if command -v pipewire-pulse >/dev/null 2>&1 && ! command -v pulseaudio >/dev/null 2>&1; then
   echo "NOTE: this system uses PipeWire. The player starts its own PulseAudio sound server for the"
   echo "      virtual screen; install it only on a headless server:  apt-get install pulseaudio"
@@ -25,4 +29,8 @@ fi
 echo
 google-chrome --version
 ls -d /opt/google/chrome/WidevineCdm >/dev/null 2>&1 && echo "Widevine: ok" || echo "Widevine: NOT FOUND"
+if ls /dev/dri/renderD* >/dev/null 2>&1; then
+  echo "Intel Quick Sync (H.264 encode):"
+  vainfo 2>/dev/null | grep -i "H264.*EncSlice" || echo "  not found with the default driver - try: LIBVA_DRIVER_NAME=i965 vainfo"
+fi
 echo "Next: ./server/voyo-player.sh login   (sign in to VOYO once)"

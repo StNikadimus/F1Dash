@@ -116,6 +116,19 @@ class PathSelectionTest(unittest.TestCase):
         _, err = resolve_root({"path": str(self.d / "elsewhere"), "require_mount": str(mnt)})
         self.assertIn("not on require_mount", err)
 
+    def test_mount_marker_rejects_an_empty_bind_mount(self):
+        mnt = self.d / "f1disk"
+        mnt.mkdir()
+        rc = {"path": str(mnt / "voyo_streams"), "require_mount": str(mnt), "mount_marker": ".f1disk"}
+        with mock.patch("os.path.ismount", return_value=True):              # LXC bind mount: always "mounted"
+            _, err = resolve_root(rc)
+            self.assertIn(".f1disk is missing", err)
+            self.assertFalse((mnt / "voyo_streams").exists())
+            (mnt / ".f1disk").touch()                                        # the real disk
+            root, err = resolve_root(rc)
+        self.assertIsNone(err)
+        self.assertTrue(root.is_dir())
+
     def test_write_test_failure_reported(self):
         with mock.patch("pathlib.Path.write_bytes", side_effect=PermissionError("read-only file system")):
             root, err = resolve_root({"path": str(self.d / "x")})
@@ -360,6 +373,54 @@ class CaptureAndRetentionTest(unittest.TestCase):
         self.assertIn("segment", win)
         with self.assertRaises(ValueError):
             ffmpeg_cmd("ffmpeg", {}, self.d, "run1")
+
+    def test_vaapi_command_and_device(self):
+        from tools.voyo_capture import find_vaapi_device
+        cmd = ffmpeg_cmd("ffmpeg", {"window_id": "0", "display": ":90"}, self.d, "run1", 30, 23, 60,
+                         encoder="vaapi", vaapi_device="/dev/dri/renderD128")
+        self.assertEqual(cmd[cmd.index("-vaapi_device") + 1], "/dev/dri/renderD128")
+        self.assertLess(cmd.index("-vaapi_device"), cmd.index("-i"))         # a global option, before the input
+        self.assertEqual(cmd[cmd.index("-c:v") + 1], "h264_vaapi")
+        self.assertIn("format=bgr0,hwupload,scale_vaapi=format=nv12", cmd)
+        x = ffmpeg_cmd("ffmpeg", {"window_id": "0"}, self.d, "run1", encoder="vaapi", vaapi_device=None)
+        self.assertEqual(x[x.index("-c:v") + 1], "libx264")                  # no device: CPU
+        fast = ffmpeg_cmd("ffmpeg", {"window_id": "0"}, self.d, "run1", preset="ultrafast")
+        self.assertEqual(fast[fast.index("-preset") + 1], "ultrafast")
+        self.assertIsNone(find_vaapi_device(str(self.d / "nope")))
+        dev = self.d / "renderD128"
+        dev.touch()
+        self.assertEqual(find_vaapi_device(str(dev)), str(dev))
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("Xvfb") and sys.platform.startswith("linux"),
+                         "needs ffmpeg + Xvfb")
+    def test_vaapi_failure_falls_back_to_x264(self):
+        xvfb = subprocess.Popen(["Xvfb", ":98", "-screen", "0", "320x240x24"], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        try:
+            time.sleep(1)
+            bad = self.d / "renderD128"                                      # not a GPU: ffmpeg must fail
+            bad.write_text("x")
+            msgs = []
+            cap = VoyoWindowCapture("http://127.0.0.1:1", "", {"capture_encoder": "vaapi",
+                                                               "capture_vaapi_device": str(bad)},
+                                    self.d / "spool", lambda: {"window_id": "0", "display": ":98"}, log=msgs.append)
+            cap.on_reply({"instance": "abcd1234", "capture": True, "segment_seconds": 1, "fps": 10})
+            cap.step()
+            self.assertEqual(cap.used_encoder, "vaapi")
+            for _ in range(50):
+                if cap.proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+            cap.step()                                                       # notices the failure ...
+            cap.step()                                                       # ... and restarts on the CPU
+            self.assertTrue(cap.vaapi_failed)
+            self.assertEqual(cap.used_encoder, "x264")
+            self.assertIsNone(cap.proc.poll())
+            self.assertTrue(any("Quick Sync (vaapi) failed" in m for m in msgs))
+            cap.on_reply(None)
+            cap.step()
+        finally:
+            xvfb.terminate()
 
     def test_capture_client_follows_the_server(self):
         cap = VoyoWindowCapture("http://127.0.0.1:1", "", {}, self.d / "spool", lambda: None, log=lambda m: None)

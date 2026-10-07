@@ -32,11 +32,38 @@ from pathlib import Path
 from typing import Callable, Optional
 
 
+def find_vaapi_device(configured: str = "") -> Optional[str]:
+    """The render node of an Intel GPU (Quick Sync) for ffmpeg's h264_vaapi: the configured one, else
+    the /dev/dri/renderD* whose PCI vendor is Intel (0x8086) - a laptop's NVIDIA / nouveau node is
+    skipped. None when there is none (Windows, a VM / container without the GPU)."""
+    if configured:
+        return configured if Path(configured).exists() else None
+    nodes = sorted(Path("/dev/dri").glob("renderD*")) if Path("/dev/dri").is_dir() else []
+    unknown = []
+    for node in nodes:
+        try:
+            vendor = (Path("/sys/class/drm") / node.name / "device" / "vendor").read_text().strip().lower()
+        except OSError:
+            vendor = ""
+        if vendor == "0x8086":
+            return str(node)
+        if not vendor:
+            unknown.append(node)
+    # a container that was given only the Intel node may not see its sysfs entry: that one node
+    return str(unknown[0]) if len(unknown) == 1 else None
+
+
 def ffmpeg_cmd(ffmpeg: str, spec: dict, out_dir: Path, run: str, fps: int = 30, crf: int = 23,
-               segment_s: int = 60, audio: "str | dict" = "") -> list[str]:
+               segment_s: int = 60, audio: "str | dict" = "", encoder: str = "x264", preset: str = "veryfast",
+               vaapi_device: Optional[str] = None) -> list[str]:
     """ffmpeg command for one capture run of the window ``spec`` ({"title": ...} on Windows,
-    {"window_id": "0x..."} on X11) into fragmented-MP4 segments listed in <run>_list.csv."""
+    {"window_id": "0x..."} on X11) into fragmented-MP4 segments listed in <run>_list.csv.
+    ``encoder``: "x264" (CPU) or "vaapi" (Intel Quick Sync on ``vaapi_device`` - the GPU encodes and
+    converts the picture, the CPU only grabs it)."""
+    vaapi = encoder == "vaapi" and bool(vaapi_device)
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]          # stdin stays open: "q" stops it cleanly
+    if vaapi:
+        cmd += ["-vaapi_device", str(vaapi_device)]
     if spec.get("title"):
         cmd += ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "0", "-i", f"title={spec['title']}"]
     elif spec.get("window_id"):
@@ -49,9 +76,13 @@ def ffmpeg_cmd(ffmpeg: str, spec: dict, out_dir: Path, run: str, fps: int = 30, 
     elif audio:
         cmd += ["-f", "dshow", "-i", f"audio={audio}"]
     # a keyframe at every segment boundary: segments can only be cut there
-    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p",
-            "-force_key_frames", f"expr:gte(t,n_forced*{int(segment_s)})",
-            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]
+    keys = ["-force_key_frames", f"expr:gte(t,n_forced*{int(segment_s)})", "-g", str(int(fps) * int(segment_s))]
+    if vaapi:
+        cmd += ["-vf", "format=bgr0,hwupload,scale_vaapi=format=nv12", "-c:v", "h264_vaapi",
+                "-qp", str(crf), *keys]
+    else:
+        cmd += ["-c:v", "libx264", "-preset", str(preset or "veryfast"), "-crf", str(crf), "-pix_fmt", "yuv420p",
+                *keys, "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]
     if audio:
         cmd += ["-c:a", "aac", "-b:a", "160k"]
     cmd += ["-f", "segment", "-segment_time", str(segment_s), "-reset_timestamps", "1",
@@ -80,9 +111,13 @@ class VoyoWindowCapture:
         self.instance: Optional[str] = None
         self.run_id: Optional[str] = None
         self.run_start = 0.0
+        self.used_encoder = "x264"
         self._retry_at = 0.0
         self._said: set[str] = set()
         self.thread: Optional[threading.Thread] = None
+        # Intel Quick Sync: [voyo.recording] capture_encoder = "vaapi" (falls back to x264 if it fails)
+        self.encoder = str(self.rc.get("capture_encoder") or "x264").lower()
+        self.vaapi_failed = False
 
     def _once(self, key: str, text: str) -> None:
         if key not in self._said:
@@ -123,8 +158,13 @@ class VoyoWindowCapture:
         if self.proc is not None and (iid != self.instance or self.proc.poll() is not None):
             if self.proc.poll() is not None and iid == self.instance:
                 err = (self.proc.stderr.read() if self.proc.stderr else b"")[-400:].decode(errors="replace")
-                self.log(f"  VOYO capture: ffmpeg stopped ({self.proc.returncode}) {err.strip()} - retrying in 30 s")
-                self._retry_at = time.monotonic() + 30
+                if self.used_encoder == "vaapi" and time.time() - self.run_start < 20:
+                    self.vaapi_failed = True        # e.g. no permission on /dev/dri, driver missing
+                    self.log(f"  VOYO capture: Intel Quick Sync (vaapi) failed: {err.strip()} - recording with x264 "
+                             "(CPU) instead")
+                else:
+                    self.log(f"  VOYO capture: ffmpeg stopped ({self.proc.returncode}) {err.strip()} - retrying in 30 s")
+                    self._retry_at = time.monotonic() + 30
             self._stop_ffmpeg()
         if iid and self.proc is None and time.monotonic() >= self._retry_at:
             self._start_ffmpeg(iid, want)
@@ -144,17 +184,27 @@ class VoyoWindowCapture:
         out = self.spool / iid
         out.mkdir(parents=True, exist_ok=True)
         self.run_id = time.strftime("run%Y%m%d-%H%M%S")
+        enc, dev = "x264", None
+        if self.encoder == "vaapi" and not self.vaapi_failed:
+            dev = find_vaapi_device(str(self.rc.get("capture_vaapi_device") or ""))
+            if dev:
+                enc = "vaapi"
+            else:
+                self._once("novaapi", "  VOYO capture: capture_encoder = vaapi but no Intel GPU render node "
+                                      "(/dev/dri/renderD*) is available here - recording with x264 (CPU)")
+        self.used_encoder = enc
         cmd = ffmpeg_cmd(self.ffmpeg, spec, out, self.run_id, int(want.get("fps") or self.rc.get("capture_fps", 30)),
                          int(want.get("crf") or self.rc.get("capture_crf", 23)),
                          int(want.get("segment_seconds") or self.rc.get("capture_segment_seconds", 60)),
-                         spec.get("audio") or str(self.rc.get("capture_audio_device") or ""))
+                         spec.get("audio") or str(self.rc.get("capture_audio_device") or ""),
+                         encoder=enc, preset=str(self.rc.get("capture_preset") or "veryfast"), vaapi_device=dev)
         flags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
         self.run_start = time.time()
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                      creationflags=flags)
         self.instance = iid
-        self.log(f"  VOYO capture: recording the VOYO window for stream {iid} (opt-in window capture) -> "
-                 f"{self.server}")
+        self.log(f"  VOYO capture: recording the VOYO window for stream {iid} (opt-in window capture, "
+                 f"{'Intel Quick Sync ' + dev if enc == 'vaapi' else 'x264 CPU'}) -> {self.server}")
 
     def _stop_ffmpeg(self) -> None:
         p, self.proc = self.proc, None

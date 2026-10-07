@@ -38,6 +38,100 @@ Words used below:
 
 ---
 
+## P. Only if the server runs on Proxmox (e.g. the IdeaPad Y700): create the container first
+
+On a Proxmox host the F1 server runs in its own **LXC container** (Ubuntu 24.04), not directly on
+Proxmox. This chapter gets you from Proxmox to a container you can SSH into; **then do steps 1–15
+inside the container**. Where a step works differently in a container, it has a "Proxmox:" note.
+
+Why a container and not a VM:
+- less overhead (with only 2 cores free, every bit counts);
+- the **Intel GPU (Quick Sync)** can simply be shared with the container, so it encodes the
+  recording and the 2 cores stay free. The laptop's NVIDIA GeForce 940M (GM108) has **no video
+  encoder (NVENC)** and doesn't help here.
+
+All commands in this chapter run **on the Proxmox host** (`root@pve`), in its Shell or over SSH.
+
+### P.1 Proxmox version and the Intel GPU node
+
+```bash
+pveversion                      # must be pve-manager/8.1 or newer (device passthrough for containers)
+ls -l /dev/dri/by-path/
+```
+
+The line `pci-0000:00:02.0-render -> ../renderD12X` is the **Intel HD 530** (`00:02.0` is the Intel
+GPU in `lspci`). Note that `renderD12X` (e.g. `renderD128`). The other `renderD` belongs to the
+NVIDIA card; leave it alone.
+
+If `pveversion` is older than 8.1, run `apt update && apt full-upgrade -y` on the host and reboot.
+
+### P.2 Download the Ubuntu template and create the container
+
+```bash
+pveam update
+pveam available --section system | grep ubuntu-24.04      # e.g. ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+pveam download local <the ubuntu-24.04-standard file name from the line above>
+pvesm status                                              # storage names: usually local-lvm (or local / local-zfs)
+```
+
+Create the container. `120` is the container number (any free one), `local-lvm` the storage from
+`pvesm status`, and 16 GB its system disk (the recordings go to the USB disk, not here):
+
+```bash
+pct create 120 local:vztmpl/<the template file name> \
+  --hostname f1-server --cores 2 --memory 4096 --swap 2048 \
+  --rootfs local-lvm:16 --net0 name=eth0,bridge=vmbr0,ip=dhcp \
+  --unprivileged 1 --features nesting=1 --onboot 1 --password
+```
+
+It asks for a root password for the container; choose one.
+
+- `nesting=1` is needed: Chrome's sandbox uses it.
+- `--onboot 1` starts the container with Proxmox.
+
+### P.3 Give the container the Intel GPU
+
+```bash
+pct start 120
+pct exec 120 -- getent group render        # e.g. "render:x:993:" -> the number is <RENDER-GID>
+pct stop 120
+pct set 120 --dev0 /dev/dri/renderD12X,gid=<RENDER-GID>,mode=0660     # renderD12X from P.1
+pct start 120
+pct exec 120 -- ls -l /dev/dri/            # shows renderD12X with group "render"
+```
+
+(In the web UI this is *Container → Resources → Add → Device Passthrough*.)
+
+### P.4 An admin user in the container, SSH, and its IP
+
+```bash
+pct enter 120                    # you are now inside the container (prompt root@f1-server)
+adduser <ADMIN>                  # choose a user name + password
+usermod -aG sudo <ADMIN>
+apt update && apt install -y openssh-server && systemctl enable --now ssh
+ip -4 addr show eth0 | grep inet # the container's <SERVER-IP>
+exit                             # back to the Proxmox host
+```
+
+From now on, `<SERVER-IP>` is **the container's** address, not the Proxmox one. Continue with
+**step 1** (you can skip its first part and go straight to `ssh <ADMIN>@<SERVER-IP>` from your PC).
+
+Proxmox notes for the later steps:
+- **2.2 clock:** a container uses the **host's** clock. `timedatectl set-ntp` doesn't work inside
+  it; that's fine. Instead check that the host is synchronized: `chronyc tracking` on the Proxmox
+  host should show `Leap status: Normal`. Set the time zone inside the container with
+  `sudo timedatectl set-timezone Europe/Ljubljana`, or with `sudo ln -sf
+  /usr/share/zoneinfo/Europe/Ljubljana /etc/localtime` if that fails.
+- **2.3 fixed IP:** reserve the container's MAC address in your router (`pct config 120` on the
+  host shows `hwaddr=...`), or set it on the host:
+  `pct set 120 --net0 name=eth0,bridge=vmbr0,ip=<SERVER-IP>/24,gw=<ROUTER-IP>`.
+- **2.4 firewall:** `ufw` often can't be enabled inside an unprivileged container (iptables errors).
+  If `sudo ufw enable` fails, skip it. On a home network that's fine; or use Proxmox's own firewall
+  (*Container 120 → Firewall*) with rules for 22 and 8080.
+- **4 disk:** the USB disk is mounted on the **Proxmox host** and handed to the container (step 4.4).
+
+---
+
 ## 1. Sit at the server once: SSH
 
 If you can already log in to the server from your PC with `ssh`, skip to step 2.
@@ -128,8 +222,11 @@ The dashboard runs as its own user, `f1`, not as you. Nobody can log in as `f1`
 sudo useradd --system --create-home --home-dir /home/f1 --shell /usr/sbin/nologin f1
 sudo install -d -o f1 -g f1 -m 750 /var/lib/f1-dashboard     # its data: sign-ins, sync state, F1 recordings
 sudo install -d -o f1 -g f1 /opt/f1-dashboard                # the code goes here (step 6)
+for g in render video; do getent group $g >/dev/null && sudo usermod -aG $g f1; done   # the Intel GPU (Quick Sync)
 id f1
 ```
+
+Note the number after `uid=` (e.g. `uid=999(f1)`). The Proxmox disk step needs it.
 
 ---
 
@@ -204,7 +301,40 @@ sudo chown f1:f1 /mnt/f1disk
 sudo -u f1 touch /mnt/f1disk/.test && sudo -u f1 rm /mnt/f1disk/.test && echo "disk OK"
 ```
 
-It must print `disk OK`.
+It must print `disk OK`. Then mark the disk as **the** recording disk. The server only writes to
+`/mnt/f1disk` while this file is there, so an unplugged disk can never fill the system disk:
+
+```bash
+sudo -u f1 touch /mnt/f1disk/.f1disk
+```
+
+### 4.4 Proxmox: mount the disk on the host and give it to the container
+
+On Proxmox, **don't** do 4.1–4.3 in the container. Do them **on the Proxmox host** instead: plug the
+disk into the laptop, then run `lsblk`, format if you like (option A), `mkdir -p /mnt/f1disk`, add
+the fstab line, and `mount -a`. The host is Debian; the commands are the same, without `sudo`. Two
+things are different, because the container is "unprivileged": the container's user `f1` (uid
+`<UID>` from step 3, e.g. 999) is user **`100000 + <UID>`** (e.g. `100999`) on the host.
+
+- **ext4 (option A), on the host:** `chown 100999:100999 /mnt/f1disk` (use your number).
+- **NTFS / exFAT (option B), on the host:** use `uid=100999,gid=100999` in the fstab line instead
+  of `uid=f1,gid=f1`.
+
+Then, still on the host, mark the disk and give it to the container:
+
+```bash
+touch /mnt/f1disk/.f1disk && chown 100999:100999 /mnt/f1disk/.f1disk
+pct set 120 -mp0 /mnt/f1disk,mp=/mnt/f1disk,backup=0
+pct reboot 120
+```
+
+`backup=0` keeps Proxmox backups from copying the recordings. Inside the container, check with
+`ls -la /mnt/f1disk` (it must show `.f1disk`) and the write test from 4.3
+(`sudo -u f1 touch /mnt/f1disk/.test && sudo -u f1 rm /mnt/f1disk/.test && echo "disk OK"`).
+
+> Why `.f1disk` matters here: inside the container `/mnt/f1disk` always looks mounted, even when the
+> USB disk is unplugged from the host (then it is just the host's empty folder). The server checks
+> for `.f1disk` and writes nothing while it is missing.
 
 ---
 
@@ -393,6 +523,13 @@ sudo /opt/f1-dashboard/server/setup-voyo-player.sh
 At the end it must print a Chrome version and **`Widevine: ok`**. Widevine is the DRM module VOYO's
 player needs; Google Chrome has it.
 
+It also checks **Intel Quick Sync**. You want a line like `VAProfileH264Main : VAEntrypointEncSlice`;
+then the recording is encoded by the GPU (`capture_encoder = "vaapi"` in
+`server/config/server.toml`, already set). If it prints `not found with the default driver`, run
+`LIBVA_DRIVER_NAME=i965 vainfo | grep -i h264`. If that shows `EncSlice`, add
+`LIBVA_DRIVER_NAME=i965` to `server/.env`. Without Quick Sync, recording falls back to the CPU by
+itself; the log says so.
+
 ### 11.2 Sign in to VOYO (once)
 
 The player must not be running while you do this. It isn't installed yet, so the first time this is
@@ -532,6 +669,10 @@ recording are kept.
 | `VOYO stream recording DISABLED: no disk mounted at /mnt/f1disk` | `sudo mount -a`, `findmnt /mnt/f1disk` (step 4) |
 | `... is not writable` | `sudo chown f1:f1 /mnt/f1disk` (ext4), or `uid=f1,gid=f1` in fstab (NTFS/exFAT) |
 | `Widevine: NOT FOUND` | Google Chrome is missing: run `setup-voyo-player.sh` again |
+| Log: `Intel Quick Sync (vaapi) failed` / `no Intel GPU render node` | Proxmox step P.3 (`dev0`, the right `renderD`), `id f1` must list `render`, and `LIBVA_DRIVER_NAME=i965` (step 11.1) |
+| Recording stutters, `htop` at 100 % CPU | `resolution = "1280x720"` under `[voyo.server_player]` in `server/config/server.toml`, then `sudo systemctl restart f1-voyo-player` |
+| `... /mnt/f1disk/.f1disk is missing` | the disk isn't mounted (on the Proxmox host: `findmnt /mnt/f1disk`), or the marker is missing (step 4.3 / 4.4) |
+| Chrome: `No usable sandbox` (Proxmox) | `pct set 120 --features nesting=1` on the host, then `pct reboot 120` |
 | VOYO player: `no stream_url and no page learned yet` | step 11.2 |
 | VOYO player: `no video on the page yet ... signed in?` | VOYO signed you out: step 11.2 again |
 | Recording has no sound | `setup-voyo-player.sh` printed the PipeWire note: run `sudo apt install pulseaudio`, then restart `f1-voyo-player` |
@@ -546,10 +687,11 @@ and send them to me.
 
 ## Checklist
 
+- [ ] P (Proxmox only): container 120 with 2 cores / 4 GB, `nesting=1`, Intel `renderD` passed, disk `mp0`
 - [ ] 1: SSH from the PC works
 - [ ] 2: updates, `timedatectl` says synchronized, fixed IP, firewall (22 + 8080)
 - [ ] 3: user `f1`, `/var/lib/f1-dashboard` and `/opt/f1-dashboard` exist
-- [ ] 4: `findmnt /mnt/f1disk` shows the disk; the fstab line uses `nofail`; "disk OK"
+- [ ] 4: `findmnt /mnt/f1disk` shows the disk; the fstab line uses `nofail`; "disk OK"; `.f1disk` exists
 - [ ] 5: `ssh -T git@github.com` (as f1) greets `StNikadimus/F1Dash`
 - [ ] 6: code in `/opt/f1-dashboard`
 - [ ] 7: `server/.env` with the remote token (written down) and `F1DASH_DATA_DIR`

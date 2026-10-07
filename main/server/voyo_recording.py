@@ -109,6 +109,12 @@ def resolve_root(rc: dict, f1_recordings: Optional[Path] = None) -> tuple[Option
         if not os.path.ismount(mnt):
             return root, (f"no disk mounted at {mnt} (require_mount) - VOYO stream recording waits for it "
                           f"(checked again every {RECHECK_S:.0f} s; nothing is written to the system disk)")
+        marker = str(rc.get("mount_marker") or "").strip()
+        if marker and not (mnt / marker).exists():
+            # a container's bind mount of the host folder is "mounted" even when the host's disk is not:
+            # only the marker file on the disk itself proves it is the disk
+            return root, (f"{mnt} is mounted but {mnt / marker} is missing - not the recording disk (USB disk "
+                          f"not mounted on the host?). Waiting; nothing is written there")
     if f1_recordings is not None:
         f1 = Path(f1_recordings).resolve()
         if root == f1 or f1 in root.parents:
