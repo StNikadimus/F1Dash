@@ -287,9 +287,9 @@ journalctl -u f1-voyo-player -f
 Video retention uses the same `keep_<session>_days` as the other recordings. A race at 1080p30 is
 roughly 3–6 GB.
 
-## The recorder page: `http://<server-ip>:8080/disk`
+## The recorder page: `https://<server-ip>/disk`
 
-Open **http://`<server-ip>`:8080/disk** in a browser. It works on a laptop and on a phone, and uses
+Open **https://`<server-ip>`/disk** (or `http://<server-ip>:8080/disk`) in a browser. It works on a laptop and on a phone, and uses
 the same style as the dashboard. It shows:
 
 | Part | What it shows |
@@ -301,16 +301,17 @@ the same style as the dashboard. It shows:
 | **Recordings** | every recording: date, session, source (server / PC), length, video size, kept until, sync quality, status; click one to play its video segments in the browser (one after another), download segments or the data files, or delete only the video or the whole recording |
 | **Log** | what the server did in the last **48 hours**: recordings started / closed, the VOYO player opening / closing, disk problems, mode changes, settings changed, warnings and errors; entries older than 48 h are deleted from the file |
 
-- **Changing or deleting** (keep-video days, delete) and **playing / downloading video** need the
-  remote token (`F1DASH_REMOTE_TOKEN` in `server/.env`). Click **TOKEN** on the page and enter it
-  once; the browser remembers it.
+- **Password:** the whole page and every `/api/disk/...` call need a `/disk` login (see
+  **Security** below). The first visit asks you to create the password with a one-time setup code
+  from the server. Deleting, changing the password and the security actions ask for the password
+  again if you signed in more than 10 minutes ago. **LOG OUT** ends the session.
 - Keep-video days changed on the page are stored in `<data>/voyo_recording_settings.json` and
   override `server/config/server.toml`; the table marks them with **PAGE**. A shorter time deletes
   older video at once, after the page asks you to confirm.
 - The log is `<data>/logs/activity.jsonl`. It is fed by the dashboard server and the server VOYO
   player.
-- The page is served over **http** on port 8080, like the dashboard. For `https://<server-ip>/disk`
-  you would need a certificate and a reverse proxy, e.g. Caddy; tell me if you want that.
+- Use **https://`<server-ip>`/disk** (HTTPS, below): on plain http the password travels
+  unencrypted and the login page warns you.
 
 ## The VOYO account on `/disk`
 
@@ -327,7 +328,7 @@ does. Nothing of VOYO's stream or DRM is touched.
 - **Storage:** `<data>/auth/voyo_credentials.json` (file 600, folder 700, readable only by the `f1`
   user). The page and API never show the password; the e-mail is masked as `r***@gmail.com`.
   **FORGET** deletes both.
-- **Token:** saving needs the remote token.
+- **Login:** only a signed-in `/disk` session can see or change it.
 - **Use https:** on plain http the password travels unencrypted over your home network, and the
   page warns you. Use **https://`<server-ip>`/disk** (HTTPS, below).
 - **If VOYO asks for an extra check** (a code, a captcha), the automatic sign-in can't do it. The log
@@ -356,8 +357,10 @@ slot**. You don't need a PC or a VOYO window.
 - **Layouts:** **1** RACE VIEW (dashboard + video), **2** VIDEO (big video), **3** DASHBOARD only,
   **M** sound, **F** fullscreen. Move the mouse to see the buttons. Sound starts muted (browsers
   block autoplay with sound); click once.
-- **Token:** the stream needs the remote token, which `/tv` asks for once (in the page) and then
-  remembers. `/disk` shows ON AIR / OFF, how many are watching, and the lag.
+- **Approval:** a browser that opens `/tv` for the first time shows a code (e.g. `C6X-S6V`) and
+  waits. Your **trusted phone** (its `/remote` page) shows the same code with **APPROVE / DENY**.
+  After APPROVE that browser gets a `/tv` session for 30 days. See **Security** below. `/disk`
+  shows ON AIR / OFF, how many are watching, and the lag.
 - **Only on your home network:** don't forward the ports to the internet. Your VOYO subscription
   is for you; check VOYO's terms.
 - **Not done yet (next step):** the dashboard's data is synced to live time (SYNC) as on the PC, but
@@ -381,6 +384,66 @@ The server then answers on **https (port 443)** and on http (8080) as before. `s
   usable" and only http runs.
 - If the server's IP changes, run the script again.
 
+## Security: `/disk` password, trusted phone, `/tv` approval
+
+Everything is checked **by the server**, on every page, API call, video piece and WebSocket, not
+only in the HTML. Without a valid session the server answers `401`.
+
+**First run (once):**
+
+1. On the server: `sudo cat <data>/auth/disk-setup-code` (for systemd: `/var/lib/f1-dashboard/auth/disk-setup-code`;
+   the page shows the exact path). The file is readable only by the `f1` user and root. The code
+   is never written to the log.
+2. Open **https://`<server-ip>`/disk**, enter the code and create a password (at least 10
+   characters). The code file is deleted after that.
+3. On your phone open **http(s)://`<server-ip>`/remote**. The top bar shows **THIS DEVICE**, a name
+   and a short code (e.g. `VUT-XCP`); **RENAME** gives it a name you recognise.
+4. In `/disk` → **SECURITY** the connected `/remote` devices are listed with the same codes. Press
+   **USE FOR AUTH** on your phone. Its `/remote` now shows **TRUSTED (approves /tv)**.
+5. Open `/tv` on the TV and approve it on the phone.
+
+**How it works:**
+
+| | |
+|---|---|
+| `/disk` password | stored only as an **Argon2id** hash (`argon2-cffi`) in `<data>/auth/security.json` (600, folder 700); never logged, never sent to the browser |
+| `/disk` login | a random session in an HttpOnly cookie (`SameSite=Strict`, `Secure` on https), 12 h; changes need a CSRF token; 5 wrong passwords lock that address out for 5 min (30 for everybody per 10 min) |
+| `/remote` devices | each browser gets a random device id in an HttpOnly cookie (400 days), not the IP. *Connected* is not *trusted*: only the one device chosen in `/disk` is trusted |
+| `/tv` request | random id, expires after 2 min, max 6 per minute per address; only the trusted phone is told about it and only it (or a signed-in `/disk` on **another** browser) can approve. The TV can't approve itself |
+| `/tv` session | random, HttpOnly cookie, 30 days, can be revoked in `/disk` (**REVOKE**, **REVOKE ALL /TV**) |
+| WebSockets | refused from other sites (Origin check); the trusted device comes from its cookie, not from anything the page sends |
+| Other sites | POST/PUT/DELETE from another site are refused for the whole server (cross-site request forgery) |
+| Security log | `/disk` → LOG shows logins, failed logins, trust changes, approvals; passwords, hashes, tokens and cookies are never written |
+
+Only hashes of the session tokens are stored on the disk. Settings are in `[security]` of
+`main/config/config.toml` (session lengths, lockout, request time).
+
+**Forgot the `/disk` password:**
+
+```bash
+sudo ./server/reset-disk-password.sh          # removes the password and all /disk sessions
+sudo systemctl restart f1-dashboard           # makes a new setup code; then do step 1-2 again
+```
+
+The trusted phone and the `/tv` sessions stay. **Lost the phone:** sign in to `/disk`, press
+**REMOVE TRUST** (or **FORGET**) on it and **REVOKE ALL /TV**, then trust the new phone.
+
+**What is NOT protected / limits:**
+
+- The plain dashboard `/` and its data are still open to anyone on your network, as before (the
+  PC variant needs that). Set `[security] protect_dashboard = true` to require a `/tv` or `/disk`
+  session for it too.
+- `/remote` control itself still uses the remote token (`F1DASH_REMOTE_TOKEN`), as before.
+  The dashboard's phone-remote QR code includes that token only on the server itself or for a
+  signed-in `/tv` / `/disk` browser; elsewhere you add `?token=...` on the phone yourself.
+- Over plain **http** (port 8080) passwords and cookies travel unencrypted on your network. Use
+  https. The self-made certificate gives a browser warning the first time; check that you are on
+  your server's IP.
+- Whoever has your phone (unlocked) or copies its browser cookies can approve `/tv`.
+- A `/tv` request waiting for approval is lost when the server restarts (sessions are kept).
+- The HTML/JS files of the pages (`/disk-static`, `/tv-static`) are public, but contain no data.
+- Don't forward the ports to the internet.
+
 ## Where things are stored
 
 `$F1DASH_DATA_DIR` defaults to `<repo>/data`:
@@ -394,6 +457,7 @@ The server then answers on **https (port 443)** and on http (8080) as before. `s
 | VOYO e-mail / password (/disk) | `data/auth/voyo_credentials.json` (600) |
 | Live stream pieces (/tv) | `data/live/` (only the newest 8, ~10 MB) |
 | HTTPS certificate | `data/tls/cert.pem`, `key.pem` |
+| `/disk` password hash, trusted phone, sessions | `data/auth/security.json` (600); first-run code `data/auth/disk-setup-code` |
 | VOYO stream recordings | `[voyo.recording] path` (default `data/voyo_streams/`): one folder per stream instance + `index.json` |
 | Recordings | `data/recordings/*.jsonl.gz`, the F1 timing feed. They are recorded automatically in LIVE mode (`[live] record = true`) and replayed with `./server/launch.sh --replay [file]` |
 | Caches | `data/` (OpenF1 / archive caches, track maps) |

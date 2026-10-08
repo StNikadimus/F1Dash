@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>F1 Recorder · Sign in</title>
+<link rel="stylesheet" href="/disk-static/disk.css">
+<style>
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .box { width: min(460px, 94vw); }
+  .box .pad { padding: 18px; }
+  .big { font-size: 26px; font-weight: 900; letter-spacing: .04em; margin: 4px 0 10px; }
+  .err { color: var(--red); font-weight: 700; font-size: 14px; margin-top: 10px; min-height: 1.2em; }
+  code { font-family: var(--mono); color: var(--amber); font-size: 13px; overflow-wrap: anywhere; }
+  .https { color: var(--amber); font-size: 12px; font-weight: 700; margin-top: 12px; }
+</style>
+</head>
+<body>
+<section class="panel box">
+  <div class="panel-title">F1 SERVER · RECORDER</div>
+  <div class="pad">
+    <div id="loading" class="msg">…</div>
+
+    <!-- first time: the password can only be created with the one-time code from the server -->
+    <form id="setup" hidden autocomplete="off">
+      <div class="big">/DISK SETUP</div>
+      <div class="msg">Create the password for the recorder page. To prove you own the server, enter the one-time
+        setup code - on the server run:<br><code id="code-cmd"></code></div>
+      <label class="fld"><span>SETUP CODE</span><input id="s-code" autocomplete="off" spellcheck="false" placeholder="ABC-DEFGHJK"></label>
+      <label class="fld"><span>PASSWORD</span><input type="password" id="s-pw" autocomplete="new-password" minlength="10" placeholder="at least 10 characters"></label>
+      <label class="fld"><span>CONFIRM</span><input type="password" id="s-pw2" autocomplete="new-password" minlength="10"></label>
+      <div class="ret-actions"><button class="btn primary" type="submit">CREATE PASSWORD</button></div>
+      <div class="err" id="s-err"></div>
+    </form>
+
+    <form id="login" hidden>
+      <div class="big">/DISK LOGIN</div>
+      <label class="fld"><span>PASSWORD</span><input type="password" id="l-pw" autocomplete="current-password" autofocus></label>
+      <div class="ret-actions"><button class="btn primary" type="submit">LOGIN</button></div>
+      <div class="err" id="l-err"></div>
+    </form>
+    <div class="https" id="https" hidden>This page is plain http: the password travels unencrypted over your network.
+      Use https://&lt;server&gt;/disk (server/README.md "HTTPS").</div>
+  </div>
+</section>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+async function post(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), credentials: "same-origin" });
+  const b = await r.json().catch(() => ({}));
+  return { ok: r.ok, status: r.status, error: b.error };
+}
+(async () => {
+  const s = await (await fetch("/api/disk/auth/state", { cache: "no-store" })).json();
+  if (s.authenticated) { location.reload(); return; }
+  $("loading").hidden = true;
+  $("https").hidden = location.protocol !== "http:";
+  if (!s.password_set) {
+    $("setup").hidden = false;
+    $("code-cmd").textContent = "sudo cat " + (s.setup_code_file || "<data>/auth/disk-setup-code");
+    $("s-code").focus();
+  } else { $("login").hidden = false; $("l-pw").focus(); }
+})();
+$("setup").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if ($("s-pw").value !== $("s-pw2").value) { $("s-err").textContent = "the two passwords are not the same"; return; }
+  const r = await post("/api/disk/auth/setup", { code: $("s-code").value, password: $("s-pw").value, confirm: $("s-pw2").value });
+  $("s-pw").value = $("s-pw2").value = "";
+  if (r.ok) location.reload(); else $("s-err").textContent = r.error || "not created";
+});
+$("login").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const r = await post("/api/disk/auth/login", { password: $("l-pw").value });
+  $("l-pw").value = "";
+  if (r.ok) location.reload(); else $("l-err").textContent = r.error || "not signed in";
+});
+</script>
+</body>
+</html>

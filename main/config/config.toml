@@ -15,6 +15,20 @@ https_port = 0
 tls_cert = "data/tls/cert.pem"
 tls_key = "data/tls/key.pem"
 
+# ---------------------------------------------------------------------------
+# SECURITY (server-side; server/README.md "Security"): /disk needs its password (first set with the
+# one-time code in <data>/auth/disk-setup-code), /tv needs approval from the trusted /remote device
+# chosen in /disk. Sessions are HttpOnly cookies, stored only as hashes in <data>/auth/security.json.
+# ---------------------------------------------------------------------------
+[security]
+tv_session_days = 30        # an approved /tv browser stays signed in this long (revoke in /disk)
+disk_session_hours = 12     # /disk login lifetime
+reauth_minutes = 10         # destructive /disk actions (delete, trust a device ...) need the password this recently
+tv_request_seconds = 120    # an unanswered /tv request expires
+login_max_failures = 5      # wrong /disk passwords per address in 5 min, then ...
+lockout_minutes = 5         # ... that address waits this long
+protect_dashboard = false   # true: the plain dashboard "/" (+ its APIs / WebSocket) also needs a /tv or /disk session
+
 [source]
 # Mode at start - switchable at any time on the dashboard (MODE: AUTO / LIVE / VOD, no restart):
 # "auto"   - AUTO: LIVE while an F1 session is on (90 min before its start .. 60 min after its

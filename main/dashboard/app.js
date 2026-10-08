@@ -641,7 +641,9 @@
     box.innerHTML = (qr ? `<div class="qr">${qr}</div>` : "") +
       `<div><h3>PHONE REMOTE</h3><div class="url">${esc(u.split("?")[0])}</div>` +
       (alt.length ? `<div class="alt">${alt.map(esc).join("<br>")}${(phoneRemote.tailscale || []).length ? " (Tailscale)" : ""}</div>` : "") +
-      `<div class="note">Scan with the phone camera (same Wi-Fi). ${esc(phoneRemote.note || "")}</div></div>`;
+      `<div class="note">Scan with the phone camera (same Wi-Fi). ${esc(phoneRemote.note || "")}` +
+      (phoneRemote.token_hidden ? " The remote token is not shown on this screen: add ?token=&lt;your remote token&gt; to the address on the phone." : "") +
+      `</div></div>`;
   }
 
   function renderMode() {

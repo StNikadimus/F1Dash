@@ -63,6 +63,9 @@ class ServerChannelTest(unittest.TestCase):
             cfg["source"]["mode"] = "test"
             app = appmod.create_app(cfg)
             c = TestClient(app)
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from authhelp import disk_login
+            disk_login(c, self.d)                                # the recordings list is /disk-only
 
             def post(body):
                 body = {"paused": False, "playback_rate": 1.0, "timestamp_local": time.time(), **body}

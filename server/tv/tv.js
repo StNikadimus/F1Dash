@@ -4,8 +4,7 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const TOKEN_KEY = "f1dash-remote-token";
-let token = ""; try { token = localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { /* private window */ }
+// access: the approved /tv session (HttpOnly cookie set by the server after the trusted remote approved)
 let layout = "RACE_VIEW", hls = null, loaded = false, status = null, serverOffset = 0, playing = false, streamErr = "";
 try { layout = localStorage.getItem("f1tv-layout") || layout; } catch (e) { /* ignore */ }
 
@@ -50,10 +49,10 @@ function attach() {
   if (window.Hls && Hls.isSupported()) {
     hls = new Hls({
       liveSyncDurationCount: 3, maxLiveSyncPlaybackRate: 1.1, lowLatencyMode: false, backBufferLength: 30,
-      xhrSetup: (xhr) => { if (token) xhr.setRequestHeader("X-Remote-Token", token); },
+      xhrSetup: (xhr) => { xhr.withCredentials = true; },
     });
     hls.on(Hls.Events.ERROR, (_e, d) => {
-      if (d.response && d.response.code === 401) { askToken("the remote token was not accepted - enter it again"); return; }
+      if (d.response && d.response.code === 401) { location.reload(); return; }     // session ended -> request page
       if (d.fatal) {
         streamErr = /codec|buffer(Add|Append)/i.test(d.details || "") ? "this browser cannot decode the stream (H.264) - use Chrome, Edge, Firefox or Safari"
           : `stream error (${d.details || d.type}) - retrying`;
@@ -63,7 +62,7 @@ function attach() {
     hls.loadSource(LIVE_URL);
     hls.attachMedia(video);
   } else if (video.canPlayType("application/vnd.apple.mpegurl")) {          // Safari / iOS: native HLS
-    video.src = LIVE_URL + (token ? "?token=" + encodeURIComponent(token) : "");
+    video.src = LIVE_URL;
   } else {
     loaded = false; showOff("THIS BROWSER CANNOT PLAY THE STREAM", "use Chrome, Edge, Firefox or Safari", "warn");
     return;
@@ -82,32 +81,16 @@ function showOff(main, sub, cls) {
 }
 video.addEventListener("playing", () => { playing = true; streamErr = ""; $("offair").hidden = true; $("unmute").hidden = !video.muted; });
 for (const ev of ["waiting", "emptied", "error", "pause"]) video.addEventListener(ev, () => { playing = false; });
-// the token is asked for inside the page (a prompt() would block it - and a TV remote can't answer it)
-let needToken = false;
-function askToken(why) {
-  needToken = true;
-  detach();
-  showOff("TOKEN NEEDED", why || "enter the remote token once - this browser remembers it", "warn");
-  $("tokform").hidden = false;
-  $("tokin").value = token;
-}
-$("tokform").addEventListener("submit", (e) => {
-  e.preventDefault();
-  token = $("tokin").value.trim();
-  try { localStorage.setItem(TOKEN_KEY, token); } catch (err) { /* ignore */ }
-  needToken = false; $("tokform").hidden = true; poll();
-});
 
 /* ------------------------------------------------------------------ server status (every 3 s) */
 async function poll() {
   try {
     const r = await fetch("/api/tv/status", { cache: "no-store" });
+    if (r.status === 401) { location.reload(); return; }        // revoked / expired: the server shows the request page
     status = await r.json();
   } catch (e) { showOff("NO CONNECTION", "the F1 server is not reachable", "warn"); setCtl('<span class="off">● NO CONNECTION</span>'); return; }
   serverOffset = status.now * 1000 - Date.now();
   const lv = status.live || {}, st = status.state || {};
-  if (needToken) { setCtl('<span class="off">● TOKEN NEEDED</span>'); return; }
-  if (status.token_required && !token) { askToken("the live stream needs the remote token"); return; }
   if (lv.on_air) {
     attach();
     const sess = status.session ? [status.session.meeting, status.session.session_name].filter(Boolean).join(" · ") : "";
@@ -142,7 +125,11 @@ $("b-sound").addEventListener("click", toggleSound);
 $("unmute").addEventListener("click", toggleSound);
 function toggleFull() { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(() => {}); }
 $("b-full").addEventListener("click", toggleFull);
-$("b-tok").addEventListener("click", () => askToken(""));
+$("b-tok").addEventListener("click", async () => {
+  if (!confirm("Log this TV out? It will need approval again.")) return;
+  await fetch("/api/tv/logout", { method: "POST", credentials: "same-origin" }).catch(() => {});
+  location.reload();
+});
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT") return;
   const k = e.key.toLowerCase();

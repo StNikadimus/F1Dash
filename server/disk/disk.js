@@ -1,11 +1,10 @@
 /* F1 recorder / disk page - reads /api/disk/* of the dashboard server (main/server/app.py).
-   Changing settings, deleting and playing video need the remote token when one is set. */
+   Access: the server-side /disk session (HttpOnly cookie, set at login); every change also sends the
+   session's CSRF token (X-F1-CSRF). Destructive actions may ask for the password again (reauth). */
 "use strict";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const TOKEN_KEY = "f1dash-remote-token";
-let token = "";
-try { token = localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { /* private window */ }
+let CSRF = "";
 let status = null, recordings = [], recFilter = "all", logLevel = "INFO", openId = null, serverOffset = 0;
 const details = {};
 
@@ -30,29 +29,45 @@ function tile(k, v, note = "", cls = "") {
   return `<div class="tile ${cls}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>${note ? `<div class="note">${esc(note)}</div>` : ""}</div>`;
 }
 function kv(rows) { return rows.filter(Boolean).map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${v}</div>`).join(""); }
-const withToken = (url) => token ? url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token) : url;
+const withToken = (url) => url;              // files / video: the session cookie is sent by the browser
 
-async function api(path, opts = {}) {
+async function api(path, opts = {}, retried = false) {
   const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
-  if (token) headers["X-Remote-Token"] = token;
-  const r = await fetch(path, Object.assign({}, opts, { headers, cache: "no-store" }));
+  if (opts.method && opts.method !== "GET") headers["X-F1-CSRF"] = CSRF;
+  const r = await fetch(path, Object.assign({}, opts, { headers, cache: "no-store", credentials: "same-origin" }));
   let body = null; try { body = await r.json(); } catch (e) { /* not json */ }
-  if (r.status === 401) { askToken("This needs the remote token (F1DASH_REMOTE_TOKEN in server/.env)."); }
+  if (r.status === 401 && body && body.auth === "disk") { location.reload(); throw new Error("signed out"); }
+  if (r.status === 403 && body && body.error === "reauth_required" && !retried) {
+    if (await reauth()) return api(path, opts, true);
+    throw new Error("password needed for this");
+  }
   if (!r.ok) throw new Error((body && body.error) || `HTTP ${r.status}`);
   return body;
 }
-function askToken(why) {
-  const t = prompt((why ? why + "\n\n" : "") + "Remote token:", token);
-  if (t === null) return;
-  token = t.trim();
-  try { localStorage.setItem(TOKEN_KEY, token); } catch (e) { /* ignore */ }
-  renderTokenBtn();
+async function loadAuth() {
+  const r = await fetch("/api/disk/auth/state", { cache: "no-store" });
+  const s = await r.json();
+  if (!s.authenticated) { location.reload(); return; }
+  CSRF = s.csrf;
 }
-function renderTokenBtn() {
-  const b = $("tok-btn");
-  b.textContent = token ? "TOKEN ✓" : "TOKEN";
-  b.classList.toggle("primary", !!(status && status.token_required && !token));
+/* destructive actions: the server asks for the password again (reauth_minutes) */
+function reauth() {
+  return new Promise((resolve) => {
+    const d = $("reauth"); $("ra-pw").value = ""; $("ra-msg").textContent = "";
+    d.showModal(); $("ra-pw").focus();
+    const done = (v) => { d.close(); $("ra-form").onsubmit = null; $("ra-cancel").onclick = null; resolve(v); };
+    $("ra-cancel").onclick = () => done(false);
+    $("ra-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const r = await fetch("/api/disk/auth/reauth", { method: "POST", headers: { "Content-Type": "application/json", "X-F1-CSRF": CSRF },
+        body: JSON.stringify({ password: $("ra-pw").value }) });
+      const b = await r.json().catch(() => ({}));
+      $("ra-pw").value = "";
+      if (r.ok) done(true); else $("ra-msg").textContent = b.error || "wrong password";
+    };
+  });
 }
+function renderTokenBtn() { /* no token any more: the /disk session */ }
 
 /* ------------------------------------------------------------------ status: top bar, disk, now, retention */
 async function loadStatus() {
@@ -304,7 +319,6 @@ function openViewer(id, i) {
   const d = details[id], r = recordings.find((x) => x.stream_instance_id === id) || {};
   vSegs = r.video_bytes ? (d && d.capture || []).filter((c) => c.name) : []; vId = id;
   if (!vSegs.length) return;
-  if (!token && status && status.token_required) askToken("Playing video needs the remote token.");
   $("v-label").textContent = (r.channel === "server_player" ? "SERVER RECORDING" : "PC / TV RECORDING") + " · " + when(r.detected_at);
   $("v-title").textContent = [r.meeting, r.session_name].filter(Boolean).join(" · ") || r.title || id;
   $("viewer").showModal(); showSeg(i);
@@ -342,13 +356,67 @@ document.querySelectorAll("#log-filters .chip").forEach((b) => b.addEventListene
 }));
 
 /* ------------------------------------------------------------------ clock + polling */
-$("tok-btn").addEventListener("click", () => askToken(""));
+$("logout-btn").addEventListener("click", async () => {
+  try { await api("/api/disk/auth/logout", { method: "POST" }); } catch (e) { /* already out */ }
+  location.reload();
+});
 function tickClock() {
   const d = new Date(Date.now() + serverOffset);
   $("clock").textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 setInterval(tickClock, 1000); tickClock();
-loadStatus(); loadRecordings(); loadLog();
+/* ------------------------------------------------------------------ security: devices, /tv access, sessions */
+async function loadSecurity() {
+  let s; try { s = await api("/api/disk/security"); } catch (e) { return; }
+  const ago = (t) => t ? dur(Date.now() / 1000 - t) + " ago" : "–";
+  $("dev-list").innerHTML = s.devices.length ? s.devices.map((d) => `
+    <div class="dev ${d.trusted ? "trusted" : ""}">
+      <div class="dev-main"><span class="dot ${d.connected ? "on" : ""}"></span><b>${esc(d.name)}</b>
+        <span class="code">${esc(d.code)}</span>${d.trusted ? '<span class="badge closed">TRUSTED APPROVER</span>' : ""}
+        <div class="sub">${esc(d.device)} · ${d.connected ? "connected " + esc(ago(d.connected_since)) : "last seen " + esc(ago(d.last_seen))}</div></div>
+      <div class="dev-act">
+        ${d.trusted ? `<button class="btn" data-sec="untrust">REMOVE TRUST</button>`
+          : `<button class="btn primary" data-sec="trust" data-dev="${esc(d.id)}" ${d.connected ? "" : "disabled title='connect this device to /remote first'"}>USE FOR AUTH</button>`}
+        <button class="btn" data-sec="rename" data-dev="${esc(d.id)}">RENAME</button>
+        <button class="btn danger" data-sec="forget" data-dev="${esc(d.id)}">FORGET</button>
+      </div></div>`).join("") : '<div class="msg">No device has opened /remote yet.</div>';
+  $("req-list").innerHTML = s.requests.length ? s.requests.map((r) => `
+    <div class="dev"><div class="dev-main"><b>${esc(r.device)}</b> <span class="code">${esc(r.code)}</span>
+      <div class="sub">wants /tv · expires in ${esc(r.expires_in)} s</div></div>
+      <div class="dev-act"><button class="btn primary" data-sec="decide" data-req="${esc(r.id)}" data-ok="1">APPROVE</button>
+      <button class="btn danger" data-sec="decide" data-req="${esc(r.id)}" data-ok="0">DENY</button></div></div>`).join("")
+    : '<div class="msg">No /tv request waiting.</div>';
+  $("tvs-list").innerHTML = s.tv_sessions.length ? s.tv_sessions.map((t) => `
+    <div class="dev"><div class="dev-main"><b>${esc(t.device)}</b>
+      <div class="sub">approved ${esc(ago(t.created))}${t.approved_by ? " by " + esc(t.approved_by) : ""} · last used ${esc(ago(t.last_seen))} · until ${esc(when(new Date(t.expires * 1000).toISOString()))}</div></div>
+      <div class="dev-act"><button class="btn danger" data-sec="revoke_tv" data-sid="${esc(t.id)}">REVOKE</button></div></div>`).join("")
+    : '<div class="msg">No browser has /tv access.</div>';
+  $("sec-hint").textContent = `${s.devices.filter((d) => d.connected).length} remote connected · ${s.tv_sessions.length} TV · ${s.disk_sessions} /disk session(s)`;
+}
+$("p-sec").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-sec]"); if (!b) return;
+  const a = b.dataset.sec, body = {};
+  if (b.dataset.dev) body.device = b.dataset.dev;
+  if (a === "rename") { const n = prompt("Name for this device:"); if (!n) return; body.name = n; }
+  if (a === "forget" && !confirm("Forget this device? It becomes a new, untrusted device the next time it opens /remote.")) return;
+  if (a === "revoke_all_tv" && !confirm("End /tv access for every browser?")) return;
+  if (a === "decide") { body.request = b.dataset.req; body.approve = b.dataset.ok === "1"; }
+  if (a === "revoke_tv") body.session = b.dataset.sid;
+  try { await api(`/api/disk/security/${a}`, { method: "POST", body: JSON.stringify(body) }); $("sec-msg").textContent = "done"; }
+  catch (err) { $("sec-msg").textContent = "not done: " + err.message; }
+  loadSecurity();
+});
+$("pw-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/disk/auth/password", { method: "POST", body: JSON.stringify({ current: $("pw-cur").value, password: $("pw-new").value, confirm: $("pw-new2").value }) });
+    $("pw-msg").textContent = "password changed - every other /disk session was signed out"; await loadAuth();
+  } catch (err) { $("pw-msg").textContent = "not changed: " + err.message; }
+  ["pw-cur", "pw-new", "pw-new2"].forEach((i) => { $(i).value = ""; });
+});
+
+loadAuth().then(() => { loadStatus(); loadRecordings(); loadLog(); loadSecurity(); });
+setInterval(loadSecurity, 5000);
 setInterval(loadStatus, 3000);
 setInterval(() => { if (!openId || !document.querySelector("#rec-table tr.detail")) loadRecordings(); }, 15000);
 setInterval(loadLog, 5000);
