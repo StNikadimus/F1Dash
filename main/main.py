@@ -123,8 +123,41 @@ def main() -> None:
     logging.getLogger("main").info("Dashboard: http://%s:%d/  (mode: %s)",
                                    "localhost" if host in ("0.0.0.0", "::") else host, port,
                                    cfg["source"]["mode"].upper())
-    uvicorn.run(app, host=host, port=port, log_level=level.lower(), access_log=False,
-                ws_max_size=64 * 1024, proxy_headers=False)
+    common = dict(log_level=level.lower(), access_log=False, ws_max_size=64 * 1024, proxy_headers=False)
+    https_port = int(cfg["server"].get("https_port") or 0)
+    if https_port:
+        from server.config import resolve_path
+        cert = resolve_path(str(cfg["server"].get("tls_cert") or "data/tls/cert.pem"))
+        key = resolve_path(str(cfg["server"].get("tls_key") or "data/tls/key.pem"))
+        bind_err = None
+        if cert.is_file() and key.is_file():
+            import socket
+            try:                                    # port 443 needs root / CAP_NET_BIND_SERVICE (systemd unit)
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind((host if host not in ("", "::") else "0.0.0.0", https_port))
+            except OSError as exc:
+                bind_err = exc
+        if bind_err is not None:
+            logging.getLogger("main").warning("HTTPS port %d not usable (%s) - http only on %d. Under systemd the "
+                                              "unit allows it (AmbientCapabilities).", https_port, bind_err, port)
+        elif cert.is_file() and key.is_file():
+            # http (port) + https (https_port) from one process: the second server shares the app and
+            # skips its start-up / shut-down (the lifespan runs once)
+            import asyncio
+            logging.getLogger("main").info("HTTPS: https://<server>%s/  (certificate %s)",
+                                           "" if https_port == 443 else f":{https_port}", cert)
+            servers = [uvicorn.Server(uvicorn.Config(app, host=host, port=port, **common)),
+                       uvicorn.Server(uvicorn.Config(app, host=host, port=https_port, lifespan="off",
+                                                     ssl_certfile=str(cert), ssl_keyfile=str(key), **common))]
+
+            async def serve_both():
+                await asyncio.gather(*(s.serve() for s in servers))
+            asyncio.run(serve_both())
+            return
+        logging.getLogger("main").warning("HTTPS port %d configured but no certificate at %s - http only "
+                                          "(create one: server/make-https-cert.sh)", https_port, cert)
+    uvicorn.run(app, host=host, port=port, **common)
 
 
 if __name__ == "__main__":

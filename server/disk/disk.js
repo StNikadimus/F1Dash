@@ -62,6 +62,7 @@ async function loadStatus() {
   const st = status.state;
   setState(st.state, st.detail, st.level);
   renderDisk(status.disk); renderNow(st, status.player); renderRetention(status.retention, status.config);
+  renderVoyo(status.voyo); renderLive(status.live);
   renderTokenBtn();
 }
 function setState(main, sub, level) {
@@ -151,6 +152,60 @@ $("ret-save").addEventListener("click", async () => {
     loadStatus(); loadRecordings(true);
   } catch (e) { $("ret-msg").textContent = "not saved: " + e.message; }
 });
+
+/* ------------------------------------------------------------------ VOYO account */
+function renderVoyo(v) {
+  if (!v) return;
+  const l = v.last_login;
+  $("voyo-kv").innerHTML = kv([
+    ["E-MAIL", v.email_set ? esc(v.email) : '<span class="warn-t">not saved</span>'],
+    ["PASSWORD", v.password_set ? '<span class="ok-t">saved</span> (never shown)' : '<span class="warn-t">not saved</span>'],
+    ["STREAM PAGE", v.stream_url ? `${esc(v.stream_url)} <span class="sub">(${esc(v.stream_url_source)})</span>` +
+      (v.stream_url_warning ? ` <span class="warn-t">${esc(v.stream_url_warning)}</span>` : "") : '<span class="warn-t">not set</span>'],
+    ["LAST LOGIN", l ? `<span class="${l.ok ? "ok-t" : "bad-t"}">${esc(l.result)}</span> · ${esc(when(new Date(l.at * 1000).toISOString()))}`
+      : (v.pending && v.pending.length ? "requested - waiting for the player" : "–")],
+  ]);
+  const u = $("voyo-url");
+  if (document.activeElement !== u && !u.dataset.touched) u.value = v.stream_url || "";
+}
+$("voyo-url").addEventListener("input", () => { $("voyo-url").dataset.touched = "1"; });
+$("voyo-http").hidden = location.protocol !== "http:";
+$("voyo-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = {}, em = $("voyo-email").value.trim(), pw = $("voyo-pass").value, url = $("voyo-url").value.trim();
+  if (em) body.email = em;
+  if (pw) body.password = pw;
+  if ($("voyo-url").dataset.touched) body.stream_url = url;
+  if (!Object.keys(body).length) { $("voyo-msg").textContent = "nothing to save"; return; }
+  if (pw && location.protocol === "http:" && !confirm("This page is plain http - the password is sent unencrypted over your network. Save anyway?")) return;
+  try {
+    const r = await api("/api/disk/voyo", { method: "POST", body: JSON.stringify(body) });
+    $("voyo-pass").value = ""; $("voyo-email").value = ""; delete $("voyo-url").dataset.touched;
+    $("voyo-msg").textContent = "saved: " + (r.changed.join(", ") || "nothing"); renderVoyo(r.account);
+  } catch (err) { $("voyo-msg").textContent = "not saved: " + err.message; }
+});
+$("voyo-login").addEventListener("click", async () => {
+  try { const r = await api("/api/disk/voyo/login", { method: "POST" }); $("voyo-msg").textContent = r.message; }
+  catch (err) { $("voyo-msg").textContent = "not started: " + err.message; }
+});
+$("voyo-forget").addEventListener("click", async () => {
+  if (!confirm("Delete the saved VOYO e-mail and password from the server?")) return;
+  try { const r = await api("/api/disk/voyo/forget", { method: "POST" }); $("voyo-msg").textContent = "deleted"; renderVoyo(r.account); }
+  catch (err) { $("voyo-msg").textContent = "not deleted: " + err.message; }
+});
+
+/* ------------------------------------------------------------------ live / tv */
+function renderLive(lv) {
+  if (!lv) { $("live-tiles").innerHTML = ""; $("live-kv").innerHTML = kv([["LIVE", "–"]]); return; }
+  $("live-tiles").innerHTML =
+    tile("LIVE STREAM", lv.on_air ? "ON AIR" : "OFF", lv.on_air ? `${lv.segments} segments ready` : "only while the server records", lv.on_air ? "good" : "") +
+    tile("WATCHING", String(lv.viewers || 0), lv.viewers ? "on /tv now" : "nobody") +
+    tile("LAG", lv.lag_s != null ? lv.lag_s + " s" : "–", "newest segment behind real time");
+  $("live-kv").innerHTML = kv([
+    ["TV PAGE", `<a href="/tv" target="_blank">${esc(location.origin)}/tv</a> - stream + dashboard on one page`],
+    ["HOW", "the server's VOYO recording, re-sent while it records (HLS, 2 s pieces); nobody connected = nothing sent"],
+  ]);
+}
 
 /* ------------------------------------------------------------------ recordings */
 async function loadRecordings(fresh) {

@@ -312,6 +312,75 @@ the same style as the dashboard. It shows:
 - The page is served over **http** on port 8080, like the dashboard. For `https://<server-ip>/disk`
   you would need a certificate and a reverse proxy, e.g. Caddy; tell me if you want that.
 
+## The VOYO account on `/disk`
+
+In the **VOYO ACCOUNT** panel of `/disk` you enter your VOYO e-mail, password and the **F1 stream
+page** (the address you watch F1 on). The server VOYO player then signs in by itself:
+
+- when VOYO shows its sign-in form or "Prijava" button (e.g. after VOYO signed it out; at most once
+  every 10 min);
+- when you press **LOGIN NOW**. It takes about 15 s; the result shows on the page and in the log.
+
+It types the e-mail and password into VOYO's own sign-in form, the same way a password manager
+does. Nothing of VOYO's stream or DRM is touched.
+
+- **Storage:** `<data>/auth/voyo_credentials.json` (file 600, folder 700, readable only by the `f1`
+  user). The page and API never show the password; the e-mail is masked as `r***@gmail.com`.
+  **FORGET** deletes both.
+- **Token:** saving needs the remote token.
+- **Use https:** on plain http the password travels unencrypted over your home network, and the
+  page warns you. Use **https://`<server-ip>`/disk** (HTTPS, below).
+- **If VOYO asks for an extra check** (a code, a captcha), the automatic sign-in can't do it. The log
+  says so; sign in once by hand with `voyo-player.sh login` (VNC).
+- **Not tested on the real site yet:** the automatic sign-in was tested against a page built like a
+  normal sign-in form, not against voyo.si itself. If it doesn't find VOYO's form, send me the log
+  line `VOYO login FAILED: ...`.
+
+## `/tv`: the stream and the dashboard on one page
+
+Open **https://`<server-ip>`/tv** (or `http://<server-ip>:8080/tv`) on the TV, a laptop or a phone.
+It shows the dashboard in full, and **the server's live VOYO stream inside the dashboard's video
+slot**. You don't need a PC or a VOYO window.
+
+- **How it works:** while the server VOYO player records a session, ffmpeg's *tee* sends the same
+  encoded picture to two places, with no second encode:
+  - the recording on the disk;
+  - a live HLS stream in 2-second pieces, the newest 8 kept, in `<data>/live/`, each piece marked
+    with its capture time.
+
+  `/tv` plays that stream with hls.js (bundled in `server/tv/vendor/`, so no internet is needed).
+  It is about 6–10 s behind the server's VOYO picture. When nobody watches, nothing is sent; the
+  pieces are just replaced on the server.
+- **When nothing is being recorded:** `/tv` shows "NO LIVE STREAM · next: <GP> <session> - the
+  stream starts in …", and the dashboard still works.
+- **Layouts:** **1** RACE VIEW (dashboard + video), **2** VIDEO (big video), **3** DASHBOARD only,
+  **M** sound, **F** fullscreen. Move the mouse to see the buttons. Sound starts muted (browsers
+  block autoplay with sound); click once.
+- **Token:** the stream needs the remote token, which `/tv` asks for once (in the page) and then
+  remembers. `/disk` shows ON AIR / OFF, how many are watching, and the lag.
+- **Only on your home network:** don't forward the ports to the internet. Your VOYO subscription
+  is for you; check VOYO's terms.
+- **Not done yet (next step):** the dashboard's data is synced to live time (SYNC) as on the PC, but
+  not yet to this stream's extra few seconds of delay. The stream's pieces carry the capture time,
+  and that is what will be used for it.
+
+## HTTPS: `https://<server-ip>/tv` and `/disk`
+
+```bash
+sudo ./server/make-https-cert.sh             # self-signed certificate for this server's IP (10 years)
+sudo ufw allow 443/tcp
+sudo systemctl restart f1-dashboard
+```
+
+The server then answers on **https (port 443)** and on http (8080) as before. `server.toml` sets
+`https_port = 443`, and the systemd unit may use port 443 (`AmbientCapabilities`).
+
+- The first time, the browser warns that the certificate isn't trusted (it is self-made). Click
+  *Advanced → Proceed / Continue*; after that the connection is encrypted.
+- Started by hand (not by systemd), port 443 isn't allowed. The log says "HTTPS port 443 not
+  usable" and only http runs.
+- If the server's IP changes, run the script again.
+
 ## Where things are stored
 
 `$F1DASH_DATA_DIR` defaults to `<repo>/data`:
@@ -322,6 +391,9 @@ the same style as the dashboard. It shows:
 | F1 TV sign-in | `data/auth/f1tv_auth.json` (never commit it; git-ignored) |
 | Sync state | `data/sync_calibration.json`, which holds per-video calibrations, sessions, Event Sync points, MARK STREAM START, and the `autosync` section (stream instances, learned live latency) |
 | Activity log (the /disk page, 48 h) | `data/logs/activity.jsonl` |
+| VOYO e-mail / password (/disk) | `data/auth/voyo_credentials.json` (600) |
+| Live stream pieces (/tv) | `data/live/` (only the newest 8, ~10 MB) |
+| HTTPS certificate | `data/tls/cert.pem`, `key.pem` |
 | VOYO stream recordings | `[voyo.recording] path` (default `data/voyo_streams/`): one folder per stream instance + `index.json` |
 | Recordings | `data/recordings/*.jsonl.gz`, the F1 timing feed. They are recorded automatically in LIVE mode (`[live] record = true`) and replayed with `./server/launch.sh --replay [file]` |
 | Caches | `data/` (OpenF1 / archive caches, track maps) |

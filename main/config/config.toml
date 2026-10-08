@@ -10,6 +10,10 @@
 host = "0.0.0.0"
 port = 8080
 log_level = "INFO"          # DEBUG, INFO, WARNING, ERROR
+# HTTPS as well (https://<server>/tv, /disk): port + certificate (server/make-https-cert.sh). 0 = http only.
+https_port = 0
+tls_cert = "data/tls/cert.pem"
+tls_key = "data/tls/key.pem"
 
 [source]
 # Mode at start - switchable at any time on the dashboard (MODE: AUTO / LIVE / VOD, no restart):
@@ -376,6 +380,7 @@ cdp_port = 9224                 # Chrome's local DevTools port (127.0.0.1 only) 
 profile = "data/browser-profiles/voyo-server"
 audio = true                    # PulseAudio null sink "f1voyo" (needs pulseaudio); false = video only
 vnc_port = 5900                 # "login": x11vnc on 127.0.0.1 only - reach it through an SSH tunnel
+live_stream = true              # while recording, also a live stream (HLS) for http(s)://<server>/tv - same encode
 
 # ---------------------------------------------------------------------------
 # VOYO video <-> F1 data synchronisation. See README "VOYO sync".

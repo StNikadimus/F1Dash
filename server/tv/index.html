@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1 TV</title>
+<link rel="stylesheet" href="/tv-static/tv.css">
+</head>
+<body>
+<!-- the dashboard (its own page, layout forced for this window only) -->
+<iframe id="dash" src="/?layout=RACE_VIEW" title="F1 dashboard"></iframe>
+
+<!-- the server's live VOYO stream, laid over the dashboard's video slot -->
+<div id="vbox">
+  <video id="live" playsinline muted autoplay></video>
+  <div id="offair">
+    <div class="oa-main" id="oa-main">NO LIVE STREAM</div>
+    <div class="oa-sub" id="oa-sub">connecting to the server…</div>
+    <form id="tokform" hidden>
+      <input type="password" id="tokin" placeholder="remote token (F1DASH_REMOTE_TOKEN)" autocomplete="off">
+      <button type="submit">OK</button>
+    </form>
+  </div>
+  <button id="unmute" hidden>🔇 CLICK FOR SOUND</button>
+</div>
+
+<!-- controls (show on mouse move / key, hide after a few seconds) -->
+<div id="ctl">
+  <div class="ctl-group" id="layouts">
+    <button data-l="RACE_VIEW" class="sel">RACE VIEW <kbd>1</kbd></button>
+    <button data-l="VIDEO_FOCUS">VIDEO <kbd>2</kbd></button>
+    <button data-l="FULL_DASHBOARD">DASHBOARD <kbd>3</kbd></button>
+  </div>
+  <div class="ctl-group">
+    <button id="b-sound">SOUND <kbd>M</kbd></button>
+    <button id="b-full">FULLSCREEN <kbd>F</kbd></button>
+    <button id="b-tok">TOKEN</button>
+    <a href="/disk" target="_blank" class="btn">RECORDER</a>
+  </div>
+  <div class="ctl-status" id="ctl-status">…</div>
+</div>
+
+<script src="/tv-static/vendor/hls.light.min.js"></script>
+<script src="/tv-static/tv.js"></script>
+</body>
+</html>

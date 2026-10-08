@@ -55,11 +55,13 @@ def find_vaapi_device(configured: str = "") -> Optional[str]:
 
 def ffmpeg_cmd(ffmpeg: str, spec: dict, out_dir: Path, run: str, fps: int = 30, crf: int = 23,
                segment_s: int = 60, audio: "str | dict" = "", encoder: str = "x264", preset: str = "veryfast",
-               vaapi_device: Optional[str] = None) -> list[str]:
+               vaapi_device: Optional[str] = None, live_dir: Optional[Path] = None) -> list[str]:
     """ffmpeg command for one capture run of the window ``spec`` ({"title": ...} on Windows,
     {"window_id": "0x..."} on X11) into fragmented-MP4 segments listed in <run>_list.csv.
     ``encoder``: "x264" (CPU) or "vaapi" (Intel Quick Sync on ``vaapi_device`` - the GPU encodes and
-    converts the picture, the CPU only grabs it)."""
+    converts the picture, the CPU only grabs it). ``live_dir``: the same encoded picture also goes out as a
+    live HLS stream (2 s pieces, the newest 8 kept, each with its capture time) - ffmpeg's tee, no second
+    encode - for the /tv page."""
     vaapi = encoder == "vaapi" and bool(vaapi_device)
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]          # stdin stays open: "q" stops it cleanly
     if vaapi:
@@ -75,8 +77,10 @@ def ffmpeg_cmd(ffmpeg: str, spec: dict, out_dir: Path, run: str, fps: int = 30, 
         cmd += ["-thread_queue_size", "1024", "-f", "pulse", "-i", str(audio.get("device") or "default")]
     elif audio:
         cmd += ["-f", "dshow", "-i", f"audio={audio}"]
-    # a keyframe at every segment boundary: segments can only be cut there
-    keys = ["-force_key_frames", f"expr:gte(t,n_forced*{int(segment_s)})", "-g", str(int(fps) * int(segment_s))]
+    # a keyframe at every segment boundary: segments can only be cut there (live: every 2 s, the HLS pieces;
+    # the recording's segment_s is then a multiple of 2)
+    kf = 2 if live_dir is not None else int(segment_s)
+    keys = ["-force_key_frames", f"expr:gte(t,n_forced*{kf})", "-g", str(int(fps) * kf)]
     if vaapi:
         cmd += ["-vf", "format=bgr0,hwupload,scale_vaapi=format=nv12", "-c:v", "h264_vaapi",
                 "-qp", str(crf), *keys]
@@ -85,17 +89,28 @@ def ffmpeg_cmd(ffmpeg: str, spec: dict, out_dir: Path, run: str, fps: int = 30, 
                 *keys, "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]
     if audio:
         cmd += ["-c:a", "aac", "-b:a", "160k"]
-    cmd += ["-f", "segment", "-segment_time", str(segment_s), "-reset_timestamps", "1",
-            "-segment_list", str(out_dir / f"{run}_list.csv"), "-segment_list_type", "csv",
-            "-segment_format", "mp4",
-            "-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof",
-            str(out_dir / f"{run}_seg_%05d.mp4")]
+    if live_dir is None:
+        cmd += ["-f", "segment", "-segment_time", str(segment_s), "-reset_timestamps", "1",
+                "-segment_list", str(out_dir / f"{run}_list.csv"), "-segment_list_type", "csv",
+                "-segment_format", "mp4",
+                "-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof",
+                str(out_dir / f"{run}_seg_%05d.mp4")]
+        return cmd
+    seg_s = max(2, int(segment_s) // 2 * 2)
+    rec = (f"[f=segment:segment_time={seg_s}:reset_timestamps=1:segment_list={out_dir / f'{run}_list.csv'}:"
+           f"segment_list_type=csv:segment_format=mp4:"
+           f"segment_format_options=movflags=+frag_keyframe+empty_moov+default_base_moof]{out_dir / f'{run}_seg_%05d.mp4'}")
+    live = (f"[f=hls:hls_time=2:hls_list_size=8:hls_flags=delete_segments+program_date_time+independent_segments"
+            f"+temp_file:hls_segment_filename={Path(live_dir) / 'live_%05d.ts'}]{Path(live_dir) / 'index.m3u8'}")
+    cmd += ["-map", "0:v"] + (["-map", "1:a"] if audio else []) + ["-flags", "+global_header",
+                                                                  "-f", "tee", f"{rec}|{live}"]
     return cmd
 
 
 class VoyoWindowCapture:
     def __init__(self, server: str, token: str, rc: dict, spool: Path,
-                 window: Callable[[], Optional[dict]], log: Callable[[str], None] = print) -> None:
+                 window: Callable[[], Optional[dict]], log: Callable[[str], None] = print,
+                 live_dir: Optional[Path] = None) -> None:
         self.server = server.rstrip("/").replace("://localhost", "://127.0.0.1")
         self.token = token
         self.rc = rc or {}
@@ -117,6 +132,7 @@ class VoyoWindowCapture:
         self.thread: Optional[threading.Thread] = None
         # Intel Quick Sync: [voyo.recording] capture_encoder = "vaapi" (falls back to x264 if it fails)
         self.encoder = str(self.rc.get("capture_encoder") or "x264").lower()
+        self.live_dir = live_dir                       # server VOYO player: also a live HLS stream (/tv)
         self.vaapi_failed = False
 
     def _once(self, key: str, text: str) -> None:
@@ -197,7 +213,8 @@ class VoyoWindowCapture:
                          int(want.get("crf") or self.rc.get("capture_crf", 23)),
                          int(want.get("segment_seconds") or self.rc.get("capture_segment_seconds", 60)),
                          spec.get("audio") or str(self.rc.get("capture_audio_device") or ""),
-                         encoder=enc, preset=str(self.rc.get("capture_preset") or "veryfast"), vaapi_device=dev)
+                         encoder=enc, preset=str(self.rc.get("capture_preset") or "veryfast"), vaapi_device=dev,
+                         live_dir=self._live_reset())
         flags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
         self.run_start = time.time()
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -205,6 +222,16 @@ class VoyoWindowCapture:
         self.instance = iid
         self.log(f"  VOYO capture: recording the VOYO window for stream {iid} (opt-in window capture, "
                  f"{'Intel Quick Sync ' + dev if enc == 'vaapi' else 'x264 CPU'}) -> {self.server}")
+
+    def _live_reset(self) -> Optional[Path]:
+        """An empty live folder for a new run (the /tv page sees "off air" until the first piece)."""
+        if self.live_dir is None:
+            return None
+        self.live_dir.mkdir(parents=True, exist_ok=True)
+        for f in self.live_dir.iterdir():
+            if f.is_file() and (f.suffix in (".ts", ".m3u8", ".tmp") or f.name.endswith(".m3u8.tmp")):
+                f.unlink(missing_ok=True)
+        return self.live_dir
 
     def _stop_ffmpeg(self) -> None:
         p, self.proc = self.proc, None
@@ -221,6 +248,8 @@ class VoyoWindowCapture:
                     p.wait(5)
                 except subprocess.TimeoutExpired:
                     p.kill()
+        if self.live_dir is not None:
+            (self.live_dir / "index.m3u8").unlink(missing_ok=True)      # off air
         self.log(f"  VOYO capture: stopped for stream {self.instance}")
 
     # ------------------------------------------------------------------ upload
