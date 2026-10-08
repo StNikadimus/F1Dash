@@ -494,8 +494,33 @@ sudo systemctl restart f1-dashboard
 From now on **https://`<SERVER-IP>`/disk** and **https://`<SERVER-IP>`/tv** work. The first time,
 the browser warns about the self-made certificate: click *Advanced → Continue*.
 
-The recorder page is at **http://`<SERVER-IP>`:8080/disk**. It shows the disk, what the server is
+The recorder page is at **https://`<SERVER-IP>`/disk**. It shows the disk, what the server is
 doing now (REST / RECORDING / ...), the recordings and the last 48 hours of log.
+
+**Create the `/disk` password (once).** The first visit to `/disk` asks for a one-time setup code,
+so that only someone with access to the server can create the password:
+
+```bash
+sudo cat /var/lib/f1-dashboard/auth/disk-setup-code
+```
+
+Type that code and a password of at least 10 characters into the page (use **https**, so the
+password is encrypted). The password is stored only as an Argon2id hash; the code file is deleted.
+
+**Choose your phone as the approver for `/tv` (once).**
+
+1. On the phone open **https://`<SERVER-IP>`/remote** (or `http://<SERVER-IP>:8080/remote?token=…`,
+   step 13). The top bar shows **THIS DEVICE**, a name and a code like `VUT-XCP`. **RENAME** it,
+   e.g. "Rok phone".
+2. In `/disk` → **SECURITY** find the device with the same code (it shows *connected*) and press
+   **USE FOR AUTH**. The phone now shows **TRUSTED (approves /tv)**.
+3. Open **https://`<SERVER-IP>`/tv** on the TV. It shows a code; the phone shows the same code with
+   **APPROVE / DENY**. After APPROVE the TV stays signed in for 30 days (revoke it any time in
+   `/disk` → SECURITY).
+
+Forgot the `/disk` password: `sudo /opt/f1-dashboard/server/reset-disk-password.sh`, then
+`sudo systemctl restart f1-dashboard` and create it again with the new code. Details:
+`server/README.md` → *Security*.
 
 Open **http://`<SERVER-IP>`:8080** on the PC again. It now runs in AUTO mode (LIVE during an F1
 session, otherwise VOD), and it starts by itself at every boot.
@@ -634,6 +659,8 @@ The PC is only needed when you want to watch VOYO with the dashboard on your scr
 
 Open **http://`<SERVER-IP>`:8080/remote?token=`<your remote token>`** on the phone (same Wi-Fi),
 then use "Add to home screen".
+The phone that should approve `/tv` must be chosen once in `/disk` → SECURITY → **USE FOR AUTH**
+(step 9). Just having `/remote` open does not let a device approve anything.
 
 ---
 
@@ -649,7 +676,8 @@ then use "Add to home screen".
 | Is the disk there? How full? | `findmnt /mnt/f1disk && df -h /mnt/f1disk` |
 | Recorder page: disk, state, recordings, video, log, VOYO account | https://`<SERVER-IP>`/disk (or http://…:8080/disk) |
 | Stream + dashboard on one page (TV) | https://`<SERVER-IP>`/tv |
-| List of VOYO recordings (JSON) | http://`<SERVER-IP>`:8080/api/voyo/recordings |
+| List of VOYO recordings (JSON, needs the `/disk` login) | https://`<SERVER-IP>`/api/voyo/recordings |
+| Forgot the `/disk` password | `sudo /opt/f1-dashboard/server/reset-disk-password.sh && sudo systemctl restart f1-dashboard` |
 | Next sessions the player will record | `sudo -H -u f1 /opt/f1-dashboard/server/voyo-player.sh status` |
 | F1 TV sign-in state | `sudo -H -u f1 /opt/f1-dashboard/server/launch.sh --f1-status` |
 | System updates (monthly) | `sudo apt update && sudo apt full-upgrade -y && sudo reboot` |
@@ -700,6 +728,8 @@ recording are kept.
 | Recording has no sound | `setup-voyo-player.sh` printed the PipeWire note: run `sudo apt install pulseaudio`, then restart `f1-voyo-player` |
 | `System clock synchronized: no` | step 2.2 |
 | F1 TV: "sign-in expired" | step 10 |
+| `/tv`: "No phone is set up to approve /tv yet" | step 9: `/disk` → SECURITY → USE FOR AUTH on your phone |
+| `/disk`: "too many attempts" | wait 5 minutes (wrong passwords lock out); forgot it: `reset-disk-password.sh` |
 
 When something doesn't work, copy the last 50 lines of the log
 (`journalctl -u f1-dashboard -n 50 --no-pager` or `journalctl -u f1-voyo-player -n 50 --no-pager`)
@@ -719,6 +749,7 @@ and send them to me.
 - [ ] 7: `server/.env` with the remote token (written down) and `F1DASH_DATA_DIR`
 - [ ] 8: test start shows `VOYO stream recordings: /mnt/f1disk/voyo_streams`
 - [ ] 9: `f1-dashboard` service enabled and running
+- [ ] 9: `/disk` password created (setup code), your phone is TRUSTED, the TV approved
 - [ ] 10: F1 TV signed in
 - [ ] 11: Chrome + Widevine ok, VOYO signed in, the 3-minute test recorded video, `f1-voyo-player` enabled
 - [ ] 12/13: PC launcher and phone remote use the token

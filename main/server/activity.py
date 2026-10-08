@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 # loggers whose INFO lines are activity (the rest only from WARNING up)
-ACTIVITY_LOGGERS = ("voyo-rec", "voyo-player", "mode", "disk", "recorder", "app")
+ACTIVITY_LOGGERS = ("voyo-rec", "voyo-player", "mode", "disk", "recorder", "app", "security")
 PRUNE_EVERY_S = 600.0
 
 

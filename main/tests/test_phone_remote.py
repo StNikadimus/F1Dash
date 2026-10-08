@@ -124,6 +124,10 @@ class PhoneRemoteTest(unittest.TestCase):
                     phone.receive_json()
             with c.websocket_connect("/ws?client=remote&token=s3cret") as phone:
                 self.assertEqual(phone.receive_json()["type"], "hello")
+            info = c.get("/api/remote/info").json()                    # not loopback, no session: the token stays secret
+            self.assertNotIn("s3cret", json.dumps(info))
+            self.assertTrue(info["token_hidden"])
+        with TestClient(app, client=("127.0.0.1", 50000)) as c:            # the dashboard PC itself still gets it for the QR
             self.assertIn("token=s3cret", c.get("/api/remote/info").json()["url"])
 
 

@@ -17,8 +17,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from server import recordings_admin as admin  # noqa: E402
+from authhelp import disk_login  # noqa: E402
 from server.activity import ActivityHandler, ActivityLog  # noqa: E402
 from server.config import REPO_ROOT, load_config  # noqa: E402
 from server.voyo_recording import VoyoStreamRecorder  # noqa: E402
@@ -167,28 +169,31 @@ class HttpTest(unittest.TestCase):
                     mock.patch.object(appmod, "DATA_DIR", d):
                 cfg = load_config()
                 cfg["source"]["mode"] = "test"
-                c = TestClient(appmod.create_app(cfg))
-                self.assertEqual(c.get("/disk").status_code, 200)
+                app = appmod.create_app(cfg)
+                c, anon = TestClient(app), TestClient(app)
+                self.assertIn("/DISK SETUP", c.get("/disk").text)          # no password yet: setup page
+                H = disk_login(c, d)
                 self.assertIn("RECORDER", c.get("/disk").text)
                 self.assertEqual(c.get("/disk-static/disk.js").status_code, 200)
+                self.assertEqual(anon.get("/api/disk/status").status_code, 401)
                 st = c.get("/api/disk/status").json()
                 self.assertEqual(st["state"]["state"], "PLAYER OFF")
-                self.assertTrue(st["token_required"])
                 c.post("/api/voyo/player/status", content=json.dumps({"state": "idle", "next": None}))
                 self.assertEqual(c.get("/api/disk/status").json()["state"]["state"], "REST")
                 c.post("/api/voyo/player/log", content=json.dumps({"text": "OPEN for X", "level": "INFO"}))
                 log_texts = [e["text"] for e in c.get("/api/disk/log").json()["entries"]]
                 self.assertIn("OPEN for X", log_texts)
-                self.assertEqual(c.post("/api/disk/settings", content='{"keep_race_days": 5}').status_code, 401)
-                r = c.post("/api/disk/settings", content='{"keep_race_days": 5}', headers={"X-Remote-Token": "tok"})
+                self.assertEqual(anon.post("/api/disk/settings", content='{"keep_race_days": 5}').status_code, 401)
+                self.assertEqual(c.post("/api/disk/settings", content='{"keep_race_days": 5}').status_code, 403)  # no CSRF
+                r = c.post("/api/disk/settings", content='{"keep_race_days": 5}', headers=H)
                 self.assertEqual(r.status_code, 200)
                 self.assertTrue(json.loads((d / "voyo_recording_settings.json").read_text())["keep_race_days"] == 5)
                 fake_package(d / "rec", "pkg00004")
                 recs = c.get("/api/disk/recordings?fresh=1").json()["recordings"]
                 self.assertEqual(recs[0]["video_bytes"], 20)
                 self.assertEqual(recs[0]["keep_days"], 5)
-                self.assertEqual(c.post("/api/disk/recordings/pkg00004/delete?what=all").status_code, 401)
-                r = c.post("/api/disk/recordings/pkg00004/delete?what=all", headers={"X-Remote-Token": "tok"})
+                self.assertEqual(anon.post("/api/disk/recordings/pkg00004/delete?what=all").status_code, 401)
+                r = c.post("/api/disk/recordings/pkg00004/delete?what=all", headers=H)
                 self.assertEqual(r.json()["message"], "recording deleted")
         finally:
             shutil.rmtree(d, ignore_errors=True)

@@ -15,9 +15,11 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from server.config import PROJECT_ROOT, REPO_ROOT, load_config  # noqa: E402
 from server.voyo_account import VoyoAccount, mask_email  # noqa: E402
+from authhelp import disk_login  # noqa: E402
 from tools.voyo_capture import VoyoWindowCapture, ffmpeg_cmd  # noqa: E402
 
 
@@ -128,30 +130,33 @@ class HttpTest(unittest.TestCase):
                     mock.patch.object(appmod, "DATA_DIR", d):
                 cfg = load_config()
                 cfg["source"]["mode"] = "test"
-                c = TestClient(appmod.create_app(cfg))
-                H = {"X-Remote-Token": "tok"}
-                self.assertEqual(c.get("/tv").status_code, 200)
+                app = appmod.create_app(cfg)
+                c, anon = TestClient(app), TestClient(app)
+                H = disk_login(c, d)                                  # a /disk session may also watch /tv
+                self.assertIn('id="dash"', c.get("/tv").text)
+                self.assertIn("ACCESS REQUEST", anon.get("/tv").text)
                 self.assertEqual(c.get("/tv-static/vendor/hls.light.min.js").status_code, 200)
                 st = c.get("/api/tv/status").json()
                 self.assertFalse(st["live"]["on_air"])
-                self.assertEqual(c.get("/tv/live/index.m3u8").status_code, 401)
-                self.assertEqual(c.get("/tv/live/index.m3u8", headers=H).status_code, 404)    # off air
-                self.assertEqual(c.get("/tv/live/..%2Fauth%2Fx", headers=H).status_code, 404)
+                self.assertEqual(anon.get("/tv/live/index.m3u8").status_code, 401)
+                self.assertEqual(c.get("/tv/live/index.m3u8").status_code, 404)    # off air
+                self.assertEqual(c.get("/tv/live/..%2Fauth%2Fx").status_code, 404)
                 live = d / "live"
                 live.mkdir()
                 pdt = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 3)) + ".000+0000"
                 (live / "index.m3u8").write_text("#EXTM3U\n#EXTINF:2.0,\n#EXT-X-PROGRAM-DATE-TIME:" + pdt +
                                                  "\nlive_00001.ts\n")
                 (live / "live_00001.ts").write_bytes(b"\x47" * 188)
-                r = c.get("/tv/live/index.m3u8", headers=H)
+                r = c.get("/tv/live/index.m3u8")
                 self.assertEqual(r.headers["content-type"].split(";")[0], "application/vnd.apple.mpegurl")
-                self.assertEqual(c.get("/tv/live/live_00001.ts?token=tok").status_code, 200)
+                self.assertEqual(c.get("/tv/live/live_00001.ts").status_code, 200)
+                self.assertEqual(anon.get("/tv/live/live_00001.ts?token=tok").status_code, 401)   # no token way in
                 lv = c.get("/api/tv/status").json()["live"]
                 self.assertTrue(lv["on_air"])
                 self.assertEqual(lv["viewers"], 1)
                 self.assertAlmostEqual(lv["lag_s"], 3, delta=2)
                 # the VOYO account on /disk
-                self.assertEqual(c.post("/api/disk/voyo", content='{"email":"a@b.si"}').status_code, 401)
+                self.assertEqual(anon.post("/api/disk/voyo", content='{"email":"a@b.si"}').status_code, 401)
                 r = c.post("/api/disk/voyo", headers=H,
                            content=json.dumps({"email": "a@b.si", "password": "pw", "stream_url": "https://voyo.si/x"}))
                 self.assertEqual(r.json()["changed"], ["e-mail", "password", "stream page"])

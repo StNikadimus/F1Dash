@@ -83,6 +83,24 @@
   }
   @media (max-width: 340px) { button { font-size: 12px; min-height: 50px; } .pad { grid-template-rows: repeat(3, 62px); } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+  /* device identity + /tv approval (the server decides: only the device chosen in /disk gets requests) */
+  #devbar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px;
+    color: var(--text-3); letter-spacing: .06em; }
+  #devbar b { color: var(--text-2); } #devbar code { color: var(--amber); font-family: var(--mono); margin-left: 4px; }
+  #devbar em { font-style: normal; margin-left: 6px; } #devbar em.t { color: var(--green); }
+  #devbar button { padding: 4px 8px; font-size: 11px; min-height: 0; }
+  #tvreq { position: fixed; inset: 0; background: rgba(0,0,0,.82); z-index: 50; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  #tvreq[hidden] { display: none; }
+  .tvq-box { background: var(--panel); border: 1px solid var(--amber); border-radius: 12px; padding: 20px; width: min(420px, 100%); text-align: center; }
+  .tvq-l { font-size: 13px; letter-spacing: .18em; color: var(--amber); }
+  .tvq-dev { font-size: 20px; margin-top: 8px; }
+  .tvq-code { font-family: var(--mono); font-size: 40px; letter-spacing: .12em; color: var(--amber); margin: 8px 0; }
+  .tvq-sub { font-size: 13px; color: var(--text-2); font-weight: 600; line-height: 1.4; }
+  .tvq-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+  .tvq-btns button { min-height: 52px; font-size: 17px; }
+  #tvq-ok { background: var(--green); color: #04150c; border-color: var(--green); }
+  #tvq-deny { border-color: var(--red); color: var(--red); }
+  .tvq-more { font-size: 12px; color: var(--text-3); margin-top: 8px; }
 </style>
 </head>
 <body class="off">
@@ -93,7 +111,21 @@
     <div class="sub" id="sub">waiting for the dashboard</div><div class="flag" id="flag">—</div>
   </div>
   <div id="toast"></div>
+  <div id="devbar" hidden>
+    <span>THIS DEVICE <b id="dv-name">…</b> <code id="dv-code"></code> <em id="dv-trust"></em></span>
+    <button id="dv-rename" class="always">RENAME</button>
+  </div>
 </header>
+<div id="tvreq" hidden>
+  <div class="tvq-box">
+    <div class="tvq-l">TV ACCESS REQUEST</div>
+    <div class="tvq-dev" id="tvq-dev">—</div>
+    <div class="tvq-code" id="tvq-code">—</div>
+    <div class="tvq-sub">is asking to open <b>/tv</b>. Approve only if this code is on your TV. <span id="tvq-exp"></span></div>
+    <div class="tvq-btns"><button id="tvq-deny" class="always">DENY</button><button id="tvq-ok" class="always">APPROVE</button></div>
+    <div class="tvq-more" id="tvq-more"></div>
+  </div>
+</div>
 <main>
   <div class="col-left g">
     <section>
@@ -251,6 +283,38 @@
   let toastT = null;
   function toast(t) { $("toast").textContent = t || ""; clearTimeout(toastT); if (t) toastT = setTimeout(() => { $("toast").textContent = ""; }, 4000); }
 
+  // ------------------------------------------------------------ this device + /tv approval
+  // The device identity is a random secret in an HttpOnly cookie the server set with this page; whether this
+  // device may approve /tv is decided by the server (the device chosen in /disk) - nothing here can change it.
+  let tvReqs = [];
+  function showDevice(m) {
+    $("devbar").hidden = false;
+    $("dv-name").textContent = m.name || "—"; $("dv-code").textContent = m.code || "";
+    $("dv-trust").textContent = m.trusted ? "· TRUSTED (approves /tv)" : "· not trusted";
+    $("dv-trust").className = m.trusted ? "t" : "";
+    if (!m.trusted) showTvRequests([]);
+  }
+  function showTvRequests(list) {
+    tvReqs = list;
+    const r = list[0];
+    $("tvreq").hidden = !r;
+    if (!r) return;
+    $("tvq-dev").textContent = r.device; $("tvq-code").textContent = r.code;
+    $("tvq-exp").textContent = `(expires in ${r.expires_in} s)`;
+    $("tvq-more").textContent = list.length > 1 ? `+ ${list.length - 1} more request(s)` : "";
+    if (navigator.vibrate) { try { navigator.vibrate([60, 40, 60]); } catch (e) { /* optional */ } }
+  }
+  function decide(ok) {
+    const r = tvReqs[0]; if (!r) return;
+    if (send({ type: "tv_decide", request: r.id, approve: ok })) { tvReqs = tvReqs.slice(1); showTvRequests(tvReqs); }
+  }
+  $("tvq-ok").addEventListener("click", () => decide(true));
+  $("tvq-deny").addEventListener("click", () => decide(false));
+  $("dv-rename").addEventListener("click", () => {
+    const n = prompt("Name for this phone (shown in /disk):", $("dv-name").textContent);
+    if (n && n.trim()) send({ type: "device_name", name: n.trim().slice(0, 40) });
+  });
+
   // ------------------------------------------------------------ state from the server
   function handle(m) {
     switch (m.type) {
@@ -265,6 +329,9 @@
       case "remote": R.remote = m; break;
       case "sync": R.sync = m; break;
       case "sync_result": onSyncResult(m); return;
+      case "device": showDevice(m); return;
+      case "tv_requests": showTvRequests(m.requests || []); return;
+      case "tv_decided": toast(m.ok ? "TV " + String(m.status || "").toUpperCase() : "Not done: " + (m.error || "?")); return;
       default: return;
     }
     render();

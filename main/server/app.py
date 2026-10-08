@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import logging
 import re
 import time
-from typing import Any
+from urllib.parse import urlparse
+from typing import Any, Optional
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
+from starlette.requests import HTTPConnection
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
@@ -32,6 +36,8 @@ from .voyo_recording import CAPTURE_NAME as VOYO_CAPTURE_NAME, VoyoStreamRecorde
 from . import activity as activity_mod
 from . import recordings_admin as admin
 from .voyo_account import VoyoAccount
+from . import security as secmod
+from .security import RateLimiter, Security
 
 log = logging.getLogger("app")
 
@@ -41,6 +47,9 @@ DISK_PAGE_DIR = REPO_ROOT / "server" / "disk"      # the /disk page (Linux serve
 TV_PAGE_DIR = REPO_ROOT / "server" / "tv"          # the /tv page: live stream + dashboard
 LIVE_NAME = re.compile(r"^(index\.m3u8|live_\d{5}\.ts)$")
 VIEWER_S = 12.0                                     # a /tv viewer counts while it fetched the playlist this recently
+# cookies (server/security.py): HttpOnly, SameSite, Secure over https; only their SHA-256 is stored
+COOKIE_DISK, COOKIE_TV, COOKIE_DEV, COOKIE_TVREQ = "f1_disk", "f1_tv", "f1_dev", "f1_tvreq"
+seclog = logging.getLogger("security")
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -64,6 +73,57 @@ def build_source(cfg: dict[str, Any], tracks: TrackProvider,
     recorder = Recorder(DATA_DIR / "recordings") if cfg["live"].get("record") else None
     src = F1LiveSource(cfg["live"], recorder, auth=auth if auth is not None else make_auth(cfg))
     return src, src.token_configured
+
+
+# paths that stay reachable without a /tv or /disk session when [security] protect_dashboard is on:
+# the auth pages themselves, the phone remote (own token), the PC launcher's machine endpoints (token /
+# local only), static code (no data) - everything else needs a session
+GATE_OPEN = ("/tv", "/api/tv/", "/disk", "/api/disk/", "/disk-static/", "/tv-static/", "/static/", "/remote",
+             "/api/remote/", "/api/sync/voyo", "/api/voyo/player/", "/api/health", "/f1tv/", "/ws")
+
+
+class OriginGuard:
+    """CSRF for every endpoint: a browser always sends Origin with a cross-site POST / PUT / DELETE - if it
+    is not this server, refuse. Tools without an Origin (launcher, clock bridge, curl) are unaffected."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("method") in ("POST", "PUT", "PATCH", "DELETE"):
+            conn = HTTPConnection(scope)
+            origin = conn.headers.get("origin")
+            if origin and origin != "null" and urlparse(origin).netloc.lower() != (conn.headers.get("host") or "").lower():
+                logging.getLogger("security").warning("Cross-site %s %s refused (Origin %s)", scope["method"],
+                                                      scope.get("path"), origin[:80])
+                return await JSONResponse({"ok": False, "error": "cross-site request refused"},
+                                          status_code=403)(scope, receive, send)
+            if origin == "null":
+                return await JSONResponse({"ok": False, "error": "cross-site request refused"},
+                                          status_code=403)(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
+class DashboardGate:
+    """ASGI middleware - server-side, for HTTP and WebSocket alike (the /ws endpoint checks itself)."""
+
+    def __init__(self, app, check) -> None:
+        self.app, self.check = app, check
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+        path = scope.get("path") or "/"
+        capture_put = path.startswith("/api/voyo/recordings/") and "/capture/" in path
+        if path == "/" or not (path.startswith(GATE_OPEN) or capture_put):
+            if not self.check(HTTPConnection(scope)):
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 4401})
+                    return
+                resp = (Response(status_code=303, headers={"Location": "/tv?next=/"}) if path == "/" else
+                        JSONResponse({"ok": False, "error": "not authorized", "auth": "tv"}, status_code=401))
+                return await resp(scope, receive, send)
+        return await self.app(scope, receive, send)
 
 
 def make_auth(cfg: dict[str, Any]) -> AuthManager:
@@ -152,6 +212,18 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     rec_cfg = rec_settings.apply((cfg.get("voyo") or {}).get("recording") or {})
     rec_sizes = admin.Sizes()
     player_hb: dict = {"data": None, "at": None}
+    # server-side authentication: /disk password, trusted /remote device, approved /tv browsers
+    sec_cfg = cfg.get("security") or {}
+    security = Security(DATA_DIR / "auth", sec_cfg)
+    security.ensure_setup_code()
+    rl_login = RateLimiter(int(sec_cfg.get("login_max_failures", 5)), 300, float(sec_cfg.get("lockout_minutes", 5)) * 60)
+    rl_login_all = RateLimiter(30, 600, 60)            # all addresses together (spread-out guessing)
+    rl_setup = RateLimiter(5, 900, 900)
+    rl_tvreq = RateLimiter(6, 60)
+    rl_decide = RateLimiter(30, 60)
+    # [security] protect_dashboard = true: the plain dashboard ("/", its APIs and WebSocket) also needs an
+    # approved /tv session (or a /disk session) - off by default, the PC / WD TV clients use it as before
+    protect_dashboard = bool(sec_cfg.get("protect_dashboard", False))
     live_dir = DATA_DIR / "live"                      # the server VOYO player's live HLS (tools/voyo_capture.py)
     viewers: dict = {}
     voyo_account = VoyoAccount(DATA_DIR / "auth" / "voyo_credentials.json", DATA_DIR / "voyo_server_player.json",
@@ -269,6 +341,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                             r.housekeeping()
                 with contextlib.suppress(Exception):
                     activity.prune()
+                with contextlib.suppress(Exception):
+                    security._expire_requests()        # expired /tv requests disappear from the phone too
+                    push_remote_state()
         tasks.append(asyncio.create_task(recorder_housekeeping(), name="rec-housekeeping"))
         try:
             pr = phone_remote()
@@ -295,7 +370,13 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return FileResponse(DASHBOARD_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
     async def remote_page(request: Request) -> Response:
-        return FileResponse(DASHBOARD_DIR / "remote.html", headers={"Cache-Control": "no-cache"})
+        """The phone remote. Every browser gets a device identity (random secret in an HttpOnly cookie) -
+        that alone grants nothing: only the device chosen in /disk may approve /tv."""
+        resp = FileResponse(DASHBOARD_DIR / "remote.html", headers={"Cache-Control": "no-cache"})
+        if security.device(request.cookies.get(COOKIE_DEV)) is None:
+            tok, _did, _rec = security.new_device(request.headers.get("user-agent", ""))
+            _set_cookie(resp, request, COOKIE_DEV, tok, 400 * 86400, "lax")
+        return resp
 
     async def health(request: Request) -> Response:
         st = mode.state()
@@ -397,8 +478,14 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return remote_info(str(cfg["server"]["host"]), port, remote.token)
 
     async def api_remote_info(request: Request) -> Response:
-        """URLs of the phone remote (LAN / Tailscale) for the QR code on the dashboard."""
-        return JSONResponse(phone_remote(), headers={"Cache-Control": "no-store"})
+        """URLs of the phone remote (LAN / Tailscale) for the QR code on the dashboard. The remote token is
+        only put into them for this server itself or a signed-in /tv or /disk browser - not for anyone."""
+        info = phone_remote()
+        if remote.token and _ip(request) not in LOOPBACK and tv_or_disk(request) is None:
+            strip = lambda u: u.split("?")[0] if isinstance(u, str) else u      # noqa: E731
+            info = {**info, "url": strip(info.get("url")), "lan": [strip(u) for u in info.get("lan") or []],
+                    "tailscale": [strip(u) for u in info.get("tailscale") or []], "token_hidden": True}
+        return JSONResponse(info, headers={"Cache-Control": "no-store"})
 
     async def api_ui(request: Request) -> Response:
         # read-only UI state (TV mode, focus); polled by tools/tv_launcher.py
@@ -619,9 +706,11 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     async def api_disk_voyo(request: Request) -> Response:
         """GET: the VOYO account (never the password). POST {email, password, stream_url}: save (token)."""
         if request.method == "GET":
-            return JSONResponse(voyo_account.public())
-        if not remote.check_token(_token(request)):
-            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+            _s, deny = require_disk(request)
+            return deny or JSONResponse(voyo_account.public())
+        _s, deny = require_disk(request, write=True)
+        if deny:
+            return deny
         try:
             body = json.loads((await request.body())[:8192] or b"{}")
             if not isinstance(body, dict):
@@ -635,9 +724,10 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return JSONResponse({"ok": True, "changed": changed, "account": voyo_account.public()})
 
     async def api_disk_voyo_action(request: Request) -> Response:
-        if not remote.check_token(_token(request)):
-            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
         action = request.path_params["action"]
+        _s, deny = require_disk(request, write=True, recent=action == "forget")
+        if deny:
+            return deny
         if action == "forget":
             voyo_account.forget()
             logging.getLogger("disk").info("VOYO e-mail / password deleted on the /disk page")
@@ -670,13 +760,18 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return None if player_hb["at"] is None else time.monotonic() - player_hb["at"]
 
     async def disk_page(request: Request) -> Response:
-        return FileResponse(DISK_PAGE_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+        """The dashboard only with a /disk session - else the login / first-setup page."""
+        page = "index.html" if _disk(request)[1] is not None else "login.html"
+        return FileResponse(DISK_PAGE_DIR / page, headers={"Cache-Control": "no-store"})
 
     async def api_disk_status(request: Request) -> Response:
+        _s, deny = require_disk(request)
+        if deny:
+            return deny
         sizes = rec_sizes.get(stream_rec.root if stream_rec.ok else None)
         rc = stream_rec.rc
         return JSONResponse({
-            "now": time.time(), "token_required": bool(remote.token),
+            "now": time.time(),
             "state": admin.current_state(stream_rec, player_rec, player_rec is not None, player_hb["data"], _hb_age()),
             "disk": admin.disk_info(stream_rec, sizes),
             "player": {"enabled": player_rec is not None, "heartbeat": player_hb["data"],
@@ -695,6 +790,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                        "log_keep_hours": 48}})
 
     async def api_disk_log(request: Request) -> Response:
+        _s, deny = require_disk(request)
+        if deny:
+            return deny
         try:
             limit = min(2000, int(request.query_params.get("limit") or 400))
         except ValueError:
@@ -703,6 +801,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                              "keep_hours": 48})
 
     async def api_disk_recordings(request: Request) -> Response:
+        _s, deny = require_disk(request)
+        if deny:
+            return deny
         fresh = bool(request.query_params.get("fresh"))
         if fresh and stream_rec.ok:
             with contextlib.suppress(OSError):
@@ -715,8 +816,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return JSONResponse({"recordings": recs, "ok": stream_rec.ok, "error": stream_rec.error})
 
     async def api_disk_settings(request: Request) -> Response:
-        if not remote.check_token(_token(request)):
-            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        _s, deny = require_disk(request, write=True)
+        if deny:
+            return deny
         try:
             body = json.loads((await request.body())[:8192] or b"{}")
             changed = rec_settings.update(body if isinstance(body, dict) else {}, (stream_rec, player_rec))
@@ -730,8 +832,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return JSONResponse({"ok": True, "changed": changed, "video_files_deleted": removed})
 
     async def api_disk_delete(request: Request) -> Response:
-        if not remote.check_token(_token(request)):
-            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        _s, deny = require_disk(request, write=True, recent=True)       # destructive: password in the last minutes
+        if deny:
+            return deny
         try:
             msg = admin.delete_package(stream_rec, (player_rec,), request.path_params["iid"],
                                        request.query_params.get("what") or "video")
@@ -766,12 +869,14 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return out
 
     async def tv_page(request: Request) -> Response:
-        return FileResponse(TV_PAGE_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+        """The TV page only with an approved /tv session (or a /disk session) - else the request page."""
+        page = "index.html" if tv_or_disk(request) is not None else "auth.html"
+        return FileResponse(TV_PAGE_DIR / page, headers={"Cache-Control": "no-store"})
 
     async def tv_live_file(request: Request) -> Response:
-        """The live HLS of the server VOYO player (only while it records) - remote token when set."""
-        if not remote.check_token(_token(request)):
-            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        """The live HLS of the server VOYO player (only while it records) - an approved /tv session."""
+        if tv_or_disk(request) is None:
+            return JSONResponse({"ok": False, "error": "not authorized", "auth": "tv"}, status_code=401)
         name = request.path_params["name"]
         path = live_dir / name
         if not LIVE_NAME.match(name) or not path.is_file():
@@ -783,14 +888,286 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return FileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "max-age=60"})
 
     async def api_tv_status(request: Request) -> Response:
+        if tv_or_disk(request) is None:
+            return JSONResponse({"ok": False, "error": "not authorized", "auth": "tv"}, status_code=401)
         cur = player_rec.cur if player_rec is not None else None
         sess = (cur or {}).get("session") or {}
         hb = player_hb["data"] or {}
         return JSONResponse({
-            "now": time.time(), "token_required": bool(remote.token), "live": live_info(),
+            "now": time.time(), "live": live_info(),
             "state": admin.current_state(stream_rec, player_rec, player_rec is not None, player_hb["data"], _hb_age()),
             "session": {"meeting": sess.get("meeting"), "session_name": sess.get("session_name")} if cur else None,
             "next": hb.get("next") if _hb_age() is not None and _hb_age() < 90 else None})
+
+    # ---------------------------------------------------------------- authentication helpers
+    def _ip(request) -> str:
+        return request.client.host if request.client else "?"
+
+    def _set_cookie(resp: Response, request, name: str, value: str, max_age: float, samesite: str = "strict") -> None:
+        resp.set_cookie(name, value, max_age=int(max_age), path="/", httponly=True, samesite=samesite,
+                        secure=request.url.scheme in ("https", "wss"))
+
+    def _same_origin(request) -> bool:
+        """Browsers always send Origin on cross-site POSTs and WebSockets: it must be this server."""
+        origin = request.headers.get("origin")
+        if not origin:
+            return True
+        return urlparse(origin).netloc.lower() == (request.headers.get("host") or "").lower()
+
+    def _disk(request) -> tuple[Optional[str], Optional[dict]]:
+        tok = request.cookies.get(COOKIE_DISK)
+        return tok, security.session("disk", tok)
+
+    def require_disk(request, write: bool = False, recent: bool = False) -> tuple[Optional[dict], Optional[Response]]:
+        """The /disk session (server-side). write: same origin + the session's CSRF token in X-F1-CSRF.
+        recent: password entered in the last reauth_minutes (destructive actions)."""
+        _tok, s = _disk(request)
+        if s is None:
+            return None, JSONResponse({"ok": False, "error": "login required", "auth": "disk"}, status_code=401)
+        if write:
+            if not _same_origin(request):
+                seclog.warning("/disk request from another site refused (%s)", request.url.path)
+                return None, JSONResponse({"ok": False, "error": "cross-site request refused"}, status_code=403)
+            if not hmac.compare_digest(str(request.headers.get("x-f1-csrf") or ""), str(s.get("csrf") or "")):
+                return None, JSONResponse({"ok": False, "error": "csrf token missing or wrong"}, status_code=403)
+        if recent and not security.recent(s):
+            return None, JSONResponse({"ok": False, "error": "reauth_required"}, status_code=403)
+        return s, None
+
+    def tv_or_disk(request) -> Optional[dict]:
+        s = security.session("tv", request.cookies.get(COOKIE_TV))
+        return s if s is not None else _disk(request)[1]
+
+    async def _json(request, limit: int = 4096) -> dict:
+        try:
+            body = json.loads((await request.body())[:limit] or b"{}")
+        except ValueError:
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    def _too_many(seconds: float) -> Response:
+        return JSONResponse({"ok": False, "error": f"too many attempts - wait {int(seconds) + 1} s"}, status_code=429,
+                            headers={"Retry-After": str(int(seconds) + 1)})
+
+    # ---------------------------------------------------------------- /disk: password, sessions
+    async def api_disk_auth_state(request: Request) -> Response:
+        _tok, s = _disk(request)
+        return JSONResponse({"password_set": security.password_set, "authenticated": s is not None,
+                             "csrf": s["csrf"] if s else None,
+                             "recent": bool(s and security.recent(s)), "https": request.url.scheme == "https",
+                             "setup_code_file": None if security.password_set else str(security.code_path)})
+
+    async def api_disk_auth_setup(request: Request) -> Response:
+        """First password - only with the one-time setup code from the server's disk-setup-code file."""
+        if not _same_origin(request):
+            return JSONResponse({"ok": False, "error": "cross-site request refused"}, status_code=403)
+        if security.password_set:
+            return JSONResponse({"ok": False, "error": "a password is already set"}, status_code=409)
+        wait = rl_setup.blocked(_ip(request))
+        if wait:
+            return _too_many(wait)
+        body = await _json(request)
+        rl_setup.hit(_ip(request))
+        if not security.setup_code_ok(str(body.get("code") or "")):
+            seclog.warning("/disk password setup with a wrong setup code from %s", _ip(request))
+            return JSONResponse({"ok": False, "error": "wrong setup code"}, status_code=403)
+        prob = secmod.password_problem(body.get("password"), body.get("confirm"))
+        if prob:
+            return JSONResponse({"ok": False, "error": prob}, status_code=400)
+        await run_in_threadpool(security.set_password, body["password"])
+        seclog.warning("/disk password set (first setup) from %s", _ip(request))
+        tok, _rec = security.new_session("disk", secmod.ua_summary(request.headers.get("user-agent", "")))
+        resp = JSONResponse({"ok": True})
+        _set_cookie(resp, request, COOKIE_DISK, tok, security.disk_ttl)
+        return resp
+
+    async def api_disk_auth_login(request: Request) -> Response:
+        if not _same_origin(request):
+            return JSONResponse({"ok": False, "error": "cross-site request refused"}, status_code=403)
+        if not security.password_set:
+            return JSONResponse({"ok": False, "error": "no password set yet"}, status_code=409)
+        ip = _ip(request)
+        wait = max(rl_login.blocked(ip), rl_login_all.blocked("all"))
+        if wait:
+            return _too_many(wait)
+        body = await _json(request)
+        ok = await run_in_threadpool(security.check_password, str(body.get("password") or "")[:secmod.MAX_PASSWORD])
+        if not ok:
+            rl_login.hit(ip)
+            rl_login_all.hit("all")
+            seclog.warning("/disk login FAILED from %s", ip)
+            return JSONResponse({"ok": False, "error": "wrong password"}, status_code=401)
+        rl_login.reset(ip)
+        old = request.cookies.get(COOKIE_DISK)
+        if old:
+            security.revoke("disk", token=old)              # never keep a pre-login session id (fixation)
+        tok, rec = security.new_session("disk", secmod.ua_summary(request.headers.get("user-agent", "")))
+        seclog.info("/disk login from %s (session %s)", ip, rec["id"])
+        resp = JSONResponse({"ok": True})
+        _set_cookie(resp, request, COOKIE_DISK, tok, security.disk_ttl)
+        return resp
+
+    async def api_disk_auth_reauth(request: Request) -> Response:
+        s, deny = require_disk(request, write=True)
+        if deny:
+            return deny
+        ip = _ip(request)
+        wait = max(rl_login.blocked(ip), rl_login_all.blocked("all"))
+        if wait:
+            return _too_many(wait)
+        body = await _json(request)
+        if not await run_in_threadpool(security.check_password, str(body.get("password") or "")[:secmod.MAX_PASSWORD]):
+            rl_login.hit(ip)
+            rl_login_all.hit("all")
+            seclog.warning("/disk re-authentication FAILED (session %s, %s)", s["id"], ip)
+            return JSONResponse({"ok": False, "error": "wrong password"}, status_code=401)
+        security.reauth(request.cookies.get(COOKIE_DISK))
+        return JSONResponse({"ok": True})
+
+    async def api_disk_auth_logout(request: Request) -> Response:
+        s, deny = require_disk(request, write=True)
+        if deny:
+            return deny
+        security.revoke("disk", token=request.cookies.get(COOKIE_DISK))
+        seclog.info("/disk logout (session %s)", s["id"])
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(COOKIE_DISK, path="/")
+        return resp
+
+    async def api_disk_auth_password(request: Request) -> Response:
+        s, deny = require_disk(request, write=True, recent=True)
+        if deny:
+            return deny
+        body = await _json(request)
+        if not await run_in_threadpool(security.check_password, str(body.get("current") or "")[:secmod.MAX_PASSWORD]):
+            rl_login.hit(_ip(request))
+            return JSONResponse({"ok": False, "error": "the current password is wrong"}, status_code=401)
+        prob = secmod.password_problem(body.get("password"), body.get("confirm"))
+        if prob:
+            return JSONResponse({"ok": False, "error": prob}, status_code=400)
+        await run_in_threadpool(security.set_password, body["password"])          # ends every disk session
+        seclog.warning("/disk password changed - all /disk sessions ended")
+        tok, _rec = security.new_session("disk", secmod.ua_summary(request.headers.get("user-agent", "")))
+        resp = JSONResponse({"ok": True})
+        _set_cookie(resp, request, COOKIE_DISK, tok, security.disk_ttl)
+        return resp
+
+    # ---------------------------------------------------------------- /disk: devices, TV sessions, requests
+    def push_remote_state() -> None:
+        """Each /remote socket: its own device (name, code, trusted) and - only the trusted one - the
+        pending /tv requests."""
+        pend = security.pending()
+        for c in list(hub.clients):
+            if c.kind != "remote" or not c.device_id:
+                continue
+            d = security.data["devices"].get(c.device_id) or {}
+            hub._send(c, json.dumps({"type": "device", "name": d.get("name"), "code": d.get("code"),
+                                     "trusted": security.trusted(c.device_id)}))
+            if security.trusted(c.device_id):
+                hub._send(c, json.dumps({"type": "tv_requests", "requests": pend}))
+
+    async def api_disk_security(request: Request) -> Response:
+        _s, deny = require_disk(request)
+        if deny:
+            return deny
+        return JSONResponse({"devices": security.devices_public(), "trusted_device": security.data.get("trusted_device"),
+                             "tv_sessions": security.tv_sessions_public(), "requests": security.pending(),
+                             "disk_sessions": len(security.data["disk_sessions"])})
+
+    async def api_disk_security_action(request: Request) -> Response:
+        action = request.path_params["action"]
+        destructive = action in ("trust", "untrust", "forget", "revoke_all_tv", "logout_others")
+        s, deny = require_disk(request, write=True, recent=destructive)
+        if deny:
+            return deny
+        body = await _json(request)
+        try:
+            if action == "trust":
+                security.set_trusted(str(body.get("device") or ""))
+            elif action == "untrust":
+                security.set_trusted(None)
+            elif action == "forget":
+                if not security.forget_device(str(body.get("device") or "")):
+                    raise KeyError("unknown device")
+            elif action == "rename":
+                if not security.rename_device(str(body.get("device") or ""), str(body.get("name") or "")):
+                    raise KeyError("unknown device or empty name")
+            elif action == "revoke_tv":
+                if not security.revoke("tv", sid=str(body.get("session") or "")):
+                    raise KeyError("unknown session")
+            elif action == "revoke_all_tv":
+                security.revoke_all("tv")
+            elif action == "logout_others":
+                security.revoke_all("disk", except_token=request.cookies.get(COOKIE_DISK))
+            elif action == "decide":
+                security.decide(str(body.get("request") or ""), bool(body.get("approve")),
+                                by_disk=secmod.sha(request.cookies.get(COOKIE_DISK) or ""),
+                                by_poll=request.cookies.get(COOKIE_TVREQ))
+            else:
+                return JSONResponse({"ok": False, "error": "unknown action"}, status_code=404)
+        except KeyError as exc:
+            return JSONResponse({"ok": False, "error": str(exc).strip("'")}, status_code=404)
+        except (PermissionError, ValueError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+        push_remote_state()
+        return JSONResponse({"ok": True})
+
+    # ---------------------------------------------------------------- /tv: approval by the trusted remote device
+    async def api_tv_auth_request(request: Request) -> Response:
+        """The /tv browser asks for access: a server-side request (random id, expires), the TV keeps only a
+        random poll secret in an HttpOnly cookie; the trusted /remote device is notified."""
+        if not _same_origin(request):
+            return JSONResponse({"ok": False, "error": "cross-site request refused"}, status_code=403)
+        if tv_or_disk(request) is not None:
+            return JSONResponse({"ok": True, "authenticated": True})
+        ip = _ip(request)
+        wait = rl_tvreq.blocked(ip)
+        if wait:
+            return _too_many(wait)
+        rl_tvreq.hit(ip)
+        dev = security.device(request.cookies.get(COOKIE_DEV))
+        try:
+            disk_cookie = request.cookies.get(COOKIE_DISK)
+            poll, req = security.create_request(request.headers.get("user-agent", ""), dev[0] if dev else None,
+                                                secmod.sha(disk_cookie) if disk_cookie else None)
+        except OverflowError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=429)
+        push_remote_state()
+        trusted = security.data.get("trusted_device")
+        resp = JSONResponse({"ok": True, "code": req["code"], "expires_in": round(req["expires"] - time.time()),
+                             "approver_set": bool(trusted), "approver_online": bool(trusted and trusted in security.connected)})
+        _set_cookie(resp, request, COOKIE_TVREQ, poll, security.request_ttl + 30, "strict")
+        return resp
+
+    async def api_tv_auth_status(request: Request) -> Response:
+        if tv_or_disk(request) is not None:
+            return JSONResponse({"status": "authenticated"})
+        r = security.request_by_poll(request.cookies.get(COOKIE_TVREQ))
+        if r is None:
+            return JSONResponse({"status": "none"})
+        out = {"status": r["status"], "code": r["code"], "expires_in": max(0, round(r["expires"] - time.time()))}
+        if r["status"] == "approved":
+            got = security.consume(r)
+            if got is None:
+                return JSONResponse({"status": "none"})
+            tok, rec = got
+            seclog.info("/tv session %s created for %s", rec["id"], rec["label"])
+            resp = JSONResponse({"status": "authenticated"})
+            _set_cookie(resp, request, COOKIE_TV, tok, security.tv_ttl, "lax")
+            resp.delete_cookie(COOKIE_TVREQ, path="/")
+            return resp
+        return JSONResponse(out)
+
+    async def api_tv_logout(request: Request) -> Response:
+        if not _same_origin(request):
+            return JSONResponse({"ok": False, "error": "cross-site request refused"}, status_code=403)
+        s = security.session("tv", request.cookies.get(COOKIE_TV))
+        if s is None:
+            return JSONResponse({"ok": False, "error": "not signed in"}, status_code=401)
+        security.revoke("tv", token=request.cookies.get(COOKIE_TV))
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(COOKIE_TV, path="/")
+        return resp
 
     def _rec_for(iid: str) -> VoyoStreamRecorder:
         if player_rec is not None:
@@ -812,6 +1189,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
 
     async def api_voyo_recordings(request: Request) -> Response:
         """List of the VOYO stream recordings on this server (index.json of [voyo.recording] path)."""
+        _s, deny = require_disk(request)
+        if deny:
+            return deny
         return JSONResponse({"status": stream_rec.status(),
                              "server_player": player_rec.status() if player_rec is not None else None,
                              "recordings": stream_rec.list(also=(player_rec,))})
@@ -819,6 +1199,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     async def api_voyo_recording(request: Request) -> Response:
         """One package: manifest + meta + anchors + the AUTO SYNC calibration re-run from its anchors
         (?full=1 also returns the timeline and observations)."""
+        _s, deny = require_disk(request)
+        if deny:
+            return deny
         pkg = stream_rec.package_dir(request.path_params["iid"])
         if pkg is None:
             return JSONResponse({"ok": False, "error": "unknown stream instance"}, status_code=404)
@@ -830,9 +1213,10 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return JSONResponse(out)
 
     async def api_voyo_recording_file(request: Request) -> Response:
-        """A file of a package (timeline.jsonl, ..., capture/<segment>) - remote token required when set."""
-        if not remote.check_token(_token(request)):
-            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        """A file of a package (timeline.jsonl, ..., capture/<segment>) - /disk session."""
+        _s, deny = require_disk(request)
+        if deny:
+            return deny
         pkg = stream_rec.package_dir(request.path_params["iid"])
         name = request.path_params["name"]
         if pkg is None:
@@ -899,9 +1283,17 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         # ?client=remote: a phone remote (served by /remote) - the same endpoint and commands, but only
         # the small remote state is sent to it; the remote token ([remote] token) is required when set
         kind = "remote" if ws.query_params.get("client") == "remote" else "dashboard"
+        if not _same_origin(ws):                       # cross-site WebSocket hijacking: another site's page
+            seclog.warning("WebSocket from another site refused (Origin %s)", ws.headers.get("origin", "")[:80])
+            await ws.close(code=4403)
+            return
         if kind == "remote" and not remote.check_token(ws.query_params.get("token")):
             await ws.close(code=4401)
             return
+        if kind == "dashboard" and protect_dashboard and tv_or_disk(ws) is None:
+            await ws.close(code=4401)
+            return
+        dev = security.device(ws.cookies.get(COOKIE_DEV)) if kind == "remote" else None
         await ws.accept()
         addr = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
         try:
@@ -909,6 +1301,10 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         except Exception:  # noqa: BLE001 - log it once in full, then keep the dashboard connected
             log.exception("Dashboard connection setup failed for %s", addr)
             raise
+        if dev is not None:
+            client.device_id = dev[0]
+            security.device_connected(dev[0], True)
+            push_remote_state()
         try:
             while True:
                 text = await ws.receive_text()
@@ -924,6 +1320,24 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                     continue
                 kind = msg.get("type")
                 if kind == "ping":
+                    continue
+                if kind == "device_name" and client.device_id:
+                    # a remote device names itself (that is all it can change about itself)
+                    if security.rename_device(client.device_id, str(msg.get("name") or "")):
+                        push_remote_state()
+                    continue
+                if kind == "tv_decide":
+                    # /tv approval: the server checks that THIS socket's device is the trusted approver
+                    if not client.device_id or rl_decide.blocked(client.device_id):
+                        continue
+                    rl_decide.hit(client.device_id)
+                    try:
+                        res = security.decide(str(msg.get("request") or ""), bool(msg.get("approve")),
+                                              by_device=client.device_id)
+                        hub._send(client, json.dumps({"type": "tv_decided", "ok": True, "status": res}))
+                    except (KeyError, PermissionError, ValueError) as exc:
+                        hub._send(client, json.dumps({"type": "tv_decided", "ok": False, "error": str(exc).strip("'")}))
+                    push_remote_state()
                     continue
                 if not remote.enabled or not remote.rate_ok():
                     continue
@@ -963,6 +1377,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             log.exception("WebSocket error (%s)", addr)
         finally:
             hub.remove(client)
+            if getattr(client, "device_id", None):
+                security.device_connected(client.device_id, False)
 
     routes = [
         Route("/", index),
@@ -989,6 +1405,17 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/tv/", tv_page),
         Route("/tv/live/{name}", tv_live_file),
         Route("/api/tv/status", api_tv_status),
+        Route("/api/tv/auth/request", api_tv_auth_request, methods=["POST"]),
+        Route("/api/tv/auth/status", api_tv_auth_status),
+        Route("/api/tv/logout", api_tv_logout, methods=["POST"]),
+        Route("/api/disk/auth/state", api_disk_auth_state),
+        Route("/api/disk/auth/setup", api_disk_auth_setup, methods=["POST"]),
+        Route("/api/disk/auth/login", api_disk_auth_login, methods=["POST"]),
+        Route("/api/disk/auth/reauth", api_disk_auth_reauth, methods=["POST"]),
+        Route("/api/disk/auth/logout", api_disk_auth_logout, methods=["POST"]),
+        Route("/api/disk/auth/password", api_disk_auth_password, methods=["POST"]),
+        Route("/api/disk/security", api_disk_security),
+        Route("/api/disk/security/{action}", api_disk_security_action, methods=["POST"]),
         Route("/disk", disk_page),
         Route("/disk/", disk_page),
         Route("/api/disk/status", api_disk_status),
@@ -1010,6 +1437,11 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Mount("/tv-static", StaticFiles(directory=str(TV_PAGE_DIR), check_dir=False), name="tv-static"),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
+    app.state.security = security                     # tests / diagnostics (never sent to a client)
+    app.add_middleware(OriginGuard)
+    if protect_dashboard:
+        app.add_middleware(DashboardGate, check=lambda conn: tv_or_disk(conn) is not None)
+        seclog.warning("protect_dashboard is ON: the dashboard needs an approved /tv or a /disk session")
     app.state.runtime = rt
     app.state.mode = mode
     return app
