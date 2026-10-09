@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from server.config import PROJECT_ROOT, REPO_ROOT, load_config  # noqa: E402
 from server.voyo_account import VoyoAccount, mask_email  # noqa: E402
-from authhelp import disk_login  # noqa: E402
+from authhelp import disk_login, tv_approve  # noqa: E402
 from tools.voyo_capture import VoyoWindowCapture, ffmpeg_cmd  # noqa: E402
 
 
@@ -131,27 +131,30 @@ class HttpTest(unittest.TestCase):
                 cfg = load_config()
                 cfg["source"]["mode"] = "test"
                 app = appmod.create_app(cfg)
-                c, anon = TestClient(app), TestClient(app)
-                H = disk_login(c, d)                                  # a /disk session may also watch /tv
-                self.assertIn('id="dash"', c.get("/tv").text)
+                c, anon, tv = TestClient(app), TestClient(app), TestClient(app)
+                H = disk_login(c, d)
+                self.assertIn("ACCESS REQUEST", c.get("/tv").text)    # a /disk login is no way into /tv
+                self.assertEqual(c.get("/api/tv/status").status_code, 401)
+                P = tv_approve(app, c, H, tv)                         # the trusted phone approved this page load
                 self.assertIn("ACCESS REQUEST", anon.get("/tv").text)
-                self.assertEqual(c.get("/tv-static/vendor/hls.light.min.js").status_code, 200)
-                st = c.get("/api/tv/status").json()
+                self.assertEqual(tv.get("/tv-static/vendor/hls.light.min.js").status_code, 200)
+                st = tv.get("/api/tv/status", headers=P).json()
                 self.assertFalse(st["live"]["on_air"])
                 self.assertEqual(anon.get("/tv/live/index.m3u8").status_code, 401)
-                self.assertEqual(c.get("/tv/live/index.m3u8").status_code, 404)    # off air
-                self.assertEqual(c.get("/tv/live/..%2Fauth%2Fx").status_code, 404)
+                self.assertEqual(tv.get("/tv/live/index.m3u8", headers=P).status_code, 404)    # off air
+                self.assertEqual(tv.get("/tv/live/..%2Fauth%2Fx", headers=P).status_code, 404)
                 live = d / "live"
                 live.mkdir()
                 pdt = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 3)) + ".000+0000"
                 (live / "index.m3u8").write_text("#EXTM3U\n#EXTINF:2.0,\n#EXT-X-PROGRAM-DATE-TIME:" + pdt +
                                                  "\nlive_00001.ts\n")
                 (live / "live_00001.ts").write_bytes(b"\x47" * 188)
-                r = c.get("/tv/live/index.m3u8")
+                r = tv.get("/tv/live/index.m3u8", headers=P)
                 self.assertEqual(r.headers["content-type"].split(";")[0], "application/vnd.apple.mpegurl")
-                self.assertEqual(c.get("/tv/live/live_00001.ts").status_code, 200)
+                self.assertEqual(tv.get("/tv/live/live_00001.ts", headers=P).status_code, 200)
                 self.assertEqual(anon.get("/tv/live/live_00001.ts?token=tok").status_code, 401)   # no token way in
-                lv = c.get("/api/tv/status").json()["live"]
+                self.assertEqual(c.get("/tv/live/live_00001.ts").status_code, 401)                 # nor /disk
+                lv = tv.get("/api/tv/status", headers=P).json()["live"]
                 self.assertTrue(lv["on_air"])
                 self.assertEqual(lv["viewers"], 1)
                 self.assertAlmostEqual(lv["lag_s"], 3, delta=2)

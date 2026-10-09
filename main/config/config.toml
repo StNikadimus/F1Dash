@@ -21,13 +21,14 @@ tls_key = "data/tls/key.pem"
 # chosen in /disk. Sessions are HttpOnly cookies, stored only as hashes in <data>/auth/security.json.
 # ---------------------------------------------------------------------------
 [security]
-tv_session_days = 30        # an approved /tv browser stays signed in this long (revoke in /disk)
+tv_page_hours = 12          # an approved /tv page ends after this long at most (every load of /tv needs
+                            # a new approval on the trusted phone anyway; a server restart ends it too)
 disk_session_hours = 12     # /disk login lifetime
 reauth_minutes = 10         # destructive /disk actions (delete, trust a device ...) need the password this recently
-tv_request_seconds = 120    # an unanswered /tv request expires
+tv_request_seconds = 120    # an unanswered /tv approval request (challenge) expires
 login_max_failures = 5      # wrong /disk passwords per address in 5 min, then ...
 lockout_minutes = 5         # ... that address waits this long
-protect_dashboard = false   # true: the plain dashboard "/" (+ its APIs / WebSocket) also needs a /tv or /disk session
+protect_dashboard = false   # true: the plain dashboard "/" (+ its APIs / WebSocket) also needs an approved /tv page or a /disk login
 
 [source]
 # Mode at start - switchable at any time on the dashboard (MODE: AUTO / LIVE / VOD, no restart):

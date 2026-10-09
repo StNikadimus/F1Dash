@@ -10,10 +10,15 @@ Three separate concepts (never mixed):
   HttpOnly cookie (only its SHA-256 is stored) plus a public id, a short code shown on the phone and a
   name. A device is *not* trusted because it is connected: the disk user makes one device the trusted
   approver in /disk.
-* **TV DEVICE** - a browser that opened /tv and was approved by the trusted remote device (or by the
-  disk user in /disk). It gets its own session cookie.
+* **TV PAGE** - ONE load of the /tv page, approved by the trusted remote device (only that device -
+  not the disk user, not the TV itself). Nothing about a browser is remembered: every load of /tv
+  ends the previous authorization of that browser and starts a new challenge (random id, short
+  expiry, a browser secret in an HttpOnly cookie + a page secret held only in that page's memory).
+  An approval is bound to that one challenge and consumed once; it mints a TV page session that needs
+  BOTH the HttpOnly session cookie and the page's own secret (a header), lives only in the server's
+  memory (a restart ends it) and expires after ``tv_page_hours``.
 
-Sessions: ``secrets.token_urlsafe(32)`` tokens in HttpOnly cookies, only their SHA-256 stored (in
+Disk sessions: ``secrets.token_urlsafe(32)`` tokens in HttpOnly cookies, only their SHA-256 stored (in
 ``<data>/auth/security.json``, mode 600), with expiry, revocation and a fresh token on every login
 (no fixation). State-changing /disk requests also need the session's CSRF token in a header.
 """
@@ -158,16 +163,17 @@ class Security:
         self.path = self.dir / "security.json"
         self.code_path = self.dir / "disk-setup-code"
         c = cfg or {}
-        self.tv_ttl = float(c.get("tv_session_days", 30)) * 86400
+        self.tv_ttl = float(c.get("tv_page_hours", 12)) * 3600
         self.disk_ttl = float(c.get("disk_session_hours", 12)) * 3600
         self.reauth_s = float(c.get("reauth_minutes", 10)) * 60
         self.request_ttl = float(c.get("tv_request_seconds", 120))
         self.now = clock
         self._lock = threading.RLock()
-        self.requests: dict[str, dict] = {}           # TV authorization requests - memory only, short-lived
+        self.requests: dict[str, dict] = {}           # TV authorization challenges - memory only, short-lived
+        self.tv_pages: dict[str, dict] = {}           # sha(cookie) -> approved TV page - memory only
         self.connected: dict[str, dict] = {}          # device id -> {"count", "since"} (open /remote sockets)
         self.data: dict[str, Any] = {"disk": {"hash": None}, "trusted_device": None, "devices": {},
-                                     "tv_sessions": {}, "disk_sessions": {}}
+                                     "disk_sessions": {}}
         self._load()
 
     # ------------------------------------------------------------------ persistence (600)
@@ -175,11 +181,16 @@ class Security:
         try:
             d = json.loads(self.path.read_text(encoding="utf-8"))
             if isinstance(d, dict):
-                for k in ("disk", "devices", "tv_sessions", "disk_sessions"):
+                for k in ("disk", "devices", "disk_sessions"):
                     if isinstance(d.get(k), dict):
                         self.data[k] = d[k]
                 if isinstance(d.get("trusted_device"), str):
                     self.data["trusted_device"] = d["trusted_device"]
+                if "tv_sessions" in d:
+                    # older versions kept /tv sessions for 30 days: no TV stays authorized across a restart
+                    log.warning("%d stored /tv session(s) of an older version ended - every /tv load needs the "
+                                "phone's approval now", len(d.get("tv_sessions") or {}))
+                    self.save()
         except (OSError, ValueError):
             pass
         self._expire()
@@ -200,9 +211,9 @@ class Security:
 
     def _expire(self) -> None:
         now = self.now()
-        for kind in ("tv_sessions", "disk_sessions"):
-            for h in [h for h, s in self.data[kind].items() if s.get("expires", 0) < now]:
-                del self.data[kind][h]
+        for store in (self.data["disk_sessions"], self.tv_pages):
+            for h in [h for h, s in store.items() if s.get("expires", 0) < now]:
+                del store[h]
         devs = self.data["devices"]
         old = [i for i, d in devs.items() if i != self.data.get("trusted_device") and
                now - float(d.get("last_seen") or d.get("created") or 0) > 30 * 86400]
@@ -256,56 +267,69 @@ class Security:
         return ok
 
     # ------------------------------------------------------------------ sessions
+    def _store(self, kind: str) -> dict:
+        """disk sessions are in security.json; TV page sessions only in memory."""
+        return self.tv_pages if kind == "tv" else self.data["disk_sessions"]
+
+    def _persist(self, kind: str) -> None:
+        if kind != "tv":
+            self.save()
+
     def new_session(self, kind: str, label: str, **meta) -> tuple[str, dict]:
-        """kind "disk" | "tv" -> (token for the cookie, record). Always a fresh random token."""
+        """kind "disk" -> (token for the cookie, record). Always a fresh random token. (TV page sessions
+        come only from consume().)"""
+        if kind != "disk":
+            raise ValueError("TV sessions only come from an approved challenge")
         token = secrets.token_urlsafe(32)
         now = self.now()
         rec = {"id": secrets.token_hex(6), "created": now, "last_seen": now, "label": label[:80],
-               "expires": now + (self.disk_ttl if kind == "disk" else self.tv_ttl), **meta}
-        if kind == "disk":
-            rec.update(auth_at=now, csrf=secrets.token_urlsafe(24))
+               "expires": now + self.disk_ttl, "auth_at": now, "csrf": secrets.token_urlsafe(24), **meta}
         with self._lock:
-            self.data[f"{kind}_sessions"][sha(token)] = rec
+            self.data["disk_sessions"][sha(token)] = rec
             self.save()
         return token, rec
 
     def session(self, kind: str, token: Optional[str]) -> Optional[dict]:
+        """The session of a cookie. For "tv" this is the cookie alone - the TV endpoints use tv_page(),
+        which also needs the page's own secret."""
         if not token or len(token) > 200:
             return None
-        rec = self.data[f"{kind}_sessions"].get(sha(token))
+        store = self._store(kind)
+        rec = store.get(sha(token))
         if rec is None:
             return None
         now = self.now()
         if rec.get("expires", 0) < now:
             with self._lock:
-                self.data[f"{kind}_sessions"].pop(sha(token), None)
-                self.save()
+                store.pop(sha(token), None)
+                self._persist(kind)
             log.info("%s session %s expired", kind.upper(), rec.get("id"))
             return None
         if now - rec.get("last_seen", 0) > 300:            # not every request writes the file
             rec["last_seen"] = now
             with self._lock:
-                self.save()
+                self._persist(kind)
         return rec
 
     def revoke(self, kind: str, token: Optional[str] = None, sid: Optional[str] = None) -> bool:
         with self._lock:
-            store = self.data[f"{kind}_sessions"]
+            store = self._store(kind)
             key = sha(token) if token else next((h for h, s in store.items() if s.get("id") == sid), None)
             if key is None or key not in store:
                 return False
             rec = store.pop(key)
-            self.save()
+            self._persist(kind)
         log.info("%s session %s (%s) revoked", kind.upper(), rec.get("id"), rec.get("label"))
         return True
 
     def revoke_all(self, kind: str, except_token: Optional[str] = None) -> int:
         with self._lock:
             keep = sha(except_token) if except_token else None
-            store = self.data[f"{kind}_sessions"]
+            store = self._store(kind)
             n = len([h for h in store if h != keep])
-            self.data[f"{kind}_sessions"] = {h: s for h, s in store.items() if h == keep}
-            self.save()
+            for h in [h for h in store if h != keep]:
+                del store[h]
+            self._persist(kind)
         log.info("%d %s session(s) revoked", n, kind.upper())
         return n
 
@@ -410,80 +434,118 @@ class Security:
                         "created": d.get("created")})
         return sorted(out, key=lambda x: (not x["connected"], not x["trusted"], -(x["last_seen"] or 0)))
 
-    # ------------------------------------------------------------------ /tv authorization requests
+    # ------------------------------------------------------------------ /tv authorization challenges
     def _expire_requests(self) -> None:
         now = self.now()
-        for rid, r in list(self.requests.items()):
-            if r["status"] == "pending" and r["expires"] < now:
-                r["status"] = "expired"
-                log.info("/tv authorization request %s (%s) expired", r["code"], r["device"])
-            if now - r["created"] > self.request_ttl + 600:
-                del self.requests[rid]
+        with self._lock:
+            for rid, r in list(self.requests.items()):
+                if r["status"] in ("pending", "approved") and r["expires"] < now:
+                    r["status"] = "expired"
+                    log.info("/tv authorization request %s (%s) expired", r["code"], r["device"])
+                if now - r["created"] > self.request_ttl + 600:
+                    del self.requests[rid]
+            for h in [h for h, s in self.tv_pages.items() if s.get("expires", 0) < now]:
+                rec = self.tv_pages.pop(h)
+                log.info("/tv page %s (%s) expired", rec.get("id"), rec.get("label"))
 
-    def create_request(self, ua: str, requester_device: Optional[str], requester_disk: Optional[str]) -> tuple[str, dict]:
-        """-> (poll secret for the TV's HttpOnly cookie, request)."""
+    def create_request(self, ua: str, requester_device: Optional[str],
+                       supersede: Optional[str] = None) -> tuple[str, str, dict]:
+        """One load of /tv asks for access -> (browser secret for an HttpOnly cookie, page secret for the
+        page's memory, challenge). ``supersede``: the browser secret of this browser's previous challenge,
+        which is cancelled (a reload / ASK AGAIN replaces it)."""
         self._expire_requests()
-        if sum(1 for r in self.requests.values() if r["status"] == "pending") >= 20:
-            raise OverflowError("too many open requests")
-        poll = secrets.token_urlsafe(32)
-        rid = secrets.token_urlsafe(12)
-        now = self.now()
-        req = {"id": rid, "poll_sha": sha(poll), "code": human_code(), "device": ua_summary(ua), "created": now,
-               "expires": now + self.request_ttl, "status": "pending", "requester_device": requester_device,
-               "requester_disk": requester_disk, "decided_by": None, "consumed": False}
-        self.requests[rid] = req
+        with self._lock:
+            if supersede:
+                self.cancel_request(supersede)
+            if sum(1 for r in self.requests.values() if r["status"] == "pending") >= 20:
+                raise OverflowError("too many open requests")
+            browser, page = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+            rid = secrets.token_urlsafe(16)
+            now = self.now()
+            req = {"id": rid, "browser_sha": sha(browser), "page_sha": sha(page), "code": human_code(),
+                   "device": ua_summary(ua), "created": now, "expires": now + self.request_ttl, "status": "pending",
+                   "requester_device": requester_device, "decided_by": None}
+            self.requests[rid] = req
         log.info("/tv authorization requested by %s (request %s)", req["device"], req["code"])
-        return poll, req
+        return browser, page, req
 
-    def request_by_poll(self, poll: Optional[str]) -> Optional[dict]:
-        if not poll or len(poll) > 200:
+    def cancel_request(self, browser: Optional[str], why: str = "superseded") -> bool:
+        """This browser's open challenge ends (the page was reloaded / left, or a new one replaced it)."""
+        if not browser or len(browser) > 200:
+            return False
+        h = sha(browser)
+        with self._lock:
+            for r in self.requests.values():
+                if r["status"] in ("pending", "approved") and hmac.compare_digest(r["browser_sha"], h):
+                    r["status"] = why
+                    log.info("/tv authorization request %s (%s) %s", r["code"], r["device"], why)
+                    return True
+        return False
+
+    def request_for(self, browser: Optional[str], page: Optional[str]) -> Optional[dict]:
+        """The challenge of THIS page: both the browser's cookie and the page's own secret must match."""
+        if not browser or not page or len(browser) > 200 or len(page) > 200:
             return None
         self._expire_requests()
-        h = sha(poll)
-        return next((r for r in self.requests.values() if hmac.compare_digest(r["poll_sha"], h)), None)
+        hb, hp = sha(browser), sha(page)
+        return next((r for r in self.requests.values()
+                     if hmac.compare_digest(r["browser_sha"], hb) & hmac.compare_digest(r["page_sha"], hp)), None)
 
     def pending(self) -> list[dict]:
         self._expire_requests()
         return [{"id": r["id"], "code": r["code"], "device": r["device"], "expires_in": round(r["expires"] - self.now())}
                 for r in self.requests.values() if r["status"] == "pending"]
 
-    def decide(self, rid: str, approve: bool, by_device: Optional[str] = None, by_disk: Optional[str] = None,
-               by_poll: Optional[str] = None) -> str:
-        """The server decides who may decide: the trusted remote device, or a /disk session - never the
-        requesting browser itself. -> "approved" | "denied"; raises PermissionError / KeyError / ValueError."""
+    def decide(self, rid: str, approve: bool, by_device: Optional[str] = None) -> str:
+        """Only the trusted remote device decides - never the requesting browser, never a /disk login.
+        -> "approved" | "denied"; raises PermissionError / KeyError / ValueError."""
         self._expire_requests()
-        r = self.requests.get(str(rid or ""))
-        if r is None:
-            raise KeyError("unknown request")
-        if r["status"] != "pending":
-            raise ValueError(f"request already {r['status']}")
-        if by_device is not None:
-            if not self.trusted(by_device):
+        with self._lock:
+            r = self.requests.get(str(rid or ""))
+            if r is None:
+                raise KeyError("unknown request")
+            if r["status"] != "pending":
+                raise ValueError(f"request already {r['status']}")
+            if by_device is None or not self.trusted(by_device):
                 log.warning("/tv request %s: decision from an untrusted remote device %s refused", r["code"], by_device)
                 raise PermissionError("this device is not the trusted approver")
             if by_device == r["requester_device"]:
                 raise PermissionError("a device cannot approve its own /tv request")
-        elif by_disk is not None:
-            if by_disk == r["requester_disk"]:
-                raise PermissionError("a browser cannot approve its own /tv request")
-        else:
-            raise PermissionError("no approver")
-        if by_poll is not None and hmac.compare_digest(sha(by_poll), r["poll_sha"]):
-            raise PermissionError("a browser cannot approve its own /tv request")
-        r["status"] = "approved" if approve else "denied"
-        who = (self.data["devices"].get(by_device) or {}).get("name") if by_device else "the /disk user"
-        r["decided_by"] = who
+            r["status"] = "approved" if approve else "denied"
+            who = (self.data["devices"].get(by_device) or {}).get("name")
+            r["decided_by"] = who
         log.warning("/tv authorization %s for %s (request %s) by %s", r["status"].upper(), r["device"], r["code"], who)
         return r["status"]
 
-    def consume(self, r: dict) -> Optional[tuple[str, dict]]:
-        """The approved TV browser picks up its session - once."""
-        if r["status"] != "approved" or r["consumed"]:
+    def consume(self, r: dict) -> Optional[tuple[str, str, dict]]:
+        """The approved page picks up its TV page session - once (atomic: a second call, a replay or a
+        late call gets nothing). -> (cookie token, page token, record)."""
+        with self._lock:
+            if r["status"] != "approved":
+                return None
+            now = self.now()
+            if now > r["expires"]:
+                r["status"] = "expired"
+                return None
+            r["status"] = "consumed"
+            cookie, page = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+            rec = {"id": secrets.token_hex(6), "created": now, "last_seen": now, "expires": now + self.tv_ttl,
+                   "label": r["device"][:80], "approved_by": r.get("decided_by"), "request": r["code"],
+                   "page_sha": sha(page)}
+            if len(self.tv_pages) >= 100:                 # bounded: the oldest TV page ends
+                del self.tv_pages[min(self.tv_pages, key=lambda h: self.tv_pages[h]["created"])]
+            self.tv_pages[sha(cookie)] = rec
+        log.info("/tv page %s authorized for %s (request %s)", rec["id"], rec["label"], rec["request"])
+        return cookie, page, rec
+
+    def tv_page(self, cookie: Optional[str], page: Optional[str]) -> Optional[dict]:
+        """An approved TV page: its HttpOnly session cookie AND the page's own secret (only that page has it)."""
+        rec = self.session("tv", cookie)
+        if rec is None or not page or len(page) > 200:
             return None
-        r["consumed"] = True
-        return self.new_session("tv", r["device"], approved_by=r.get("decided_by"))
+        return rec if hmac.compare_digest(rec["page_sha"], sha(page)) else None
 
     def tv_sessions_public(self) -> list[dict]:
         return [{"id": s["id"], "device": s.get("label"), "created": s.get("created"), "expires": s.get("expires"),
                  "last_seen": s.get("last_seen"), "approved_by": s.get("approved_by")}
-                for s in sorted(self.data["tv_sessions"].values(), key=lambda s: -s.get("created", 0))]
+                for s in sorted(self.tv_pages.values(), key=lambda s: -s.get("created", 0))]

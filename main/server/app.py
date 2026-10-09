@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from typing import Any, Optional
 
 from starlette.applications import Starlette
@@ -380,10 +380,17 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
 
     async def health(request: Request) -> Response:
         st = mode.state()
-        return JSONResponse({"ok": True, "mode": rt.source.mode if rt.source else None,
-                             "selected_mode": st["selected_mode"], "detected_mode": st["detected_mode"],
-                             "effective_mode": st["effective_mode"],
-                             "status": rt.engine._status if rt.engine else {}, "clients": len(hub.clients)})
+        out = {"ok": True, "mode": rt.source.mode if rt.source else None,
+               "selected_mode": st["selected_mode"], "detected_mode": st["detected_mode"],
+               "effective_mode": st["effective_mode"],
+               "status": rt.engine._status if rt.engine else {}, "clients": len(hub.clients)}
+        if _ip(request) in LOOPBACK:
+            # for server/update-f1dash.sh on this machine: is a recording running (do not restart now)?
+            with contextlib.suppress(Exception):
+                rs = admin.current_state(stream_rec, player_rec, player_rec is not None, player_hb["data"], _hb_age())
+                out["recorder"] = {"state": rs.get("state"),
+                                   "busy": rs.get("state") in ("RECORDING", "OPENING", "WATCHING (PC)")}
+        return JSONResponse(out)
 
     async def api_mode(request: Request) -> Response:
         """GET: the mode selector state. POST {"mode": "AUTO" | "LIVE" | "VOD"}: select it
@@ -479,9 +486,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
 
     async def api_remote_info(request: Request) -> Response:
         """URLs of the phone remote (LAN / Tailscale) for the QR code on the dashboard. The remote token is
-        only put into them for this server itself or a signed-in /tv or /disk browser - not for anyone."""
+        only put into them for this server itself, a browser with an approved /tv page or a /disk login."""
         info = phone_remote()
-        if remote.token and _ip(request) not in LOOPBACK and tv_or_disk(request) is None:
+        if remote.token and _ip(request) not in LOOPBACK and dash_access(request) is None:
             strip = lambda u: u.split("?")[0] if isinstance(u, str) else u      # noqa: E731
             info = {**info, "url": strip(info.get("url")), "lan": [strip(u) for u in info.get("lan") or []],
                     "tailscale": [strip(u) for u in info.get("tailscale") or []], "token_hidden": True}
@@ -869,27 +876,55 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return out
 
     async def tv_page(request: Request) -> Response:
-        """The TV page only with an approved /tv session (or a /disk session) - else the request page."""
-        page = "index.html" if tv_or_disk(request) is not None else "auth.html"
-        return FileResponse(TV_PAGE_DIR / page, headers={"Cache-Control": "no-store"})
+        """Every load of /tv starts from zero: whatever this browser was authorized for before (its TV page
+        session, its open challenge) ends here, and the page that is served holds no TV data - it asks the
+        trusted phone for a fresh approval first (server/tv/tv.js). No cookie, device id, IP or /disk login
+        lets a load of /tv skip that."""
+        tok = request.cookies.get(COOKIE_TV)
+        if tok and security.revoke("tv", token=tok):
+            seclog.info("/tv loaded again in a browser: its previous TV authorization ended")
+        if security.cancel_request(request.cookies.get(COOKIE_TVREQ)):
+            push_remote_state()
+        resp = FileResponse(TV_PAGE_DIR / "index.html", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        _clear_cookie(resp, request, COOKIE_TV)
+        _clear_cookie(resp, request, COOKIE_TVREQ)
+        return resp
+
+    def tv_auth(request, allow_query: bool = False) -> Optional[dict]:
+        """An approved /tv page: its HttpOnly session cookie AND its page secret (X-F1-TV-Page header; for the
+        browser's own HLS player, which cannot send headers, ?p= on the live files)."""
+        page = request.headers.get("x-f1-tv-page") or (request.query_params.get("p") if allow_query else None)
+        return security.tv_page(request.cookies.get(COOKIE_TV), page)
+
+    def _tv_denied() -> Response:
+        return JSONResponse({"ok": False, "error": "not authorized", "auth": "tv"}, status_code=401,
+                            headers={"Cache-Control": "no-store"})
 
     async def tv_live_file(request: Request) -> Response:
-        """The live HLS of the server VOYO player (only while it records) - an approved /tv session."""
-        if tv_or_disk(request) is None:
-            return JSONResponse({"ok": False, "error": "not authorized", "auth": "tv"}, status_code=401)
+        """The live HLS of the server VOYO player (only while it records) - an approved /tv page only."""
+        if tv_auth(request, allow_query=True) is None:
+            return _tv_denied()
         name = request.path_params["name"]
         path = live_dir / name
         if not LIVE_NAME.match(name) or not path.is_file():
             return JSONResponse({"ok": False, "error": "off air"}, status_code=404)
         if name == "index.m3u8":
             viewers[request.client.host if request.client else "?"] = time.monotonic()
-            return FileResponse(path, media_type="application/vnd.apple.mpegurl",
-                                headers={"Cache-Control": "no-cache, no-store"})
-        return FileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "max-age=60"})
+            nohdr = {"Cache-Control": "no-cache, no-store"}
+            q = request.query_params.get("p")
+            if q and not request.headers.get("x-f1-tv-page"):
+                # native HLS (Safari): the pieces must carry the page secret too
+                text = await run_in_threadpool(path.read_text, errors="replace")
+                suffix = "?p=" + quote(q, safe="")
+                text = "\n".join(ln + suffix if ln.strip() and not ln.startswith("#") else ln
+                                 for ln in text.splitlines()) + "\n"
+                return Response(text, media_type="application/vnd.apple.mpegurl", headers=nohdr)
+            return FileResponse(path, media_type="application/vnd.apple.mpegurl", headers=nohdr)
+        return FileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "private, max-age=60"})
 
     async def api_tv_status(request: Request) -> Response:
-        if tv_or_disk(request) is None:
-            return JSONResponse({"ok": False, "error": "not authorized", "auth": "tv"}, status_code=401)
+        if tv_auth(request) is None:
+            return _tv_denied()
         cur = player_rec.cur if player_rec is not None else None
         sess = (cur or {}).get("session") or {}
         hb = player_hb["data"] or {}
@@ -903,9 +938,15 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     def _ip(request) -> str:
         return request.client.host if request.client else "?"
 
-    def _set_cookie(resp: Response, request, name: str, value: str, max_age: float, samesite: str = "strict") -> None:
-        resp.set_cookie(name, value, max_age=int(max_age), path="/", httponly=True, samesite=samesite,
-                        secure=request.url.scheme in ("https", "wss"))
+    def _set_cookie(resp: Response, request, name: str, value: str, max_age: Optional[float],
+                    samesite: str = "strict") -> None:
+        """max_age None: a browser-session cookie (gone when the browser closes)."""
+        resp.set_cookie(name, value, max_age=None if max_age is None else int(max_age), path="/", httponly=True,
+                        samesite=samesite, secure=request.url.scheme in ("https", "wss"))
+
+    def _clear_cookie(resp: Response, request, name: str) -> None:
+        if name in request.cookies:
+            _set_cookie(resp, request, name, "", 0)
 
     def _same_origin(request) -> bool:
         """Browsers always send Origin on cross-site POSTs and WebSockets: it must be this server."""
@@ -934,9 +975,12 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             return None, JSONResponse({"ok": False, "error": "reauth_required"}, status_code=403)
         return s, None
 
-    def tv_or_disk(request) -> Optional[dict]:
-        s = security.session("tv", request.cookies.get(COOKIE_TV))
-        return s if s is not None else _disk(request)[1]
+    def dash_access(conn) -> Optional[dict]:
+        """The plain dashboard when [security] protect_dashboard is on (and the remote token in the QR code):
+        the cookie of a currently approved /tv page (its iframe cannot send the page header) or a /disk
+        login. Never used for /tv itself - the TV endpoints need tv_auth()."""
+        s = security.session("tv", conn.cookies.get(COOKIE_TV))
+        return s if s is not None else _disk(conn)[1]
 
     async def _json(request, limit: int = 4096) -> dict:
         try:
@@ -1100,9 +1144,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             elif action == "logout_others":
                 security.revoke_all("disk", except_token=request.cookies.get(COOKIE_DISK))
             elif action == "decide":
-                security.decide(str(body.get("request") or ""), bool(body.get("approve")),
-                                by_disk=secmod.sha(request.cookies.get(COOKIE_DISK) or ""),
-                                by_poll=request.cookies.get(COOKIE_TVREQ))
+                # /tv is approved only on the trusted phone (/remote), never from /disk
+                return JSONResponse({"ok": False, "error": "approve /tv on the trusted phone (/remote)"}, status_code=403)
             else:
                 return JSONResponse({"ok": False, "error": "unknown action"}, status_code=404)
         except KeyError as exc:
@@ -1114,59 +1157,73 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
 
     # ---------------------------------------------------------------- /tv: approval by the trusted remote device
     async def api_tv_auth_request(request: Request) -> Response:
-        """The /tv browser asks for access: a server-side request (random id, expires), the TV keeps only a
-        random poll secret in an HttpOnly cookie; the trusted /remote device is notified."""
+        """A loaded /tv page asks for access: a new server-side challenge (random id, expires). The browser
+        gets a random secret in an HttpOnly cookie, the page a second one it keeps only in memory; the
+        trusted /remote device is notified. Any earlier authorization of this browser ends."""
         if not _same_origin(request):
             return JSONResponse({"ok": False, "error": "cross-site request refused"}, status_code=403)
-        if tv_or_disk(request) is not None:
-            return JSONResponse({"ok": True, "authenticated": True})
         ip = _ip(request)
         wait = rl_tvreq.blocked(ip)
         if wait:
             return _too_many(wait)
         rl_tvreq.hit(ip)
+        tok = request.cookies.get(COOKIE_TV)
+        if tok:
+            security.revoke("tv", token=tok)
         dev = security.device(request.cookies.get(COOKIE_DEV))
         try:
-            disk_cookie = request.cookies.get(COOKIE_DISK)
-            poll, req = security.create_request(request.headers.get("user-agent", ""), dev[0] if dev else None,
-                                                secmod.sha(disk_cookie) if disk_cookie else None)
+            browser, page, req = security.create_request(request.headers.get("user-agent", ""), dev[0] if dev else None,
+                                                         supersede=request.cookies.get(COOKIE_TVREQ))
         except OverflowError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=429)
         push_remote_state()
         trusted = security.data.get("trusted_device")
-        resp = JSONResponse({"ok": True, "code": req["code"], "expires_in": round(req["expires"] - time.time()),
-                             "approver_set": bool(trusted), "approver_online": bool(trusted and trusted in security.connected)})
-        _set_cookie(resp, request, COOKIE_TVREQ, poll, security.request_ttl + 30, "strict")
+        resp = JSONResponse({"ok": True, "code": req["code"], "challenge": page,
+                             "expires_in": round(req["expires"] - time.time()),
+                             "approver_set": bool(trusted), "approver_online": bool(trusted and trusted in security.connected)},
+                            headers={"Cache-Control": "no-store"})
+        _set_cookie(resp, request, COOKIE_TVREQ, browser, security.request_ttl + 30, "strict")
+        _clear_cookie(resp, request, COOKIE_TV)
         return resp
 
     async def api_tv_auth_status(request: Request) -> Response:
-        if tv_or_disk(request) is not None:
-            return JSONResponse({"status": "authenticated"})
-        r = security.request_by_poll(request.cookies.get(COOKIE_TVREQ))
+        """The page that created the challenge asks for its state (its cookie + X-F1-TV-Challenge). Once
+        approved, the first such call - and only it - turns the approval into this page's TV session."""
+        if not _same_origin(request):
+            return JSONResponse({"ok": False, "error": "cross-site request refused"}, status_code=403)
+        nostore = {"Cache-Control": "no-store"}
+        r = security.request_for(request.cookies.get(COOKIE_TVREQ), request.headers.get("x-f1-tv-challenge"))
         if r is None:
-            return JSONResponse({"status": "none"})
-        out = {"status": r["status"], "code": r["code"], "expires_in": max(0, round(r["expires"] - time.time()))}
+            return JSONResponse({"status": "none"}, headers=nostore)
         if r["status"] == "approved":
             got = security.consume(r)
             if got is None:
-                return JSONResponse({"status": "none"})
-            tok, rec = got
-            seclog.info("/tv session %s created for %s", rec["id"], rec["label"])
-            resp = JSONResponse({"status": "authenticated"})
-            _set_cookie(resp, request, COOKIE_TV, tok, security.tv_ttl, "lax")
-            resp.delete_cookie(COOKIE_TVREQ, path="/")
+                return JSONResponse({"status": r["status"]}, headers=nostore)
+            cookie, page, rec = got
+            resp = JSONResponse({"status": "authenticated", "page": page, "expires_in": round(rec["expires"] - time.time())},
+                                headers=nostore)
+            _set_cookie(resp, request, COOKIE_TV, cookie, None, "strict")      # browser-session cookie
+            _clear_cookie(resp, request, COOKIE_TVREQ)
             return resp
-        return JSONResponse(out)
+        return JSONResponse({"status": r["status"], "code": r["code"], "expires_in": max(0, round(r["expires"] - time.time()))},
+                            headers=nostore)
 
     async def api_tv_logout(request: Request) -> Response:
+        """The TV page ends its authorization (LOG OUT button, or the page being left - sendBeacon with the
+        page secret as the body). Only the page itself can: cookie + its page secret."""
         if not _same_origin(request):
             return JSONResponse({"ok": False, "error": "cross-site request refused"}, status_code=403)
-        s = security.session("tv", request.cookies.get(COOKIE_TV))
-        if s is None:
-            return JSONResponse({"ok": False, "error": "not signed in"}, status_code=401)
-        security.revoke("tv", token=request.cookies.get(COOKIE_TV))
+        page = request.headers.get("x-f1-tv-page")
+        if not page:
+            if int(request.headers.get("content-length") or 0) > 1024:
+                return _tv_denied()
+            page = (await request.body())[:200].decode("ascii", "replace").strip()
+        tok = request.cookies.get(COOKIE_TV)
+        if security.tv_page(tok, page) is None:
+            return _tv_denied()
+        security.revoke("tv", token=tok)
         resp = JSONResponse({"ok": True})
-        resp.delete_cookie(COOKIE_TV, path="/")
+        _clear_cookie(resp, request, COOKIE_TV)
         return resp
 
     def _rec_for(iid: str) -> VoyoStreamRecorder:
@@ -1290,7 +1347,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         if kind == "remote" and not remote.check_token(ws.query_params.get("token")):
             await ws.close(code=4401)
             return
-        if kind == "dashboard" and protect_dashboard and tv_or_disk(ws) is None:
+        if kind == "dashboard" and protect_dashboard and dash_access(ws) is None:
             await ws.close(code=4401)
             return
         dev = security.device(ws.cookies.get(COOKIE_DEV)) if kind == "remote" else None
@@ -1406,7 +1463,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/tv/live/{name}", tv_live_file),
         Route("/api/tv/status", api_tv_status),
         Route("/api/tv/auth/request", api_tv_auth_request, methods=["POST"]),
-        Route("/api/tv/auth/status", api_tv_auth_status),
+        Route("/api/tv/auth/status", api_tv_auth_status, methods=["POST"]),
         Route("/api/tv/logout", api_tv_logout, methods=["POST"]),
         Route("/api/disk/auth/state", api_disk_auth_state),
         Route("/api/disk/auth/setup", api_disk_auth_setup, methods=["POST"]),
@@ -1440,7 +1497,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     app.state.security = security                     # tests / diagnostics (never sent to a client)
     app.add_middleware(OriginGuard)
     if protect_dashboard:
-        app.add_middleware(DashboardGate, check=lambda conn: tv_or_disk(conn) is not None)
+        app.add_middleware(DashboardGate, check=lambda conn: dash_access(conn) is not None)
         seclog.warning("protect_dashboard is ON: the dashboard needs an approved /tv or a /disk session")
     app.state.runtime = rt
     app.state.mode = mode

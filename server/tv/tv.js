@@ -1,10 +1,67 @@
 /* /tv - one page for the TV: the dashboard (iframe, layout forced for this window) and the server's live
    VOYO stream (HLS from tools/voyo_capture.py, only while the server VOYO player records) laid exactly over
-   the dashboard's video slot. Keys: 1 race view, 2 video, 3 dashboard, M sound, F fullscreen. */
+   the dashboard's video slot. Keys: 1 race view, 2 video, 3 dashboard, M sound, F fullscreen.
+
+   ACCESS - every load of this page needs a NEW approval on the trusted phone (/remote), checked by the
+   server: the page asks for a challenge, the phone approves exactly that one, and the server then gives
+   THIS page its session (HttpOnly cookie + a page secret that exists only in the variable PAGE below -
+   never in storage). A reload, a new tab, another browser start from zero; the server ends the earlier
+   authorization of this browser whenever /tv is loaded. Nothing of the TV starts before the approval. */
 "use strict";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-// access: the approved /tv session (HttpOnly cookie set by the server after the trusted remote approved)
+
+/* ------------------------------------------------------------------ authorization of this page load */
+let PAGE = null, challenge = null, authTimer = null, authTotal = 120, leaving = false;
+const next = (() => { const n = new URLSearchParams(location.search).get("next") || "/tv";
+  return /^\/[A-Za-z0-9_\-\/]*$/.test(n) && !n.startsWith("//") ? n : "/tv"; })();
+function authShow(title, msg, cls) { $("a-title").textContent = title; $("a-msg").textContent = msg; $("a-msg").className = "msg " + (cls || ""); }
+async function ask() {
+  clearTimeout(authTimer); $("a-again").hidden = true; challenge = null;
+  let r, b;
+  try { r = await fetch("/api/tv/auth/request", { method: "POST", credentials: "same-origin", cache: "no-store" }); b = await r.json(); }
+  catch (e) { authShow("NO CONNECTION", "the F1 server is not reachable - retrying", "bad"); authTimer = setTimeout(ask, 5000); return; }
+  if (!r.ok || !b.challenge) { authShow("NOT NOW", b.error || "the request was refused", "bad"); $("a-again").hidden = false; return; }
+  challenge = b.challenge; authTotal = b.expires_in || 120;
+  $("a-code").textContent = b.code;
+  if (!b.approver_set) authShow("APPROVAL NEEDED", "No phone is set up to approve /tv yet: in /disk → SECURITY choose your /remote device (USE FOR AUTH), then ask again.", "bad");
+  else authShow("APPROVE ON YOUR PHONE", `Open /remote on the trusted phone${b.approver_online ? "" : " (it is not connected right now)"} and approve the request with this code.`);
+  authPoll();
+}
+async function authPoll() {
+  let b;
+  try {
+    b = await (await fetch("/api/tv/auth/status", { method: "POST", cache: "no-store", credentials: "same-origin",
+      headers: { "X-F1-TV-Challenge": challenge } })).json();
+  } catch (e) { authTimer = setTimeout(authPoll, 3000); return; }
+  if (b.status === "authenticated" && b.page) {
+    PAGE = b.page; challenge = null;
+    authShow("APPROVED", "opening…", "ok");
+    if (next !== "/tv") { leaving = true; location.href = next; return; }      // the plain dashboard ([security] protect_dashboard)
+    start(); return;
+  }
+  if (b.status === "pending") {
+    $("a-bar").style.width = Math.max(0, b.expires_in / authTotal * 100) + "%";
+    authTimer = setTimeout(authPoll, 1500); return;
+  }
+  const why = { denied: ["DENIED", "the request was denied on the phone"], expired: ["EXPIRED", "nobody answered in time"],
+    superseded: ["REPLACED", "/tv was opened again in this browser - this request ended"],
+    consumed: ["ALREADY USED", "this approval was already used"], none: ["NO REQUEST", "the request is gone"] }[b.status] || ["NO ACCESS", b.status];
+  challenge = null;
+  authShow(why[0], why[1], "bad"); $("a-bar").style.width = "0"; $("a-again").hidden = false;
+}
+$("a-again").addEventListener("click", ask);
+/* every protected request carries this page's secret; 401 = this page's authorization ended -> start again */
+function tvFetch(url) {
+  return fetch(url, { cache: "no-store", credentials: "same-origin", headers: { "X-F1-TV-Page": PAGE || "" } });
+}
+function ended() { PAGE = null; leaving = true; detach(); location.reload(); }
+window.addEventListener("pagehide", () => {                 // leaving / closing / reloading: end it on the server too
+  if (PAGE && !leaving) { try { navigator.sendBeacon("/api/tv/logout", PAGE); } catch (e) { /* the next load ends it */ } }
+  PAGE = null;
+});
+window.addEventListener("pageshow", (e) => { if (e.persisted) location.reload(); });   // back/forward cache: approve again
+
 let layout = "RACE_VIEW", hls = null, loaded = false, status = null, serverOffset = 0, playing = false, streamErr = "";
 try { layout = localStorage.getItem("f1tv-layout") || layout; } catch (e) { /* ignore */ }
 
@@ -40,7 +97,6 @@ function place() {
 }
 dash.addEventListener("load", () => { setTimeout(place, 300); setTimeout(place, 1500); });
 window.addEventListener("resize", () => setTimeout(place, 100));
-setInterval(place, 1000);                               // the dashboard re-lays itself out (TV mode, banners)
 
 /* ------------------------------------------------------------------ the live stream */
 function attach() {
@@ -49,10 +105,10 @@ function attach() {
   if (window.Hls && Hls.isSupported()) {
     hls = new Hls({
       liveSyncDurationCount: 3, maxLiveSyncPlaybackRate: 1.1, lowLatencyMode: false, backBufferLength: 30,
-      xhrSetup: (xhr) => { xhr.withCredentials = true; },
+      xhrSetup: (xhr) => { xhr.withCredentials = true; xhr.setRequestHeader("X-F1-TV-Page", PAGE || ""); },
     });
     hls.on(Hls.Events.ERROR, (_e, d) => {
-      if (d.response && d.response.code === 401) { location.reload(); return; }     // session ended -> request page
+      if (d.response && d.response.code === 401) { ended(); return; }              // authorization ended -> approve again
       if (d.fatal) {
         streamErr = /codec|buffer(Add|Append)/i.test(d.details || "") ? "this browser cannot decode the stream (H.264) - use Chrome, Edge, Firefox or Safari"
           : `stream error (${d.details || d.type}) - retrying`;
@@ -61,8 +117,8 @@ function attach() {
     });
     hls.loadSource(LIVE_URL);
     hls.attachMedia(video);
-  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {          // Safari / iOS: native HLS
-    video.src = LIVE_URL;
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {          // Safari / iOS: native HLS (no headers:
+    video.src = LIVE_URL + "?p=" + encodeURIComponent(PAGE || "");          // the page secret in the URL instead)
   } else {
     loaded = false; showOff("THIS BROWSER CANNOT PLAY THE STREAM", "use Chrome, Edge, Firefox or Safari", "warn");
     return;
@@ -85,8 +141,8 @@ for (const ev of ["waiting", "emptied", "error", "pause"]) video.addEventListene
 /* ------------------------------------------------------------------ server status (every 3 s) */
 async function poll() {
   try {
-    const r = await fetch("/api/tv/status", { cache: "no-store" });
-    if (r.status === 401) { location.reload(); return; }        // revoked / expired: the server shows the request page
+    const r = await tvFetch("/api/tv/status");
+    if (r.status === 401) { ended(); return; }                   // revoked / expired / server restarted: approve again
     status = await r.json();
   } catch (e) { showOff("NO CONNECTION", "the F1 server is not reachable", "warn"); setCtl('<span class="off">● NO CONNECTION</span>'); return; }
   serverOffset = status.now * 1000 - Date.now();
@@ -113,12 +169,12 @@ async function poll() {
   }
 }
 function setCtl(html) { $("ctl-status").innerHTML = html; }
-setInterval(poll, 3000); poll();
 
 /* ------------------------------------------------------------------ controls */
 let hideTimer = null;
 function showCtl() { $("ctl").classList.remove("hide"); clearTimeout(hideTimer); hideTimer = setTimeout(() => $("ctl").classList.add("hide"), 4000); }
-document.addEventListener("mousemove", showCtl); document.addEventListener("touchstart", showCtl, { passive: true });
+document.addEventListener("mousemove", () => { if (PAGE) showCtl(); });
+document.addEventListener("touchstart", () => { if (PAGE) showCtl(); }, { passive: true });
 document.querySelectorAll("#layouts button").forEach((b) => b.addEventListener("click", () => setLayout(b.dataset.l)));
 function toggleSound() { video.muted = !video.muted; if (!video.muted) video.play().catch(() => {}); $("unmute").hidden = !video.muted; }
 $("b-sound").addEventListener("click", toggleSound);
@@ -127,14 +183,23 @@ function toggleFull() { if (document.fullscreenElement) document.exitFullscreen(
 $("b-full").addEventListener("click", toggleFull);
 $("b-tok").addEventListener("click", async () => {
   if (!confirm("Log this TV out? It will need approval again.")) return;
-  await fetch("/api/tv/logout", { method: "POST", credentials: "same-origin" }).catch(() => {});
-  location.reload();
+  await fetch("/api/tv/logout", { method: "POST", credentials: "same-origin", headers: { "X-F1-TV-Page": PAGE || "" } }).catch(() => {});
+  ended();
 });
 document.addEventListener("keydown", (e) => {
-  if (e.target.tagName === "INPUT") return;
+  if (!PAGE || e.target.tagName === "INPUT") return;
   const k = e.key.toLowerCase();
   if (k === "1") setLayout("RACE_VIEW"); else if (k === "2") setLayout("VIDEO_FOCUS"); else if (k === "3") setLayout("FULL_DASHBOARD");
   else if (k === "m") toggleSound(); else if (k === "f") toggleFull(); else return;
   showCtl();
 });
-setLayout(layout); showCtl();
+
+/* ------------------------------------------------------------------ start: only after THIS load was approved */
+function start() {
+  document.body.classList.remove("locked");
+  $("auth").hidden = true;
+  setLayout(layout); showCtl();
+  setInterval(poll, 3000); poll();
+  setInterval(place, 1000);                               // the dashboard re-lays itself out (TV mode, banners)
+}
+ask();

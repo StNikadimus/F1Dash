@@ -22,7 +22,7 @@ DATA_DIR = Path(os.environ["F1DASH_DATA_DIR"]).expanduser() if os.environ.get("F
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 
 DEFAULTS: dict[str, Any] = {
-    "security": {"tv_session_days": 30, "disk_session_hours": 12, "reauth_minutes": 10, "tv_request_seconds": 120,
+    "security": {"tv_page_hours": 12, "disk_session_hours": 12, "reauth_minutes": 10, "tv_request_seconds": 120,
                  "login_max_failures": 5, "lockout_minutes": 5, "protect_dashboard": False},
     "server": {"host": "0.0.0.0", "port": 8080, "log_level": "INFO", "https_port": 0,
                "tls_cert": "data/tls/cert.pem", "tls_key": "data/tls/key.pem"},
