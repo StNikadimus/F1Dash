@@ -318,6 +318,14 @@ class GatewayTest(unittest.TestCase):
         # and the bodies say nothing about why
         self.assertEqual(anon.get("/disk").json(), {"ok": False, "error": "not found"})
 
+    def test_07_refusals_cannot_forge_log_lines(self):
+        with self.assertLogs("security", level="WARNING") as logs:
+            asgi_call(self.e.pub, "/x\nFAKE: admin logged in", raw=b"/x%0aFAKE:%20admin%20logged%20in",
+                      headers=[(b"x-forwarded-for", b"203.0.113.77")])
+        self.assertEqual(len(logs.output), 1)
+        self.assertNotIn("\n", logs.output[0])
+        self.assertIn("\\n", logs.output[0])                               # shown escaped
+
     # 8 path tricks, methods, hosts, queries -----------------------------------------------------------
     def test_08_ambiguous_paths_methods_hosts_queries(self):
         g = self.e.pub
@@ -411,6 +419,14 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(PublicGateway.client_ip({"headers": []}), "public")
         self.assertEqual(PublicGateway.client_ip({"headers": [(b"x-forwarded-for", b"bogus")]}), "public")
         self.assertEqual(PublicGateway.client_ip({"headers": [(b"x-forwarded-for", b"203.0.113.9")]}), "203.0.113.9")
+        # Go prints IPv4 visitors over IPv6 as ::ffff:a.b.c.d - still that IPv4 visitor, and never "local"
+        self.assertEqual(PublicGateway.client_ip({"headers": [(b"x-forwarded-for", b"::ffff:203.0.113.9")]}), "203.0.113.9")
+        self.assertEqual(PublicGateway.client_ip({"headers": [(b"x-forwarded-for", b"::ffff:127.0.0.1")]}), "public")
+        # IPv6: one visitor = its /64 (rotating addresses inside it does not reset the limits)
+        a = PublicGateway.client_ip({"headers": [(b"x-forwarded-for", b"2001:db8:1:2::1")]})
+        b = PublicGateway.client_ip({"headers": [(b"x-forwarded-for", b"2001:db8:1:2:ffff::9")]})
+        self.assertEqual((a, b), ("2001:db8:1:2::/64", "2001:db8:1:2::/64"))
+        self.assertNotEqual(a, PublicGateway.client_ip({"headers": [(b"x-forwarded-for", b"2001:db8:1:3::1")]}))
         # the LAN app gives this machine extras (the remote token, the recorder state) - never through the gateway
         local = self.e.internet("127.0.0.1")
         self.assertEqual(local.get("/api/remote/info").status_code, 404)

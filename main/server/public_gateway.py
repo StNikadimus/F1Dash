@@ -125,14 +125,20 @@ class PublicGateway:
 
     @staticmethod
     def client_ip(scope) -> str:
-        """The visitor (X-Forwarded-For from tailscaled) - never loopback, never this machine."""
+        """The visitor (X-Forwarded-For from tailscaled: the original client, not the Funnel relay) - never
+        loopback, never this machine. IPv4 written as IPv6 (::ffff:a.b.c.d, as Go prints it) counts as the IPv4
+        address; an IPv6 visitor counts as its /64, so rotating addresses inside it does not dodge the limits."""
         raw = PublicGateway._header(scope, b"x-forwarded-for").split(",")[0].strip()
         try:
             ip = ipaddress.ip_address(raw)
         except ValueError:
             return "public"
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
         if ip.is_loopback or ip.is_unspecified:
             return "public"
+        if ip.version == 6:
+            return str(ipaddress.ip_network(f"{ip}/64", strict=False))
         return str(ip)
 
     def _route(self, path: str, method: str, kind: str):
@@ -185,8 +191,8 @@ class PublicGateway:
         if not self.denied.blocked(client):
             self.denied.hit(client)
             # the path only - never the query string (it may hold a page secret or a token)
-            log.warning("public gateway refused %s %s from %s: %s", scope.get("method", "WS"),
-                        (scope.get("path") or "")[:80], client, why)
+            log.warning("public gateway refused %s %s from %s: %s", ascii(str(scope.get("method", "WS"))[:10]),
+                        ascii((scope.get("path") or "")[:80]), client, why)     # ascii(): no forged log lines
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 4404})
             return
