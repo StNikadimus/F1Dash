@@ -30,6 +30,14 @@ Typical setups:
   every `/tv` API call and video piece.
 * Use **https** (`server/make-https-cert.sh`): the self-made certificate makes each browser warn once.
 
+## Optional: `/tv` and `/remote` from anywhere (Tailscale Funnel)
+
+A separate gateway on `127.0.0.1:8090` forwards **only** `/tv`, `/remote` and the exact files / APIs they need
+(an allowlist; ambiguous paths, other hosts, `?token=` refused; `/disk`, health, admin and all other routes are
+not reachable). From the internet `/tv` still needs the phone's approval on every load, `/remote` controls and
+approves only on the trusted phone, and the dashboard is read-only. Off by default; setup, verification and
+rollback: `server/README.md` → "Public access".
+
 ## Updating the server
 
 ```bash

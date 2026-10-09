@@ -38,6 +38,7 @@ from . import recordings_admin as admin
 from .voyo_account import VoyoAccount
 from . import security as secmod
 from .security import RateLimiter, Security
+from .public_gateway import PublicGateway, config_problem as public_config_problem
 
 log = logging.getLogger("app")
 
@@ -221,6 +222,12 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     rl_setup = RateLimiter(5, 900, 900)
     rl_tvreq = RateLimiter(6, 60)
     rl_decide = RateLimiter(30, 60)
+    # public gateway (Tailscale Funnel): no visitor may flood the device list, the phone or the disk
+    rl_pub_tvreq = RateLimiter(30, 600)                 # TV challenges from the internet, all visitors together
+    rl_pub_newdev = RateLimiter(5, 3600)                # new /remote identities per visitor and hour ...
+    rl_pub_newdev_all = RateLimiter(40, 3600)           # ... and for all visitors together
+    rl_pub_rename = RateLimiter(5, 600)
+    public_limited: dict = {}                           # untrusted public /remote sockets -> device id (or None)
     # [security] protect_dashboard = true: the plain dashboard ("/", its APIs and WebSocket) also needs an
     # approved /tv session (or a /disk session) - off by default, the PC / WD TV clients use it as before
     protect_dashboard = bool(sec_cfg.get("protect_dashboard", False))
@@ -374,6 +381,14 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         that alone grants nothing: only the device chosen in /disk may approve /tv."""
         resp = FileResponse(DASHBOARD_DIR / "remote.html", headers={"Cache-Control": "no-cache"})
         if security.device(request.cookies.get(COOKIE_DEV)) is None:
+            if _public(request):
+                # from the internet: a new identity is free to get, but not in bulk (the list and the disk)
+                ip = _ip(request)
+                if rl_pub_newdev.blocked(ip) or rl_pub_newdev_all.blocked("all"):
+                    seclog.warning("Public /remote: no new device identity for %s (rate limit)", ip)
+                    return resp
+                rl_pub_newdev.hit(ip)
+                rl_pub_newdev_all.hit("all")
             tok, _did, _rec = security.new_device(request.headers.get("user-agent", ""))
             _set_cookie(resp, request, COOKIE_DEV, tok, 400 * 86400, "lax")
         return resp
@@ -975,6 +990,19 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             return None, JSONResponse({"ok": False, "error": "reauth_required"}, status_code=403)
         return s, None
 
+    def _public(conn) -> bool:
+        """Came through the public gateway (Tailscale Funnel) - server/public_gateway.py sets it, a client can't."""
+        return bool(conn.scope.get("f1_public"))
+
+    def public_view(scope_or_conn) -> bool:
+        """From the internet, the dashboard's data is for an approved /tv page (its session cookie - the iframe
+        cannot send the page header) or the trusted phone. Not a /disk login (/disk is not public)."""
+        conn = scope_or_conn if hasattr(scope_or_conn, "cookies") else HTTPConnection(scope_or_conn)
+        if security.session("tv", conn.cookies.get(COOKIE_TV)) is not None:
+            return True
+        dev = security.device(conn.cookies.get(COOKIE_DEV))
+        return dev is not None and security.trusted(dev[0])
+
     def dash_access(conn) -> Optional[dict]:
         """The plain dashboard when [security] protect_dashboard is on (and the remote token in the QR code):
         the cookie of a currently approved /tv page (its iframe cannot send the page header) or a /disk
@@ -1101,14 +1129,64 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         """Each /remote socket: its own device (name, code, trusted) and - only the trusted one - the
         pending /tv requests."""
         pend = security.pending()
+        for ws_l, did in list(public_limited.items()):      # untrusted public /remote pages
+            if did and security.trusted(did):
+                asyncio.ensure_future(_ws_send_close(ws_l, {"type": "reload"}))   # trusted now: start again
+            elif did:
+                d = security.data["devices"].get(did) or {}
+                asyncio.ensure_future(_ws_send(ws_l, {"type": "device", "name": d.get("name"), "code": d.get("code"),
+                                                      "trusted": False}))
         for c in list(hub.clients):
             if c.kind != "remote" or not c.device_id:
+                continue
+            if c.public and not security.trusted(c.device_id):   # trust taken away: no public control any more
+                asyncio.ensure_future(_ws_send_close(c.ws, {"type": "reload"}))
                 continue
             d = security.data["devices"].get(c.device_id) or {}
             hub._send(c, json.dumps({"type": "device", "name": d.get("name"), "code": d.get("code"),
                                      "trusted": security.trusted(c.device_id)}))
             if security.trusted(c.device_id):
                 hub._send(c, json.dumps({"type": "tv_requests", "requests": pend}))
+
+    async def _ws_send(ws, msg: dict) -> None:
+        with contextlib.suppress(Exception):
+            await ws.send_text(json.dumps(msg))
+
+    async def _ws_send_close(ws, msg: dict) -> None:
+        with contextlib.suppress(Exception):
+            await ws.send_text(json.dumps(msg))
+            await ws.close(code=4401)
+
+    async def public_remote_limited(ws: WebSocket, dev) -> None:
+        """A /remote page from the internet that is NOT the trusted phone: it learns its own name and code
+        (so the owner can choose it in /disk at home) and nothing else - no state, no control, no approvals."""
+        did = dev[0] if dev else None
+        await ws.accept()
+        public_limited[ws] = did
+        if did:
+            security.device_connected(did, True)
+            d = dev[1]
+            await _ws_send(ws, {"type": "device", "name": d.get("name"), "code": d.get("code"), "trusted": False})
+        await _ws_send(ws, {"type": "locked", "reason": "untrusted" if did else "no_identity"})
+        try:
+            while True:
+                text = await ws.receive_text()
+                if len(text) > 512 or not did:
+                    continue
+                try:
+                    msg = json.loads(text)
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and msg.get("type") == "device_name" and not rl_pub_rename.blocked(did):
+                    rl_pub_rename.hit(did)
+                    if security.rename_device(did, str(msg.get("name") or "")):
+                        push_remote_state()
+        except WebSocketDisconnect:
+            pass
+        finally:
+            public_limited.pop(ws, None)
+            if did:
+                security.device_connected(did, False)
 
     async def api_disk_security(request: Request) -> Response:
         _s, deny = require_disk(request)
@@ -1163,10 +1241,12 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         if not _same_origin(request):
             return JSONResponse({"ok": False, "error": "cross-site request refused"}, status_code=403)
         ip = _ip(request)
-        wait = rl_tvreq.blocked(ip)
+        wait = rl_tvreq.blocked(ip) or (_public(request) and rl_pub_tvreq.blocked("all"))
         if wait:
             return _too_many(wait)
         rl_tvreq.hit(ip)
+        if _public(request):
+            rl_pub_tvreq.hit("all")
         tok = request.cookies.get(COOKIE_TV)
         if tok:
             security.revoke("tv", token=tok)
@@ -1344,13 +1424,24 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             seclog.warning("WebSocket from another site refused (Origin %s)", ws.headers.get("origin", "")[:80])
             await ws.close(code=4403)
             return
-        if kind == "remote" and not remote.check_token(ws.query_params.get("token")):
-            await ws.close(code=4401)
-            return
-        if kind == "dashboard" and protect_dashboard and dash_access(ws) is None:
-            await ws.close(code=4401)
-            return
+        public = _public(ws)
         dev = security.device(ws.cookies.get(COOKIE_DEV)) if kind == "remote" else None
+        if public:
+            # from the internet (Tailscale Funnel): no remote token at all (never in a public URL) - /remote
+            # control and /tv approvals only for the trusted phone, the dashboard only for an approved /tv page
+            if kind == "remote" and not (dev is not None and security.trusted(dev[0])):
+                await public_remote_limited(ws, dev)
+                return
+            if kind == "dashboard" and not public_view(ws):
+                await ws.close(code=4401)
+                return
+        else:
+            if kind == "remote" and not remote.check_token(ws.query_params.get("token")):
+                await ws.close(code=4401)
+                return
+            if kind == "dashboard" and protect_dashboard and dash_access(ws) is None:
+                await ws.close(code=4401)
+                return
         await ws.accept()
         addr = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
         try:
@@ -1358,6 +1449,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         except Exception:  # noqa: BLE001 - log it once in full, then keep the dashboard connected
             log.exception("Dashboard connection setup failed for %s", addr)
             raise
+        client.public = public
         if dev is not None:
             client.device_id = dev[0]
             security.device_connected(dev[0], True)
@@ -1378,6 +1470,10 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                 kind = msg.get("type")
                 if kind == "ping":
                     continue
+                if public and client.kind != "remote":
+                    continue                             # a public dashboard socket only listens
+                if public and not security.trusted(client.device_id):
+                    break                                # trust was taken away meanwhile
                 if kind == "device_name" and client.device_id:
                     # a remote device names itself (that is all it can change about itself)
                     if security.rename_device(client.device_id, str(msg.get("name") or "")):
@@ -1501,6 +1597,19 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         seclog.warning("protect_dashboard is ON: the dashboard needs an approved /tv or a /disk session")
     app.state.runtime = rt
     app.state.mode = mode
+    # the public gateway (Tailscale Funnel) - only with a valid [public] configuration (fail closed)
+    app.state.public_app = None
+    pub_cfg = cfg.get("public") or {}
+    if pub_cfg.get("enabled"):
+        problem = public_config_problem(pub_cfg, port, int(cfg["server"].get("https_port") or 0))
+        if problem:
+            seclog.error("PUBLIC GATEWAY OFF: %s - nothing is reachable from the internet", problem)
+        else:
+            app.state.public_app = PublicGateway(app, str(pub_cfg["hostname"]), public_view,
+                                                 DASHBOARD_DIR / "remote.html")
+            app.state.public_port = int(pub_cfg["port"])
+            seclog.warning("Public gateway for https://%s (Tailscale Funnel -> 127.0.0.1:%d): only /tv and /remote "
+                           "and what they need", pub_cfg["hostname"], int(pub_cfg["port"]))
     return app
 
 

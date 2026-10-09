@@ -132,6 +132,9 @@ if [ "$MODE" = production ]; then
   UNIT_EXEC="$(unit_val ExecStart)"
   UNIT_DATA="$(printf '%s\n' "$UNIT_TEXT" | sed -n 's/^[[:space:]]*Environment=.*F1DASH_DATA_DIR=\([^[:space:]"]*\).*/\1/p' | tail -n1)"
   UNIT_MOUNTS="$(unit_val RequiresMountsFor)"
+  # the public gateway (Tailscale Funnel) is switched on by a unit drop-in (server/systemd/public-gateway.conf)
+  mapfile -t UNIT_PUBLIC_ENV < <(printf '%s\n' "$UNIT_TEXT" | grep -E '^[[:space:]]*Environment=' |
+    grep -oE 'F1DASH_PUBLIC_(ENABLED|HOSTNAME|PORT)=[A-Za-z0-9.:-]*' || true)
   if [ "$REQUIRE_ROOT" = 1 ] && [ "$(id -u)" != 0 ]; then
     die 3 "production server: run it as root (sudo $0 ...) - it backs up root-only files and restarts $SERVICE"
   fi
@@ -140,7 +143,7 @@ if [ "$MODE" = production ]; then
   need findmnt util-linux
   say "production server: $SERVICE (user $SVC_USER), checkout $REPO (owner $REPO_OWNER)"
 else
-  SVC_USER="$(id -un)"; UNIT_DATA=""; UNIT_MOUNTS=""
+  SVC_USER="$(id -un)"; UNIT_DATA=""; UNIT_MOUNTS=""; UNIT_PUBLIC_ENV=()
   say "development checkout $REPO (no $SERVICE running from it): only git, dependencies and tests - no backup, certificate or restart"
 fi
 [ "$DRY" = 1 ] && say "DRY RUN - nothing will be changed"
@@ -168,7 +171,7 @@ fi
 # .env is sourced by the service user's shell only (as launch.sh does) - it is never read or shown here.
 probe_config() {
   run_as "$SVC_USER" env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$TMPD" LANG=C.UTF-8 \
-    F1DASH_DATA_DIR="${UNIT_DATA:-}" bash -c '
+    F1DASH_DATA_DIR="${UNIT_DATA:-}" "${UNIT_PUBLIC_ENV[@]}" bash -c '
       set -a; if [ -r "$1" ]; then . "$1" >/dev/null 2>&1; fi; set +a
       export F1DASH_DATA_DIR="${F1DASH_DATA_DIR:-$2/data}"
       export F1DASH_CONFIG_OVERLAY="${F1DASH_CONFIG_OVERLAY:-$2/server/config/server.toml}"
@@ -183,7 +186,9 @@ vals = {"data_dir": DATA_DIR, "port": c["server"]["port"], "https_port": int(c["
         "tls_key": resolve_path(str(c["server"].get("tls_key") or "data/tls/key.pem")),
         "rec_path": resolve_path(str(rc.get("path") or "")), "require_mount": rc.get("require_mount") or "",
         "mount_marker": rc.get("mount_marker") or "", "protect_dashboard": int(bool(c["security"].get("protect_dashboard"))),
-        "player_enabled": int(bool(c["voyo"]["server_player"].get("enabled")))}
+        "player_enabled": int(bool(c["voyo"]["server_player"].get("enabled"))),
+        "public_enabled": int(bool(c["public"].get("enabled"))), "public_host": c["public"].get("hostname") or "",
+        "public_port": c["public"].get("port") or 0}
 for k, v in vals.items():
     print(k + chr(9) + str(v).replace(chr(9), chr(32)).replace(chr(10), chr(32)))
 PY
@@ -197,6 +202,7 @@ load_config_values() {
       data_dir) CFG_DATA="$v" ;; port) CFG_PORT="$v" ;; https_port) CFG_HTTPS="$v" ;; tls_cert) CFG_CERT="$v" ;;
       tls_key) CFG_KEY="$v" ;; rec_path) CFG_REC="$v" ;; require_mount) CFG_MOUNT="$v" ;; mount_marker) CFG_MARKER="$v" ;;
       protect_dashboard) CFG_PROTECT="$v" ;; player_enabled) CFG_PLAYER="$v" ;;
+      public_enabled) CFG_PUB="$v" ;; public_host) CFG_PUB_HOST="$v" ;; public_port) CFG_PUB_PORT="$v" ;;
     esac
   done <<<"$out"
   [[ "${CFG_PORT:-}" =~ ^[0-9]+$ ]] || die 3 "no server port in the configuration"
@@ -215,8 +221,9 @@ fi
 # ===================================================================== helpers: HTTP, recording, disk
 BODY="$TMPD/body"
 http() {   # http METHOD URL [curl args...] -> prints the status code, body in $BODY
-  local m="$1" u="$2"; shift 2
-  curl -sk --max-time 8 -X "$m" -o "$BODY" -w '%{http_code}' "$@" "$u" 2>/dev/null || echo 000
+  local m="$1" u="$2" c; shift 2
+  c="$(curl -sk --max-time 8 -X "$m" -o "$BODY" -w '%{http_code}' "$@" "$u" 2>/dev/null)" || true
+  printf '%s' "${c:-000}"
 }
 BASE="http://127.0.0.1:$CFG_PORT"
 
@@ -298,7 +305,28 @@ verify_service() {
       expect "/tv stream over https without approval" 401 GET "https://127.0.0.1:$CFG_HTTPS/tv/live/index.m3u8"
     else warn "https_port $CFG_HTTPS is set but there is no certificate ($CFG_CERT) - https is off"; fi
   fi
+  if [ "${CFG_PUB:-0}" = 1 ]; then verify_public; fi
   return "$VERIFY_FAILS"
+}
+verify_public() {   # the public gateway (Tailscale Funnel): only /tv and /remote, nothing private
+  local P="http://127.0.0.1:${CFG_PUB_PORT:-8090}" HH="Host: ${CFG_PUB_HOST:-}" code
+  say "checking the public gateway on 127.0.0.1:${CFG_PUB_PORT:-8090} (as https://${CFG_PUB_HOST:-?} through Funnel)"
+  code="$(http GET "$P/tv" -H "$HH")"
+  if [ "$code" = 200 ] && grep -q 'ACCESS REQUEST' "$BODY" && ! grep -q '/?layout' "$BODY"; then say "  ok   public /tv: approval screen only ($code)"
+  else say "  FAIL public /tv ($code) - is the gateway running? journalctl -u $SERVICE | grep -i 'public gateway'"; VERIFY_FAILS=$((VERIFY_FAILS + 1)); fi
+  expect "public /remote" 200 GET "$P/remote" -H "$HH"
+  local p
+  for p in /disk /disk-static/disk.js /api/disk/status /api/disk/auth/state /api/disk/security /api/health /api/state \
+           /api/remote/info /api/voyo/recordings /f1tv/login /static/remote.html; do
+    expect "public $p is closed" 404 GET "$P$p" -H "$HH"
+  done
+  expect "public POST /disk login is closed" 404 POST "$P/api/disk/auth/login" -H "$HH" -H 'Content-Type: application/json' --data '{}'
+  expect "public /tv data without approval" 401 GET "$P/api/tv/status" -H "$HH"
+  expect "public dashboard without approval (to /tv)" 303 GET "$P/" -H "$HH"
+  expect "public ../ trick" 400 GET "$P/tv/../disk" --path-as-is -H "$HH"
+  expect "public %-encoded trick" 400 GET "$P/%64isk" -H "$HH"
+  expect "public remote token in a URL is refused" 400 GET "$P/remote?token=x" -H "$HH"
+  expect "public gateway refuses other hostnames" 421 GET "$P/tv" -H "Host: 192.168.10.140"
 }
 wait_healthy() {
   local t=0
