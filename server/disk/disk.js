@@ -382,16 +382,14 @@ async function loadSecurity() {
       </div></div>`).join("") : '<div class="msg">No device has opened /remote yet.</div>';
   $("req-list").innerHTML = s.requests.length ? s.requests.map((r) => `
     <div class="dev"><div class="dev-main"><b>${esc(r.device)}</b> <span class="code">${esc(r.code)}</span>
-      <div class="sub">wants /tv · expires in ${esc(r.expires_in)} s</div></div>
-      <div class="dev-act"><button class="btn primary" data-sec="decide" data-req="${esc(r.id)}" data-ok="1">APPROVE</button>
-      <button class="btn danger" data-sec="decide" data-req="${esc(r.id)}" data-ok="0">DENY</button></div></div>`).join("")
+      <div class="sub">wants /tv · expires in ${esc(r.expires_in)} s · approve or deny it on the trusted phone (/remote)</div></div></div>`).join("")
     : '<div class="msg">No /tv request waiting.</div>';
   $("tvs-list").innerHTML = s.tv_sessions.length ? s.tv_sessions.map((t) => `
     <div class="dev"><div class="dev-main"><b>${esc(t.device)}</b>
       <div class="sub">approved ${esc(ago(t.created))}${t.approved_by ? " by " + esc(t.approved_by) : ""} · last used ${esc(ago(t.last_seen))} · until ${esc(when(new Date(t.expires * 1000).toISOString()))}</div></div>
       <div class="dev-act"><button class="btn danger" data-sec="revoke_tv" data-sid="${esc(t.id)}">REVOKE</button></div></div>`).join("")
-    : '<div class="msg">No browser has /tv access.</div>';
-  $("sec-hint").textContent = `${s.devices.filter((d) => d.connected).length} remote connected · ${s.tv_sessions.length} TV · ${s.disk_sessions} /disk session(s)`;
+    : '<div class="msg">No /tv page is open with an approval.</div>';
+  $("sec-hint").textContent = `${s.devices.filter((d) => d.connected).length} remote connected · ${s.tv_sessions.length} TV page(s) · ${s.disk_sessions} /disk session(s)`;
 }
 $("p-sec").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-sec]"); if (!b) return;
@@ -399,8 +397,7 @@ $("p-sec").addEventListener("click", async (e) => {
   if (b.dataset.dev) body.device = b.dataset.dev;
   if (a === "rename") { const n = prompt("Name for this device:"); if (!n) return; body.name = n; }
   if (a === "forget" && !confirm("Forget this device? It becomes a new, untrusted device the next time it opens /remote.")) return;
-  if (a === "revoke_all_tv" && !confirm("End /tv access for every browser?")) return;
-  if (a === "decide") { body.request = b.dataset.req; body.approve = b.dataset.ok === "1"; }
+  if (a === "revoke_all_tv" && !confirm("End /tv access for every open TV page?")) return;
   if (a === "revoke_tv") body.session = b.dataset.sid;
   try { await api(`/api/disk/security/${a}`, { method: "POST", body: JSON.stringify(body) }); $("sec-msg").textContent = "done"; }
   catch (err) { $("sec-msg").textContent = "not done: " + err.message; }

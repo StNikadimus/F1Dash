@@ -114,7 +114,7 @@ recommended sync and persistence. See `main/README.md` §9c.
 sudo cp server/systemd/f1-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now f1-dashboard
-sudo systemctl restart f1-dashboard        # after git pull / config change
+sudo systemctl restart f1-dashboard        # after a config change (updates: server/update-f1dash.sh)
 sudo systemctl status f1-dashboard
 journalctl -u f1-dashboard -f              # logs
 ```
@@ -357,10 +357,11 @@ slot**. You don't need a PC or a VOYO window.
 - **Layouts:** **1** RACE VIEW (dashboard + video), **2** VIDEO (big video), **3** DASHBOARD only,
   **M** sound, **F** fullscreen. Move the mouse to see the buttons. Sound starts muted (browsers
   block autoplay with sound); click once.
-- **Approval:** a browser that opens `/tv` for the first time shows a code (e.g. `C6X-S6V`) and
-  waits. Your **trusted phone** (its `/remote` page) shows the same code with **APPROVE / DENY**.
-  After APPROVE that browser gets a `/tv` session for 30 days. See **Security** below. `/disk`
-  shows ON AIR / OFF, how many are watching, and the lag.
+- **Approval - every time:** each load of `/tv` (first open, reload, new tab, browser restarted,
+  the URL in another browser) shows a new code (e.g. `C6X-S6V`) and waits. Your **trusted phone**
+  (its `/remote` page) shows the same code with **APPROVE / DENY**. Only that load of the page is
+  approved; reloading asks again. Nothing is remembered: no "trust this browser". See **Security**
+  below. `/disk` shows ON AIR / OFF, how many are watching, and the lag.
 - **Only on your home network:** don't forward the ports to the internet. Your VOYO subscription
   is for you; check VOYO's terms.
 - **Not done yet (next step):** the dashboard's data is synced to live time (SYNC) as on the PC, but
@@ -400,7 +401,7 @@ only in the HTML. Without a valid session the server answers `401`.
    and a short code (e.g. `VUT-XCP`); **RENAME** gives it a name you recognise.
 4. In `/disk` → **SECURITY** the connected `/remote` devices are listed with the same codes. Press
    **USE FOR AUTH** on your phone. Its `/remote` now shows **TRUSTED (approves /tv)**.
-5. Open `/tv` on the TV and approve it on the phone.
+5. Open `/tv` on the TV and approve it on the phone - and again every time `/tv` is loaded.
 
 **How it works:**
 
@@ -409,14 +410,22 @@ only in the HTML. Without a valid session the server answers `401`.
 | `/disk` password | stored only as an **Argon2id** hash (`argon2-cffi`) in `<data>/auth/security.json` (600, folder 700); never logged, never sent to the browser |
 | `/disk` login | a random session in an HttpOnly cookie (`SameSite=Strict`, `Secure` on https), 12 h; changes need a CSRF token; 5 wrong passwords lock that address out for 5 min (30 for everybody per 10 min) |
 | `/remote` devices | each browser gets a random device id in an HttpOnly cookie (400 days), not the IP. *Connected* is not *trusted*: only the one device chosen in `/disk` is trusted |
-| `/tv` request | random id, expires after 2 min, max 6 per minute per address; only the trusted phone is told about it and only it (or a signed-in `/disk` on **another** browser) can approve. The TV can't approve itself |
-| `/tv` session | random, HttpOnly cookie, 30 days, can be revoked in `/disk` (**REVOKE**, **REVOKE ALL /TV**) |
+| `/tv` challenge | made for **each load** of `/tv`: random id + human code, expires after 2 min (`tv_request_seconds`), max 6 per minute per address. The browser gets a random secret in an HttpOnly cookie, the page a second one it keeps only in memory; both are needed to pick up the result. Loading `/tv` again, or asking again, cancels the browser's previous challenge |
+| Who approves | **only** the device chosen with USE FOR AUTH, over its `/remote` connection, for exactly that challenge id. Not `/disk`, not another `/remote` device, not the TV itself. An approval is used once (atomically); a second pick-up, a copy or an expired one gets nothing |
+| `/tv` page session | after the approval: a browser-session cookie (HttpOnly, `SameSite=Strict`, `Secure` on https) **plus** a page secret held only in that page's JavaScript memory and sent as a header (`X-F1-TV-Page`; Safari's own video player: `?p=`). Every `/tv` API and video piece needs both. Kept only in the server's memory: a restart, `tv_page_hours` (12 h), **REVOKE** / **REVOKE ALL /TV** in `/disk`, LOG OUT, leaving the page, and **every new load of `/tv` in that browser** end it |
 | WebSockets | refused from other sites (Origin check); the trusted device comes from its cookie, not from anything the page sends |
 | Other sites | POST/PUT/DELETE from another site are refused for the whole server (cross-site request forgery) |
 | Security log | `/disk` → LOG shows logins, failed logins, trust changes, approvals; passwords, hashes, tokens and cookies are never written |
 
-Only hashes of the session tokens are stored on the disk. Settings are in `[security]` of
-`main/config/config.toml` (session lengths, lockout, request time).
+Only hashes of the session tokens are stored on the disk (TV page sessions not at all). Settings are
+in `[security]` of `main/config/config.toml` (session lengths, lockout, request time). Older versions
+kept approved TVs for 30 days; those stored sessions are deleted on the first start of this version.
+
+**Why every load:** a cookie, a device id, an IP address or a `/disk` login in the same browser never
+opens `/tv` - the approval belongs to one page load, and the page's secret dies with the page.
+Two tabs in one browser: opening the second ends the first one's approval (one approved TV page per
+browser). Several TVs at once: each has its own code; the phone shows them one after another - compare
+the code and approve only the one you expect.
 
 **Forgot the `/disk` password:**
 
@@ -425,24 +434,96 @@ sudo ./server/reset-disk-password.sh          # removes the password and all /di
 sudo systemctl restart f1-dashboard           # makes a new setup code; then do step 1-2 again
 ```
 
-The trusted phone and the `/tv` sessions stay. **Lost the phone:** sign in to `/disk`, press
-**REMOVE TRUST** (or **FORGET**) on it and **REVOKE ALL /TV**, then trust the new phone.
+The trusted phone stays. **Lost the phone:** sign in to `/disk`, press **REMOVE TRUST** (or
+**FORGET**) on it and **REVOKE ALL /TV**, then trust the new phone.
 
 **What is NOT protected / limits:**
 
 - The plain dashboard `/` and its data are still open to anyone on your network, as before (the
-  PC variant needs that). Set `[security] protect_dashboard = true` to require a `/tv` or `/disk`
-  session for it too.
+  PC variant needs that); `/tv` protects the live stream and the TV page. Set
+  `[security] protect_dashboard = true` to require an approved `/tv` page or a `/disk` login for it
+  too. (The dashboard inside `/tv` is an iframe, which cannot send the page header: for `/` the TV
+  page's session cookie is enough while that page's approval lasts.)
 - `/remote` control itself still uses the remote token (`F1DASH_REMOTE_TOKEN`), as before.
   The dashboard's phone-remote QR code includes that token only on the server itself or for a
-  signed-in `/tv` / `/disk` browser; elsewhere you add `?token=...` on the phone yourself.
+  browser with an approved `/tv` page or a `/disk` login; elsewhere you add `?token=...` yourself.
 - Over plain **http** (port 8080) passwords and cookies travel unencrypted on your network. Use
   https. The self-made certificate gives a browser warning the first time; check that you are on
   your server's IP.
-- Whoever has your phone (unlocked) or copies its browser cookies can approve `/tv`.
-- A `/tv` request waiting for approval is lost when the server restarts (sessions are kept).
+- Whoever has your phone (unlocked) or copies its browser cookies can approve `/tv`. Compare the
+  code on the phone with the one on the TV before APPROVE.
+- Someone who can run JavaScript in the approved TV page itself (e.g. a malicious browser extension
+  on the TV) acts as that page while it is open - as with any web login.
+- A server restart ends every TV page (the TVs show a new code); `/disk` logins are kept.
+- `/api/health` tells programs on the server itself (127.0.0.1) whether a recording is running (for
+  the update script); from the network it shows only what it showed before.
 - The HTML/JS files of the pages (`/disk-static`, `/tv-static`) are public, but contain no data.
 - Don't forward the ports to the internet.
+
+## Updating the server: `server/update-f1dash.sh`
+
+```bash
+sudo /opt/f1-dashboard/server/update-f1dash.sh --dry-run     # what would happen - changes nothing
+sudo /opt/f1-dashboard/server/update-f1dash.sh               # update, test, restart, verify
+sudo /opt/f1-dashboard/server/update-f1dash.sh --wait-idle 180   # during a race weekend: wait for the recording to end
+sudo /opt/f1-dashboard/server/update-f1dash.sh --verify-only # only check the running server
+sudo /opt/f1-dashboard/server/update-f1dash.sh --rollback    # back to the commit before the last update
+```
+
+**Needs:** root (sudo), `git curl tar flock openssl` (Ubuntu has them), the service user's GitHub
+access (SETUP.md step 5), the venv `/opt/f1-dashboard/.venv` (created by the first start).
+
+**What it does, in this order** (each step stops the update with a clear message if something is off):
+
+1. Finds the deployment: `f1-dashboard.service` running from this checkout = production. Anywhere
+   else (a development checkout) it only updates git, the requirements and runs the tests.
+2. Reads the configuration as the service user (`server/.env` is never printed; secrets are never
+   traced or put on a command line).
+3. Checks the checkout: on `main` (or `--branch`), **no local changes** (it refuses - it never
+   discards anything), no local commits, origin reachable.
+4. **Never interrupts a recording:** while the VOYO player records or opens VOYO (or the live stream /
+   an ffmpeg capture / recording files are active) it refuses (exit 5) - or waits with `--wait-idle`.
+   Restarting `f1-dashboard` also restarts `f1-voyo-player` (it `Requires=` the dashboard).
+   It also refuses when the recording disk (`require_mount`, e.g. `/mnt/f1disk` with `.f1disk`) is
+   not mounted.
+5. Reports differences between the installed systemd unit and `server/systemd/` (never overwrites it).
+6. Checks the HTTPS certificate: creates it with `make-https-cert.sh` when missing, renews it only when
+   it expires within 30 days or is not valid for the server's IP; a certificate that is not this
+   server's self-made one is never replaced.
+7. **Backup** (before any change) to `/var/backups/f1-dashboard/<time>-<commit>/` (folder 700, files
+   600, newest 10 kept): `runtime.tgz` with `<data>/auth` (security state, F1 TV + VOYO sign-in),
+   `<data>/tls` and the state files (`*.json`), a copy of `.env`, the installed unit. Not copied:
+   recordings, caches, the browser profile. `/var/backups/f1-dashboard/last-deploy` records the
+   previous commit; `update.log` the run.
+8. Fast-forwards to `origin/main`, `pip install -r main/requirements.txt` into the venv.
+9. Runs the tests (`test_security`, `/disk`, `/tv`, VOYO player, phone remote) as the service user in
+   a **temporary data directory** - never the real one. A failure puts the previous commit back
+   (exit 6); the service was not touched.
+10. Restarts `f1-dashboard` only if something that matters changed (not for documentation only), then
+    checks: http and https answer, `/disk` and `/tv` APIs and the live stream answer **401** without
+    login / approval, forged cookies / page secrets get nothing, approving from `/disk` is refused,
+    and `/tv` starts with a fresh approval request even with a stale session cookie. (A real approval
+    needs your phone, so the "approval cannot be reused" part is covered by the tests in step 9.)
+11. If those checks fail and the previous version was healthy, it **rolls the code back** and restarts
+    the previous version (exit 7). Runtime data is never deleted or reset by the script.
+
+Running it again with nothing new changes nothing (no backup, no restart; it only re-checks the
+running service). Exit codes: 0 ok, 2 usage, 3 prerequisites, 4 git state, 5 unsafe now (recording /
+disk), 6 tests or requirements failed (rolled back), 7 unhealthy after the restart, 8 backup failed.
+
+**Rollback by hand** (if you need the runtime state of a backup too):
+
+```bash
+sudo /opt/f1-dashboard/server/update-f1dash.sh --rollback          # code: back to last-deploy's previous commit
+sudo systemctl stop f1-dashboard
+sudo tar -xzf /var/backups/f1-dashboard/<time>-<commit>/runtime.tgz -C /var/lib/f1-dashboard
+sudo chown -R f1:f1 /var/lib/f1-dashboard/auth /var/lib/f1-dashboard/tls
+sudo systemctl start f1-dashboard
+```
+
+**Manual steps it cannot do for you:** after a new certificate, every browser (PC, phone, TV) shows
+the certificate warning once more - accept it for your server's IP; approving `/tv` on the phone.
+`--rollback` moves `main` back; the next normal run updates it again.
 
 ## Where things are stored
 

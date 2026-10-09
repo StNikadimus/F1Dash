@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from server.config import load_config  # noqa: E402
 from server.security import RateLimiter, Security, hash_password, verify_password  # noqa: E402
@@ -80,10 +81,38 @@ class SecurityTest(unittest.TestCase):
         r = self.admin.post("/api/disk/security/trust", json={"device": did}, headers=self.H)
         self.assertEqual(r.status_code, 200, r.text)
 
-    def tv_request(self, tv):
+    # ---- one /tv page load = GET /tv + a new challenge (what server/tv/tv.js does)
+    def tv_open(self, tv):
+        page = tv.get("/tv")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("ACCESS REQUEST", page.text)
+        self.assertIn("no-store", page.headers["cache-control"])
         r = tv.post("/api/tv/auth/request")
         self.assertEqual(r.status_code, 200, r.text)
-        return r.json(), next(x for x in self.s.sec.requests.values() if x["status"] == "pending")
+        b = r.json()
+        req = next(x for x in self.s.sec.requests.values() if x["code"] == b["code"])
+        return b["challenge"], req
+
+    def tv_status(self, tv, challenge):
+        return tv.post("/api/tv/auth/status", headers={"X-F1-TV-Challenge": challenge})
+
+    def phone(self, trusted=True):
+        c = self.s.browser()
+        did, tok = self.s.remote_device(c)
+        if trusted:
+            self.trust(did)
+        return did, tok
+
+    def approved_tv(self, tv=None):
+        """-> (browser, its page headers) - one approved /tv page load."""
+        if not self.s.sec.data.get("trusted_device"):
+            self.phone()
+        tv = tv or self.s.browser()
+        ch, req = self.tv_open(tv)
+        self.assertEqual(self.s.sec.decide(req["id"], True, by_device=self.s.sec.data["trusted_device"]), "approved")
+        st = self.tv_status(tv, ch)
+        self.assertEqual(st.json()["status"], "authenticated", st.text)
+        return tv, {"X-F1-TV-Page": st.json()["page"]}
 
     def ws_decide(self, phone_tok, rid, approve=True, origin=None):
         tc = self.s.browser()
@@ -100,99 +129,165 @@ class SecurityTest(unittest.TestCase):
                     return m, seen
         return None, seen
 
+    def assert_tv_denied(self, client, headers=None):
+        for path in ("/api/tv/status", "/tv/live/index.m3u8", "/tv/live/live_00001.ts"):
+            self.assertEqual(client.get(path, headers=headers or {}).status_code, 401, path)
+
     # 1 2 ---------------------------------------------------------------------------------------
-    def test_01_02_tv_without_session_gets_only_the_request_page(self):
+    def test_01_02_tv_load_serves_no_tv_content_and_apis_are_closed(self):
         tv = self.s.browser()
         page = tv.get("/tv").text
         self.assertIn("ACCESS REQUEST", page)
-        self.assertNotIn('id="dash"', page)                                 # not the TV app
-        for path in ("/api/tv/status", "/tv/live/index.m3u8", "/tv/live/live_00001.ts"):
-            self.assertEqual(tv.get(path).status_code, 401, path)
+        self.assertIn('class="locked"', page)                              # the app is not started
+        self.assertNotIn("/?layout", page)                                 # no dashboard iframe source
+        self.assertNotIn("index.m3u8", page)
+        self.assert_tv_denied(tv)
+        # a pending challenge is not access either
+        ch, _req = self.tv_open(tv)
+        self.assert_tv_denied(tv)
+        self.assert_tv_denied(tv, {"X-F1-TV-Page": ch})
+        self.assertEqual(self.tv_status(tv, ch).json()["status"], "pending")
 
-    # 3 4 5 6 -----------------------------------------------------------------------------------
-    def test_03_to_06_approval_flow(self):
-        phone_b = self.s.browser()                                          # untrusted remote
-        did_b, tok_b = self.s.remote_device(phone_b)
-        phone_c = self.s.browser()                                          # the trusted one
-        did_c, tok_c = self.s.remote_device(phone_c)
-        self.trust(did_c)
+    # 3 4 5 -------------------------------------------------------------------------------------
+    def test_03_to_05_only_the_designated_phone_approves_this_exact_challenge(self):
+        did_b, tok_b = self.phone(trusted=False)                            # connected, not designated
+        did_c, tok_c = self.phone()                                        # USE FOR AUTH in /disk
         tv = self.s.browser()
-        info, req = self.tv_request(tv)
-        self.assertTrue(info["approver_set"])
-        # 4: an untrusted /remote device cannot approve - and is not even told about the request
+        ch, req = self.tv_open(tv)
+        # an untrusted /remote device cannot approve - and is not even told about the request
         m, seen = self.ws_decide(tok_b, req["id"])
         self.assertFalse(m["ok"])
         self.assertIn("not the trusted approver", m["error"])
         self.assertFalse(any(x.get("type") == "tv_requests" for x in seen))
-        self.assertEqual(tv.get("/api/tv/auth/status").json()["status"], "pending")
-        # a random browser sending a forged decision over HTTP: there is no such public endpoint
+        self.assertEqual(self.tv_status(tv, ch).json()["status"], "pending")
+        # /disk can not approve (not the phone), nor can an anonymous browser
+        r = self.admin.post("/api/disk/security/decide", json={"request": req["id"], "approve": True}, headers=self.H)
+        self.assertEqual(r.status_code, 403)
         self.assertIn(self.s.browser().post("/api/disk/security/decide", json={"request": req["id"], "approve": True})
                       .status_code, (401, 403))
-        # 5: the trusted device approves (it sees the request with its code first)
+        self.assertEqual(self.tv_status(tv, ch).json()["status"], "pending")
+        # the trusted phone sees it (with its code) and approves it
         m, seen = self.ws_decide(tok_c, req["id"])
         self.assertTrue(m["ok"], m)
-        self.assertTrue(any(x.get("type") == "tv_requests" and x["requests"] for x in seen))
-        st = tv.get("/api/tv/auth/status")
+        self.assertTrue(any(x.get("type") == "tv_requests" and x["requests"][0]["code"] == req["code"] for x in seen))
+        saved_req_cookie = tv.cookies.get("f1_tvreq")
+        st = self.tv_status(tv, ch)
         self.assertEqual(st.json()["status"], "authenticated")
-        set_cookie = st.headers.get("set-cookie", "")
-        self.assertIn("f1_tv=", set_cookie)
-        self.assertIn("HttpOnly", set_cookie)
-        self.assertIn("samesite=lax", set_cookie.lower())
-        self.assertIn('id="dash"', tv.get("/tv").text)
-        self.assertEqual(tv.get("/api/tv/status").status_code, 200)
-        # the approval is one-time: the same request cannot mint a second session
-        self.assertEqual(self.s.browser().get("/api/tv/auth/status").json()["status"], "none")
-        # 6: refresh keeps the session
-        self.assertIn('id="dash"', tv.get("/tv").text)
+        page = {"X-F1-TV-Page": st.json()["page"]}
+        sc = st.headers.get("set-cookie", "").lower()
+        self.assertIn("f1_tv=", sc)
+        self.assertIn("httponly", sc)
+        self.assertIn("samesite=strict", sc)
+        self.assertNotIn("max-age", sc.split("f1_tv=")[1].split(",")[0])  # a browser-session cookie
+        self.assertNotIn("expires", sc.split("f1_tv=")[1].split(",")[0])
+        self.assertEqual(tv.get("/api/tv/status", headers=page).status_code, 200)
+        # the cookie alone, the page secret alone: nothing
+        self.assertEqual(tv.get("/api/tv/status").status_code, 401)
+        other = self.s.browser()
+        self.assertEqual(other.get("/api/tv/status", headers=page).status_code, 401)
+        # the approval is used up: the same challenge cannot mint a second session (replay)
+        self.assertEqual(self.tv_status(tv, ch).json()["status"], "none")             # its cookie was cleared
+        self.assertEqual(self.tv_status(other, ch).json()["status"], "none")          # without the browser cookie
+        replay = self.s.browser()                                                      # both secrets copied
+        replay.cookies.set("f1_tvreq", saved_req_cookie)
+        r = self.tv_status(replay, ch)
+        self.assertEqual(r.json()["status"], "consumed")
+        self.assertNotIn("page", r.json())
+        self.assertNotIn("f1_tv=", r.headers.get("set-cookie", ""))
+        self.assertEqual(len(self.s.sec.tv_pages), 1)
+        m, _ = self.ws_decide(tok_c, req["id"])                                        # approving it again
+        self.assertFalse(m["ok"])
 
     def test_03_tv_browser_cannot_approve_itself(self):
-        phone = self.s.browser()
-        did, tok = self.s.remote_device(phone)
-        self.trust(did)
+        did, tok = self.phone()
         # the trusted phone itself opens /tv -> its own request
-        _info, req = self.tv_request(phone)
+        phone_browser = self.s.browser()
+        phone_browser.cookies.set("f1_dev", tok)
+        _ch, req = self.tv_open(phone_browser)
         m, _seen = self.ws_decide(tok, req["id"])
         self.assertFalse(m["ok"])
         self.assertIn("own", m["error"])
-        # the /disk admin approving the request from the same browser: refused too
-        _i2, req2 = self.tv_request(self.admin)
-        self.assertEqual(self.admin.post("/api/tv/auth/request").json().get("authenticated"), True)   # admin has /disk
-        tv = self.s.browser()
-        _i3, req3 = self.tv_request(tv)
-        r = tv.post("/api/disk/security/decide", json={"request": req3["id"], "approve": True})
-        self.assertEqual(r.status_code, 401)                                 # the TV has no /disk session
-        self.assertEqual(tv.get("/api/tv/auth/status").json()["status"], "pending")
+
+    # 6: reload / new tab / new browser start from zero ------------------------------------------
+    def test_06_every_load_of_tv_needs_a_new_approval(self):
+        tv, page = self.approved_tv()
+        old_cookie = tv.cookies.get("f1_tv")
+        self.assertEqual(tv.get("/api/tv/status", headers=page).status_code, 200)
+        # reload: the server serves the request screen again and ends the previous authorization
+        r = tv.get("/tv")
+        self.assertIn("ACCESS REQUEST", r.text)
+        self.assertNotIn("/?layout", r.text)
+        self.assert_tv_denied(tv, page)
+        stale = self.s.browser()                                            # the old cookie + page secret anywhere
+        stale.cookies.set("f1_tv", old_cookie)
+        self.assert_tv_denied(stale, page)
+        self.assertIn("ACCESS REQUEST", stale.get("/tv").text)
+        # a "closed and reopened" browser (the cookie jar survives, the page memory does not) - same story
+        tv2, page2 = self.approved_tv(tv)
+        restored = self.s.browser()
+        restored.cookies.set("f1_tv", tv2.cookies.get("f1_tv"))
+        self.assertEqual(restored.get("/api/tv/status").status_code, 401)  # no page secret
+        self.assertIn("ACCESS REQUEST", restored.get("/tv").text)          # and loading /tv ends it
+        self.assert_tv_denied(tv2, page2)
+        # the URL in another browser / private window: nothing carries over
+        self.assertIn("ACCESS REQUEST", self.s.browser().get("/tv").text)
+
+    def test_06_two_tabs_one_browser_and_concurrent_challenges_are_isolated(self):
+        self.phone()
+        trusted = self.s.sec.data["trusted_device"]
+        # tab A approved; tab B (same browser = same cookies) asks -> A's authorization ends
+        browser = self.s.browser()
+        _b, page_a = self.approved_tv(browser)
+        ch_b, req_b = self.tv_open(browser)
+        self.assert_tv_denied(browser, page_a)
+        self.s.sec.decide(req_b["id"], True, by_device=trusted)
+        page_b = {"X-F1-TV-Page": self.tv_status(browser, ch_b).json()["page"]}
+        self.assertEqual(browser.get("/api/tv/status", headers=page_b).status_code, 200)
+        self.assertEqual(browser.get("/api/tv/status", headers=page_a).status_code, 401)   # B's cookie, A's page
+        # three TVs at once: approving the middle one authorizes only it
+        tvs = [self.s.browser() for _ in range(3)]
+        opened = [self.tv_open(t) for t in tvs]
+        self.assertEqual(len({o[1]["id"] for o in opened}), 3)
+        self.assertEqual(len({o[1]["code"] for o in opened}), 3)
+        self.s.sec.decide(opened[1][1]["id"], True, by_device=trusted)
+        states = [self.tv_status(t, o[0]).json()["status"] for t, o in zip(tvs, opened)]
+        self.assertEqual(states, ["pending", "authenticated", "pending"])
+        # one TV's challenge secret does not work for another TV
+        self.assertEqual(self.tv_status(tvs[0], opened[2][0]).json()["status"], "none")
+        # ASK AGAIN in the same page supersedes the earlier challenge, which can then not be approved
+        ch_new, req_new = self.tv_open(tvs[0])
+        self.assertEqual(opened[0][1]["status"], "superseded")
+        with self.assertRaises(ValueError):
+            self.s.sec.decide(opened[0][1]["id"], True, by_device=trusted)
+        self.assertEqual(self.tv_status(tvs[0], ch_new).json()["status"], "pending")
 
     # 7 8 ---------------------------------------------------------------------------------------
-    def _approved_tv(self):
-        phone = self.s.browser()
-        did, tok = self.s.remote_device(phone)
-        self.trust(did)
-        tv = self.s.browser()
-        _info, req = self.tv_request(tv)
-        self.ws_decide(tok, req["id"])
-        tv.get("/api/tv/auth/status")
-        self.assertEqual(tv.get("/api/tv/status").status_code, 200)
-        return tv
-
-    def test_07_tv_session_expires_and_is_revoked(self):
-        tv = self._approved_tv()
-        for rec in self.s.sec.data["tv_sessions"].values():
+    def test_07_tv_page_expires_and_is_revoked(self):
+        tv, page = self.approved_tv()
+        for rec in self.s.sec.tv_pages.values():
             rec["expires"] = time.time() - 1
-        self.assertEqual(tv.get("/api/tv/status").status_code, 401)
-        self.assertIn("ACCESS REQUEST", tv.get("/tv").text)
-        tv2 = self._approved_tv()
+        self.assertEqual(tv.get("/api/tv/status", headers=page).status_code, 401)
+        tv2, page2 = self.approved_tv()
         sid = self.admin.get("/api/disk/security").json()["tv_sessions"][0]["id"]
         self.assertEqual(self.admin.post("/api/disk/security/revoke_tv", json={"session": sid}, headers=self.H).status_code, 200)
-        self.assertEqual(tv2.get("/api/tv/status").status_code, 401)
+        self.assertEqual(tv2.get("/api/tv/status", headers=page2).status_code, 401)
+        tv3, page3 = self.approved_tv()
+        r = self.admin.post("/api/disk/security/revoke_all_tv", headers=self.H)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(tv3.get("/api/tv/status", headers=page3).status_code, 401)
 
     def test_08_logout_invalidates_server_side(self):
-        tv = self._approved_tv()
+        tv, page = self.approved_tv()
         stolen = tv.cookies.get("f1_tv")
-        self.assertEqual(tv.post("/api/tv/logout").status_code, 200)
+        self.assertEqual(tv.post("/api/tv/logout").status_code, 401)                 # needs the page secret
+        self.assertEqual(tv.post("/api/tv/logout", headers=page).status_code, 200)
         other = self.s.browser()
         other.cookies.set("f1_tv", stolen)                                  # a copied cookie is dead too
-        self.assertEqual(other.get("/api/tv/status").status_code, 401)
+        self.assertEqual(other.get("/api/tv/status", headers=page).status_code, 401)
+        # the page's beacon on leaving (body = the page secret)
+        tv2, page2 = self.approved_tv()
+        self.assertEqual(tv2.post("/api/tv/logout", content=page2["X-F1-TV-Page"]).status_code, 200)
+        self.assertEqual(tv2.get("/api/tv/status", headers=page2).status_code, 401)
         # /disk logout
         d_tok = self.admin.cookies.get("f1_disk")
         self.assertEqual(self.admin.post("/api/disk/auth/logout", headers=self.H).status_code, 200)
@@ -272,20 +367,37 @@ class SecurityTest(unittest.TestCase):
         self.assertNotEqual(anon.put("/api/voyo/recordings/abcd1234/capture/a.mp4", content=b"x").status_code, 200)
 
     # 15 ----------------------------------------------------------------------------------------
-    def test_15_client_supplied_flags_and_forged_tokens_mean_nothing(self):
+    def test_15_client_supplied_flags_stale_ids_and_forged_tokens_mean_nothing(self):
         anon = self.s.browser()
         for hdr in ({"authorized": "true"}, {"x-role": "admin"}, {"x-device": "remote"}, {"x-remote-token": ""}):
             self.assertEqual(anon.get("/api/disk/status", headers=hdr).status_code, 401)
+            self.assertEqual(anon.get("/api/tv/status", headers=hdr).status_code, 401)
         self.assertEqual(anon.get("/api/disk/status?authorized=true&role=admin").status_code, 401)
-        for name in ("f1_disk", "f1_tv"):
+        for name in ("f1_disk", "f1_tv", "f1_tvreq"):
             forged = self.s.browser()
             forged.cookies.set(name, "A" * 43)
             self.assertEqual(forged.get("/api/disk/status").status_code, 401)
-            self.assertEqual(forged.get("/api/tv/status").status_code, 401)
-        # the TV's request cookie is not a session
+            self.assert_tv_denied(forged, {"X-F1-TV-Page": "A" * 43})
+            self.assertIn("ACCESS REQUEST", forged.get("/tv").text)
+        # the trusted phone's own device cookie in a TV browser: still only the request screen
+        did, tok = self.phone()
         tv = self.s.browser()
-        self.tv_request(tv)
-        self.assertEqual(tv.get("/api/tv/status").status_code, 401)
+        tv.cookies.set("f1_dev", tok)
+        self.assertIn("ACCESS REQUEST", tv.get("/tv").text)
+        self.assert_tv_denied(tv)
+        # a /disk login does not open /tv either (no shortcut past the phone)
+        self.assertIn("ACCESS REQUEST", self.admin.get("/tv").text)
+        self.assert_tv_denied(self.admin)
+        self.assertNotIn("authenticated", self.admin.post("/api/tv/auth/request").text)
+        # the TV's challenge cookie is not a session
+        ch, _ = self.tv_open(tv)
+        self.assert_tv_denied(tv, {"X-F1-TV-Page": ch})
+        # the page keeps its secrets in memory only: tv.js stores nothing but the chosen layout
+        import re
+        js = (Path(__file__).resolve().parents[2] / "server" / "tv" / "tv.js").read_text()
+        self.assertEqual(set(re.findall(r"(?:local|session)Storage\.\w+\(\"([^\"]+)\"", js)), {"f1tv-layout"})
+        self.assertNotIn("sessionStorage", js)
+        self.assertNotIn("document.cookie", js)
         # tokens are random and only their hash is stored
         raw = (self.d / "auth" / "security.json").read_text()
         self.assertNotIn(self.admin.cookies.get("f1_disk"), raw)
@@ -307,22 +419,37 @@ class SecurityTest(unittest.TestCase):
         d2 = Path(tempfile.mkdtemp())
         s2 = Server(d2, protect_dashboard=True)
         try:
+            from starlette.websockets import WebSocketDisconnect
+            from authhelp import tv_approve
+
+            def ws_code(client):
+                try:
+                    with client.websocket_connect("/ws") as ws:
+                        return json.loads(ws.receive_text())["type"]
+                except WebSocketDisconnect as exc:
+                    return exc.code
             anon = s2.browser()
             r = anon.get("/", follow_redirects=False)
             self.assertEqual((r.status_code, r.headers["location"]), (303, "/tv?next=/"))
             self.assertEqual(anon.get("/api/state").status_code, 401)
             self.assertEqual(anon.get("/api/sync").status_code, 401)
-            from starlette.websockets import WebSocketDisconnect
-            with self.assertRaises(WebSocketDisconnect) as cm:
-                with anon.websocket_connect("/ws") as ws:
-                    ws.receive_text()
-            self.assertEqual(cm.exception.code, 4401)
+            self.assertEqual(ws_code(anon), 4401)
             self.assertEqual(anon.get("/remote").status_code, 200)         # the remote stays reachable
             admin = s2.browser()
-            s2.setup_password(admin)
+            csrf = s2.setup_password(admin)
             self.assertEqual(admin.get("/api/state").status_code, 200)
-            with admin.websocket_connect("/ws") as ws:
-                self.assertEqual(json.loads(ws.receive_text())["type"], "hello")
+            self.assertEqual(ws_code(admin), "hello")
+            # a TV with a pending challenge: no; approved: yes; loaded /tv again: no
+            tv = s2.browser()
+            tv.get("/tv")
+            tv.post("/api/tv/auth/request")
+            self.assertEqual(ws_code(tv), 4401)
+            tv_approve(s2.app, admin, {"X-F1-CSRF": csrf}, tv)
+            self.assertEqual(ws_code(tv), "hello")
+            self.assertEqual(tv.get("/api/state").status_code, 200)
+            tv.get("/tv")
+            self.assertEqual(ws_code(tv), 4401)
+            self.assertEqual(tv.get("/api/state").status_code, 401)
         finally:
             s2.close()
             shutil.rmtree(d2, ignore_errors=True)
@@ -347,44 +474,78 @@ class SecurityTest(unittest.TestCase):
         self.assertIn(429, codes)
 
     # 18 ----------------------------------------------------------------------------------------
-    def test_18_requests_expire(self):
-        phone = self.s.browser()
-        did, tok = self.s.remote_device(phone)
-        self.trust(did)
+    def test_18_challenges_expire(self):
+        did, tok = self.phone()
         tv = self.s.browser()
-        _info, req = self.tv_request(tv)
+        ch, req = self.tv_open(tv)
         req["expires"] = time.time() - 1
-        self.assertEqual(tv.get("/api/tv/auth/status").json()["status"], "expired")
+        self.assertEqual(self.tv_status(tv, ch).json()["status"], "expired")
         m, _ = self.ws_decide(tok, req["id"])
         self.assertFalse(m["ok"])
-        self.assertEqual(tv.get("/api/tv/status").status_code, 401)
-        # denied
+        self.assert_tv_denied(tv, {"X-F1-TV-Page": ch})
+        # approved, but picked up too late: expired, no session
         tv2 = self.s.browser()
-        _i, req2 = self.tv_request(tv2)
-        self.ws_decide(tok, req2["id"], approve=False)
-        self.assertEqual(tv2.get("/api/tv/auth/status").json()["status"], "denied")
+        ch2, req2 = self.tv_open(tv2)
+        self.s.sec.decide(req2["id"], True, by_device=did)
+        req2["expires"] = time.time() - 1
+        self.assertEqual(self.tv_status(tv2, ch2).json()["status"], "expired")
+        self.assertEqual(self.s.sec.tv_pages, {})
+        # denied
+        tv3 = self.s.browser()
+        ch3, req3 = self.tv_open(tv3)
+        self.ws_decide(tok, req3["id"], approve=False)
+        self.assertEqual(self.tv_status(tv3, ch3).json()["status"], "denied")
+        self.assert_tv_denied(tv3)
 
     # 19 ----------------------------------------------------------------------------------------
-    def test_19_restart_keeps_sessions_and_trust_drops_pending_requests(self):
-        tv = self._approved_tv()
+    def test_19_restart_keeps_disk_sessions_and_trust_but_ends_tv_pages(self):
+        tv, page = self.approved_tv()
         tv_tok, disk_tok = tv.cookies.get("f1_tv"), self.admin.cookies.get("f1_disk")
         trusted = self.s.sec.data["trusted_device"]
         pending_tv = self.s.browser()
-        self.tv_request(pending_tv)
+        self.tv_open(pending_tv)
         self.s.close()
         s2 = Server(self.d)                                                 # the server restarts
         try:
             a, b = s2.browser(), s2.browser()
             a.cookies.set("f1_tv", tv_tok)
             b.cookies.set("f1_disk", disk_tok)
-            self.assertEqual(a.get("/api/tv/status").status_code, 200)
+            self.assertEqual(a.get("/api/tv/status", headers=page).status_code, 401)   # TV pages are memory-only
             self.assertEqual(b.get("/api/disk/status").status_code, 200)
             self.assertEqual(s2.sec.data["trusted_device"], trusted)
-            self.assertEqual(s2.sec.pending(), [])                            # requests are memory-only
+            self.assertEqual(s2.sec.pending(), [])                            # challenges are memory-only
             self.assertFalse((self.d / "auth" / "disk-setup-code").exists())  # no new setup code
         finally:
             s2.close()
             self.s = Server(self.d)                                           # tearDown closes this one
+
+    def test_19_old_30_day_tv_sessions_are_dropped(self):
+        f = self.d / "auth" / "security.json"
+        data = json.loads(f.read_text())
+        data["tv_sessions"] = {"a" * 64: {"id": "old", "expires": time.time() + 86400 * 20, "label": "old TV"}}
+        f.write_text(json.dumps(data))
+        self.s.close()
+        self.s = Server(self.d)
+        self.assertNotIn("tv_sessions", json.loads(f.read_text()))
+        self.assertEqual(self.s.sec.tv_sessions_public(), [])
+        self.assertEqual(self.s.sec.data["disk"]["hash"][:9], "$argon2id")             # nothing else lost
+
+    def test_19_native_hls_gets_the_page_secret_in_the_playlist(self):
+        tv, page = self.approved_tv()
+        live = self.d / "live"
+        live.mkdir()
+        (live / "index.m3u8").write_text("#EXTM3U\n#EXTINF:2.0,\nlive_00001.ts\n")
+        (live / "live_00001.ts").write_bytes(b"\x47" * 188)
+        p = page["X-F1-TV-Page"]
+        r = tv.get("/tv/live/index.m3u8", params={"p": p})
+        self.assertEqual(r.status_code, 200)
+        from urllib.parse import quote
+        self.assertIn("live_00001.ts?p=" + quote(p, safe=""), r.text)
+        self.assertEqual(tv.get("/tv/live/live_00001.ts", params={"p": p}).status_code, 200)
+        self.assertEqual(tv.get("/tv/live/live_00001.ts").status_code, 401)
+        self.assertEqual(tv.get("/tv/live/live_00001.ts", headers=page).status_code, 200)    # hls.js: header
+        self.assertEqual(self.s.browser().get("/tv/live/live_00001.ts", params={"p": p}).status_code, 401)
+        self.assertEqual(tv.get("/api/tv/status", params={"p": p}).status_code, 401)          # ?p only for the video
 
     # 20 ----------------------------------------------------------------------------------------
     def test_20_remote_still_works(self):
@@ -431,23 +592,30 @@ class SecurityTest(unittest.TestCase):
             shutil.rmtree(d2, ignore_errors=True)
             self.s = Server(self.d)
 
+    def test_health_tells_only_this_machine_whether_a_recording_runs(self):
+        import server.app as appmod
+        self.assertNotIn("recorder", self.s.browser().get("/api/health").json())      # LAN: nothing new
+        with mock.patch.object(appmod, "LOOPBACK", appmod.LOOPBACK | {"testclient"}):
+            rec = self.s.browser().get("/api/health").json()["recorder"]           # the update script
+        self.assertEqual((rec["state"], rec["busy"]), ("PLAYER OFF", False))
+
     # logging ------------------------------------------------------------------------------------
     def test_secrets_never_logged(self):
         with self.assertLogs(level=logging.DEBUG) as logs:
             c = self.s.browser()
             c.post("/api/disk/auth/login", json={"password": "wrong secret password"})
             c.post("/api/disk/auth/login", json={"password": PW})
-            phone = self.s.browser()
-            did, tok = self.s.remote_device(phone)
-            self.trust(did)
+            did, tok = self.phone()
             tv = self.s.browser()
-            _info, req = self.tv_request(tv)
+            ch, req = self.tv_open(tv)
             self.ws_decide(tok, req["id"])
-            tv.get("/api/tv/auth/status")
+            page = self.tv_status(tv, ch).json()["page"]
+            tv.get("/tv")
         text = "\n".join(logs.output)
-        for secret in (PW, "wrong secret password", c.cookies.get("f1_disk"), tok, tv.cookies.get("f1_tv")):
+        for secret in (PW, "wrong secret password", c.cookies.get("f1_disk"), tok, ch, page):
             self.assertNotIn(secret, text)
         self.assertIn("/tv authorization APPROVED", text)
+        self.assertIn("previous TV authorization ended", text)
         self.assertIn("/disk login FAILED", text)
         act = (self.d / "logs" / "activity.jsonl").read_text()
         self.assertNotIn(PW, act)
@@ -463,16 +631,43 @@ class UnitTest(unittest.TestCase):
         self.assertNotEqual(hash_password("a long password"), h)              # random salt
         self.assertFalse(verify_password("", "x"))
 
-    def test_disk_admin_cannot_approve_request_from_own_browser(self):
+    def test_challenge_rules(self):
         d = Path(tempfile.mkdtemp())
         try:
-            sec = Security(d)
-            _poll, r = sec.create_request("TV", None, "abc")
+            sec = Security(d, {"tv_request_seconds": 60})
+            dev_tok, did, _ = sec.new_device("Phone")
+            _t2, other, _ = sec.new_device("Other phone")
+            sec.set_trusted(did)
+            b1, p1, r1 = sec.create_request("TV", None)
+            b2, p2, r2 = sec.create_request("TV 2", other)
+            self.assertNotEqual(p1, p2)
+            self.assertIsNone(sec.request_for(b1, p2))                        # both secrets of the same page
+            self.assertIs(sec.request_for(b1, p1), r1)
             with self.assertRaises(PermissionError):
-                sec.decide(r["id"], True, by_disk="abc")
-            self.assertEqual(sec.decide(r["id"], True, by_disk="other"), "approved")
+                sec.decide(r1["id"], True, by_device=other)                   # not the trusted device
+            with self.assertRaises(PermissionError):
+                sec.decide(r1["id"], True)                                    # no device at all (e.g. /disk)
+            self.assertEqual(sec.decide(r1["id"], True, by_device=did), "approved")
             with self.assertRaises(ValueError):
-                sec.decide(r["id"], True, by_disk="other")                   # once
+                sec.decide(r1["id"], True, by_device=did)                     # once
+            self.assertEqual(r2["status"], "pending")                         # the other challenge untouched
+            got = sec.consume(r1)
+            self.assertIsNotNone(got)
+            self.assertIsNone(sec.consume(r1))                                # consumed once (atomic)
+            cookie, page, _rec = got
+            self.assertIsNotNone(sec.tv_page(cookie, page))
+            self.assertIsNone(sec.tv_page(cookie, p1))                        # not the challenge secret
+            self.assertIsNone(sec.tv_page(cookie, None))
+            # superseded by the same browser asking again
+            b3, p3, r3 = sec.create_request("TV 2", None, supersede=b2)
+            self.assertEqual(r2["status"], "superseded")
+            with self.assertRaises(ValueError):
+                sec.decide(r2["id"], True, by_device=did)
+            # TV page sessions are never written to disk
+            self.assertNotIn(cookie, (d / "security.json").read_text())
+            self.assertNotIn("tv_sessions", json.loads((d / "security.json").read_text()))
+            with self.assertRaises(ValueError):
+                sec.new_session("tv", "x")                                    # only from an approved challenge
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

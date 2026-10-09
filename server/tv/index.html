@@ -3,12 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 <title>F1 TV</title>
 <link rel="stylesheet" href="/tv-static/tv.css">
 </head>
-<body>
-<!-- the dashboard (its own page, layout forced for this window only) -->
-<iframe id="dash" src="/?layout=RACE_VIEW" title="F1 dashboard"></iframe>
+<body class="locked">
+<!-- every load of /tv: the trusted phone approves THIS load first (server-side; nothing below starts before) -->
+<div id="auth">
+  <div class="card">
+    <div class="lbl">F1 TV · ACCESS REQUEST</div>
+    <h1 id="a-title">ASKING FOR ACCESS…</h1>
+    <div class="code" id="a-code">···-···</div>
+    <div class="msg" id="a-msg">connecting to the server…</div>
+    <div class="bar"><div id="a-bar" style="width:100%"></div></div>
+    <button id="a-again" hidden>ASK AGAIN</button>
+  </div>
+</div>
+
+<!-- the dashboard (its own page, layout forced for this window only) - loaded only after the approval -->
+<iframe id="dash" title="F1 dashboard"></iframe>
 
 <!-- the server's live VOYO stream, laid over the dashboard's video slot -->
 <div id="vbox">

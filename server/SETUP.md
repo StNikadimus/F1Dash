@@ -515,8 +515,9 @@ password is encrypted). The password is stored only as an Argon2id hash; the cod
 2. In `/disk` → **SECURITY** find the device with the same code (it shows *connected*) and press
    **USE FOR AUTH**. The phone now shows **TRUSTED (approves /tv)**.
 3. Open **https://`<SERVER-IP>`/tv** on the TV. It shows a code; the phone shows the same code with
-   **APPROVE / DENY**. After APPROVE the TV stays signed in for 30 days (revoke it any time in
-   `/disk` → SECURITY).
+   **APPROVE / DENY**. After APPROVE that page opens. **Every** new load of `/tv` (reload, browser
+   restarted, another tab or device) shows a new code and needs a new APPROVE - nothing is
+   remembered. Revoke an open TV page any time in `/disk` → SECURITY.
 
 Forgot the `/disk` password: `sudo /opt/f1-dashboard/server/reset-disk-password.sh`, then
 `sudo systemctl restart f1-dashboard` and create it again with the new code. Details:
@@ -668,7 +669,8 @@ The phone that should approve `/tv` must be chosen once in `/disk` → SECURITY 
 
 | Task | Command |
 |---|---|
-| Update to the newest version | `sudo -H -u f1 git -C /opt/f1-dashboard pull && sudo systemctl restart f1-dashboard f1-voyo-player` |
+| Update to the newest version (backup, tests, safe restart, checks) | `sudo /opt/f1-dashboard/server/update-f1dash.sh` (first `--dry-run` to see what it would do; README "Updating the server") |
+| Roll the last update back | `sudo /opt/f1-dashboard/server/update-f1dash.sh --rollback` |
 | Dashboard log (live) | `journalctl -u f1-dashboard -f` |
 | VOYO player log (live) | `journalctl -u f1-voyo-player -f` |
 | Restart | `sudo systemctl restart f1-dashboard` (and/or `f1-voyo-player`) |

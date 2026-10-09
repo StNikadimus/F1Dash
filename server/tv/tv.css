@@ -37,3 +37,18 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); c
   font-weight: 800; letter-spacing: .06em; color: var(--text-2); max-width: 520px; text-align: right; }
 .ctl-status .on { color: var(--red); } .ctl-status .off { color: var(--text-3); }
 @media (max-width: 700px) { #ctl { left: 8px; right: 8px; align-items: stretch; } .ctl-group { flex-wrap: wrap; } }
+/* the approval screen - shown on every load of /tv until the trusted phone approved THIS load */
+body.locked #dash, body.locked #vbox, body.locked #ctl { display: none !important; }
+#auth { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; overflow: auto; background: var(--bg); }
+#auth[hidden] { display: none; }
+#auth .card { width: min(720px, 94vw); background: var(--panel); border: 1px solid var(--line-2); border-radius: 8px; padding: 28px 32px; text-align: center; }
+#auth .lbl { font-size: 14px; font-weight: 800; letter-spacing: .18em; color: var(--text-3); }
+#auth h1 { font-size: clamp(26px, 4vw, 44px); font-weight: 900; letter-spacing: .06em; margin: 8px 0 14px; }
+#auth .code { font-family: var(--mono); font-size: clamp(40px, 8vw, 84px); font-weight: 800; letter-spacing: .12em; color: var(--amber); margin: 10px 0; }
+#auth .msg { font-size: clamp(15px, 1.8vw, 20px); font-weight: 700; color: var(--text-2); line-height: 1.45; }
+#auth .msg.bad { color: var(--red); } #auth .msg.ok { color: var(--green); }
+#auth .bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin: 18px 0 6px; }
+#auth .bar > div { height: 100%; background: var(--amber); transition: width 1s linear; }
+#auth button { font: inherit; font-size: 16px; font-weight: 900; letter-spacing: .08em; padding: 10px 18px; border-radius: 6px;
+  border: 1px solid var(--text); background: var(--text); color: #111; cursor: pointer; margin-top: 16px; }
+#auth button[hidden] { display: none; }
