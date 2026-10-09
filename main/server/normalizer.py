@@ -16,8 +16,9 @@ from .chase import CHASE
 from .feedstate import IN_PIT_SINCE, STOPPED_SINCE, TIMES, FeedState
 from .lap_state import classify as lap_state_classify, driver_ref, pace_refs
 from .laps import LAPS
+from . import team_radio
 from .models import (Availability, ClockState, DriverState, RaceControlFlags, SessionState,
-                     StintState, TeamRadioEntry, TimeValue, TrackStatusState, WeatherState, to_dict)
+                     StintState, TimeValue, TrackStatusState, WeatherState, to_dict)
 from .race_control import RaceControlResult, process_messages, visible_messages
 from .session_phases import SessionTimeline, phase_label, phase_prefix
 from .telemetry import parse_utc
@@ -33,7 +34,6 @@ DNF_STOPPED_SECONDS = 60.0
 TRACK_STATUS = {
     "1": "GREEN", "2": "YELLOW", "3": "YELLOW", "4": "SC", "5": "RED", "6": "VSC", "7": "VSC_ENDING",
 }
-ARCHIVE_BASE = "https://livetiming.formula1.com/static/"
 
 
 def _s(v: Any) -> Optional[str]:
@@ -676,18 +676,12 @@ class Normalizer:
                 prev_ms = ms
         return order
 
-    def radio(self, feed: FeedState, session: SessionState) -> list[TeamRadioEntry]:
-        tr = feed.get("TeamRadio") or {}
-        caps = _items(tr.get("Captures")) if isinstance(tr, dict) else []
-        out = []
-        for c in caps[-12:]:
-            if not isinstance(c, dict):
-                continue
-            path = _s(c.get("Path"))
-            url = f"{ARCHIVE_BASE}{session.path}{path}" if path and session.path else None
-            out.append(TeamRadioEntry(utc=_s(c.get("Utc")), driver=_s(c.get("RacingNumber")), url=url))
-        out.reverse()
-        return out
+    def radio(self, feed: FeedState, session: SessionState) -> list[dict]:
+        """All team radio clips published so far in this session (server/team_radio.py), newest first.
+        In replays / VOD the feed only holds what was published up to the video's time - no spoilers."""
+        clips = team_radio.parse_captures(feed.get("TeamRadio") or {}, session.path)
+        clips.reverse()
+        return clips
 
     # ------------------------------------------------------------------
     def build(self, feed: FeedState, now: Optional[datetime], speed: float, availability: Availability,
@@ -708,7 +702,7 @@ class Normalizer:
             "drivers": {n: to_dict(d) for n, d in drivers.items()},
             "order": order,
             "race_control": msgs,
-            "radio": [to_dict(r) for r in self.radio(feed, session)],
+            "radio": self.radio(feed, session),
             "availability": to_dict(availability),
             # phases + markers (structure; incidents only once they are in the past)
             "timeline": self.timeline.to_json(until_ms=self._now_ms, strict=True) if self.timeline is not None

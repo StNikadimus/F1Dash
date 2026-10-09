@@ -44,7 +44,7 @@ RADAR_TILES = "https://tilecache.rainviewer.com"
 
 # (pattern, methods, kind, needs) - needs: "" (anyone; the app decides), "view" (an approved /tv page or the
 # trusted phone - checked here AND in the app), "page" (an HTML page: page CSP)
-STATIC_DASH = r"(style\.css|tv\.css|app\.js|components/(voyo_player\.js|voyo_player\.css|f1time\.js|qrcode\.js|pitlane\.js))"
+STATIC_DASH = r"(style\.css|tv\.css|app\.js|components/(voyo_player\.js|voyo_player\.css|f1time\.js|qrcode\.js|pitlane\.js|team_radio\.js))"
 ROUTES: list[tuple[re.Pattern, frozenset, str, str]] = [
     # /tv: the page (approval screen first), its code, the approval API, the page's own API and the video
     (re.compile(r"^/tv$"), frozenset({"GET"}), "http", "page"),
@@ -58,6 +58,8 @@ ROUTES: list[tuple[re.Pattern, frozenset, str, str]] = [
     (re.compile(r"^/static/" + STATIC_DASH + r"$"), frozenset({"GET"}), "http", ""),
     (re.compile(r"^/api/track/layouts$"), frozenset({"GET"}), "http", "view"),
     (re.compile(r"^/api/media/catalog$"), frozenset({"GET"}), "http", "view"),
+    # TEAM RADIO playback in the dashboard (a clip of the session shown now, fetched from the F1 archive)
+    (re.compile(r"^/api/radio/audio/[0-9a-f]{16}$"), frozenset({"GET"}), "http", "view"),
     # /remote: the page and its socket (the app allows control / approvals only to the trusted phone)
     (re.compile(r"^/remote$"), frozenset({"GET"}), "http", "page"),
     (re.compile(r"^/ws$"), frozenset({"GET"}), "websocket", ""),
@@ -270,7 +272,7 @@ class PublicGateway:
 
         extra = self._sec_headers(path, scope)
         own = {k for k, _v in extra}                       # the gateway's headers replace the app's
-        is_static = path.startswith(("/static/", "/tv-static/", "/tv/live/"))
+        is_static = path.startswith(("/static/", "/tv-static/", "/tv/live/", "/api/radio/audio/"))
 
         async def send_secured(message):
             if message["type"] == "http.response.start":

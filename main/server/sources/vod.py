@@ -35,6 +35,7 @@ from .base import Sink, Source
 from .f1_live import _local_to_utc
 from ..session_phases import build_timeline
 from .replay import ARCHIVE, META_TOPICS, Event, load_archive
+from .. import team_radio
 
 log = logging.getLogger("vod")
 
@@ -190,6 +191,9 @@ class VodSource(Source):
         self.cache_dir = cache_dir
         self.requested: Optional[int] = None if self.auto else int(raw)
         self.preload = bool(cfg.get("preload_data", False))
+        self.radio_fallback = True          # [team_radio] openf1_fallback (set by the app)
+        self.radio_wait_s = 3.0             # the most the session load waits for OpenF1's team radio list
+        self._radio_bg: Optional[asyncio.Task] = None
         self._go = asyncio.Event()          # set by the engine once the video has a time (sync)
         self.state = "waiting"              # waiting | loading | ready | error
         self.reason = "waiting for the VOYO page title (session detection)" if self.auto else "loading"
@@ -347,6 +351,8 @@ class VodSource(Source):
                 self.reason = f"downloading {what}: {text}"
 
         events = await load_archive(path, self.cache_dir, progress=progress)
+        if self.radio_fallback and events and not any(e.topic == "TeamRadio" for e in events):
+            events = await self._openf1_radio(events, session, path)
         self.reason = f"preparing {what} ({len(events)} messages)"
         log.info("VOD: %s", self.reason)
         if not events:
@@ -366,6 +372,35 @@ class VodSource(Source):
         log.info("VOD ready: %s", self.reason)
         if self.on_loaded:
             self.on_loaded(session, ref)
+
+    async def _openf1_radio(self, events: list[Event], session: dict, path: str) -> list[Event]:
+        """The F1 archive has no TeamRadio stream for this session: OpenF1's list (same F1 recordings, a
+        selection) as TeamRadio messages at their times - fed in step with the video like the rest."""
+        task = asyncio.ensure_future(self.openf1.team_radio(session))
+        try:
+            # optional: never holds the session up for long (OpenF1 retries / rate limits). A slow answer
+            # still lands in OpenF1's disk cache, so the next load of this session has it at once.
+            rows = await asyncio.wait_for(asyncio.shield(task), self.radio_wait_s)
+        except asyncio.TimeoutError:
+            log.info("VOD: OpenF1 team radio list not there within %.0f s - loading without it", self.radio_wait_s)
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            self._radio_bg = task
+            return events
+        except Exception as exc:                        # optional: never stops the session from loading
+            log.info("VOD: no team radio from OpenF1 either (%s)", exc if isinstance(exc, OpenF1Error)
+                     else type(exc).__name__)
+            return events
+        caps = team_radio.openf1_captures(rows, path.strip("/") + "/")
+        if not caps:
+            log.info("VOD: no team radio for this session (F1 archive and OpenF1)")
+            return events
+        extra = []
+        for i, (utc, cap) in enumerate(caps):
+            t = parse_utc(utc)
+            if t is not None:
+                extra.append(Event(t=t, topic="TeamRadio", data={"Captures": {str(i): cap}}))
+        log.info("VOD: %d team radio clip(s) from OpenF1 (the F1 archive had none)", len(extra))
+        return sorted(events + extra, key=lambda e: e.t)
 
     @staticmethod
     def _prepare(events: list[Event]) -> tuple[list, RefEvents]:

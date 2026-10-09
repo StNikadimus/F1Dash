@@ -81,6 +81,7 @@
         S.mode = m.mode; S.keymap = m.keymap || {};
         S.keymapVideo = m.keymap_video || {}; S.keymapVideoFocus = m.keymap_video_focus || {};
         Object.assign(S.cfg, m.config || {});
+        stage.classList.toggle("no-radio", S.cfg.team_radio === false);
         stage.classList.remove("anim-full", "anim-reduced", "anim-off");
         stage.classList.add("anim-" + (S.cfg.animations || "full"));
         stage.style.setProperty("--reorder-ms", (S.cfg.reorder_ms || 0) + "ms");
@@ -1100,7 +1101,7 @@
       panel.innerHTML = `<div class="view-title">TYRE STRATEGY <small>STINT LAPS · 3</small></div>${rows}` +
         `<div class="strat-legend">Bar length = laps driven on each set (from TimingAppData). Right column = pit stops.</div>`;
     } else if (v === "racecontrol") {
-      const radio = (S.radio || []).map((r) => {
+      const radio = (S.radio || []).slice(0, 12).map((r) => {
         const d = S.drivers[r.driver];
         return `<div>${esc(hhmm(r.utc))} · TEAM RADIO · ${esc(d ? d.tla : r.driver || "")}</div>`;
       }).join("");
@@ -2023,6 +2024,7 @@
     if (!m || m.full || "order" in m) layoutBoard();
     renderBoard();
     if (!m || m.full || "race_control" in m) renderRC();
+    if (window.TeamRadio) TeamRadio.update(S.radio, S.drivers, S.mode, S.session);
     renderDetail();
     renderView();
     renderMapInfo();

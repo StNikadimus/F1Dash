@@ -87,9 +87,28 @@
         <div id="lb-rows"></div>
         <div id="lb-empty" class="map-notice" hidden>WAITING FOR TIMING DATA</div>
       </div>
-      <div id="rc-panel" class="panel">
-        <div class="panel-title">RACE CONTROL <span class="panel-hint">INFO / 4</span></div>
-        <ul id="rc-list"></ul>
+      <div id="rc-row">
+        <div id="rc-panel" class="panel">
+          <div class="panel-title">RACE CONTROL <span class="panel-hint">INFO / 4</span></div>
+          <ul id="rc-list"></ul>
+        </div>
+        <!-- TEAM RADIO: the clips F1 published for this session (components/team_radio.js) -->
+        <div id="radio-panel" class="panel">
+          <div class="panel-title">TEAM RADIO <span id="radio-badge" class="rd-badge"></span><span class="panel-hint" id="radio-count"></span></div>
+          <div class="rd-filters">
+            <select id="radio-team" aria-label="Team"><option value="">ALL TEAMS</option></select>
+            <select id="radio-driver" aria-label="Driver"><option value="">ALL DRIVERS</option></select>
+            <input id="radio-search" type="search" placeholder="SEARCH" autocomplete="off" spellcheck="false" aria-label="Search">
+          </div>
+          <ul id="radio-list"></ul>
+          <button id="radio-new" class="rd-new" hidden>NEW ↑</button>
+          <div class="rd-player">
+            <button id="radio-play" class="rd-play" disabled aria-label="Play / pause">▶</button>
+            <div class="rd-now"><div id="radio-now">—</div><input id="radio-seek" type="range" min="0" max="1000" value="0" disabled aria-label="Seek"></div>
+            <div id="radio-time" class="rd-time"></div>
+          </div>
+          <audio id="radio-audio" preload="none"></audio>
+        </div>
       </div>
     </section>
   </main>
@@ -118,6 +137,7 @@
 <script src="/static/components/f1time.js"></script>
 <script src="/static/components/qrcode.js"></script>
 <script src="/static/components/pitlane.js"></script>
+<script src="/static/components/team_radio.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

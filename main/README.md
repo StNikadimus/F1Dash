@@ -37,10 +37,11 @@ f1-dashboard/                  # the repository
 │   │   ├── feedstate.py / normalizer.py / models.py / race_control.py / telemetry.py / track.py
 │   │   ├── remote.py / video.py / hub.py / weather.py / radar.py / mode.py / f1tv_auth.py
 │   │   ├── recorder.py        # records every live F1-feed session for replay
+│   │   ├── team_radio.py      # TEAM RADIO: clip parsing, archive audio fetch, AI transcripts (§9e)
 │   │   └── sources/           # f1_live.py (SignalR Core + legacy), archive_follow, replay, vod, simulator
 │   ├── dashboard/             # index.html, style.css, app.js, tv.css, remote.html (phone remote)
 │   ├── tools/                 # tv_launcher.py (dashboard + VOYO window), voyo_clock.py (+ probe .js),
-│   │                          # fetch_tracks.py, probe_feed.py
+│   │                          # fetch_tracks.py, probe_feed.py, transcribe_radio.py (optional, §9e)
 │   └── tests/
 ├── server/                    # LINUX SERVER deployment (primary) - see server/README.md
 │   ├── launch.sh              # venv + dependencies + main/main.py with config/server.toml
@@ -1276,6 +1277,88 @@ the F1 recordings folder → `VOYO stream recording DISABLED: <why>` and nothing
 else. A write error later (disk full, USB unplugged) stops the writer with an error in the log and
 in `/api/voyo/recordings`; the path is re-checked every 60 s and the open package continues (a
 `note` marks the gap). `min_free_bytes` stops writing before a disk is full.
+
+## 9e. Team radio (`[team_radio]`)
+
+A **TEAM RADIO** panel next to RACE CONTROL (FULL_DASHBOARD: beside it under the board; RACE_VIEW: below
+it, right of the map). It lists the radio clips F1 published for the session shown, plays them, filters
+by team / driver / text, and can show optional AI transcripts.
+
+### Research: where team radio comes from (October 2026)
+
+| Source | What it is | Used here | Limits |
+|---|---|---|---|
+| Live-timing topic `TeamRadio` (SignalR) | `{"Captures": [{"Utc", "RacingNumber", "Path": "TeamRadio/<file>.mp3"}]}`; the MP3 is at `https://livetiming.formula1.com/static/<SessionInfo.Path><Path>` | **LIVE**: already subscribed on the existing connection (`CORE_TOPICS`); whatever arrives is shown | F1 publishes a **selection** of clips (the broadcast ones), each **after** it was spoken. Whether F1 sends this topic to an anonymous or an **F1 TV Access** connection is **not verified**: the help page lists live team radio as a **Pro/Premium** feature, and the project's own live recording (`data/recordings/sample-2026-japan-race.json.gz`, 47 071 messages, auth mode unknown) contains **no** TeamRadio message. Having `F1TV_TOKEN` does not mean this feed is delivered. |
+| Archive `TeamRadio.jsonStream` (`livetiming.formula1.com/static/<path>`) | the same captures, timestamped, after the session; FastF1 lists it as `team_radio` (mirror `livetiming-mirror.fastf1.dev`) | **REPLAY / VOD**: loaded with the other archive topics and fed **in step with the video** - a clip appears only when the video reaches the moment it was published | public, no login; not every session has it |
+| OpenF1 `GET /v1/team_radio?session_key=…` | `{date, driver_number, recording_url, …}` - `recording_url` points to the same F1 archive MP3s | **VOD fallback only**, when the F1 archive has no TeamRadio stream (`openf1_fallback`); labelled `ARCHIVE · OPENF1` | OpenF1 says coverage is a limited selection and has decreased a lot during 2026: never treated as complete or guaranteed. Only `recording_url`s on the archive host under this session's path are accepted. |
+| F1 TV app (Pro) | in-player radio | **not used** | no public API; the project does not bypass subscriptions or DRM |
+
+Nothing is made up: no clip, URL, driver, time or transcript is generated. A clip whose capture has no
+valid file is not shown as playable; an invalid path / driver / time is dropped.
+
+### What the panel shows
+
+* every clip newest first: team colour, time (local hh:mm:ss), driver TLA + number, team, a play status
+  (▶ ready, … loading, ❚❚ playing, ✕ failed, — no recording) and the kind:
+  * `LIVE FEED` - received on the live connection (a recording, delayed by F1 - not a live audio stream);
+  * `ARCHIVE` - the session archive (replay / VOD); `ARCHIVE · OPENF1` - OpenF1's list;
+  * the panel badge says which: `LIVE FEED`, `ARCHIVE · WITH THE VIDEO`, `REPLAY · ARCHIVE`, `TEST MODE`.
+* no clips: an honest reason (live: "No team radio clip received on this connection yet … with F1 TV
+  Access live team radio may not be delivered at all"; VOD: "No team radio published up to this point of
+  the session (or none in the archive for it)"; TEST MODE: not simulated).
+* new clips while you scroll down do not move the list; a `N NEW ↑` pill jumps to the top.
+* filters (team, driver, search in driver / team / transcript) are kept per browser (`localStorage`).
+
+### Playback
+
+One `<audio>` element: click a row (or ▶) to play, again to pause, seek bar + time. Only one clip at a
+time. The browser never gets an F1 URL: it plays `/api/radio/audio/<id>`, and the server fetches the MP3
+**only** for a clip of the session shown now, **only** from `archive_base`, never following redirects,
+size-limited (`max_clip_mb`), checked to be an MP3, with Range support for seeking. Played clips stay in a
+small memory cache (`audio_cache_mb`); nothing is written to disk. A missing / failed recording shows the
+reason (`recording not available (F1 archive answered 404)`, `F1 archive did not answer in time`, …) and
+is not retried for 5 minutes. A radio failure never affects the timing loop or the rest of the dashboard.
+
+The audio endpoint follows the dashboard's rules: behind `protect_dashboard`, and through the public
+gateway (Tailscale Funnel) only for an approved `/tv` page or the trusted phone.
+
+### Transcripts (optional, AI)
+
+F1 publishes no transcripts. `tools/transcribe_radio.py` (needs `pip install faster-whisper`; only this
+tool) transcribes the clips on a PC with a GPU and sends the text to the server, which shows it under the
+clip with an **AI** tag and the model's confidence - machine transcription, may be wrong, never official.
+
+    python tools/transcribe_radio.py --server http://<server>:8080 --token <[remote] token> --loop 20
+
+RTX 3070 Ti (8 GB): `--model large-v3 --device cuda --compute-type float16` fits and handles radio noise
+best; `distil-large-v3` / `medium.en` are faster. The tool authenticates with the `[remote]` token
+(`X-Remote-Token`); a server without a token accepts it only from its own machine. Transcripts are kept
+in `data/radio_transcripts.json`. The panel works the same without them.
+
+### Configuration
+
+```toml
+[team_radio]
+enabled = true              # false: panel hidden, endpoints off
+openf1_fallback = true
+audio_cache_mb = 12
+max_clip_mb = 8
+fetch_timeout_s = 10
+transcripts = true          # accept transcripts from tools/transcribe_radio.py
+archive_base = "https://livetiming.formula1.com/static/"
+```
+
+Environment overrides as for every section, e.g. `F1DASH_TEAM_RADIO_ENABLED=false`.
+
+### Not verified / not available
+
+* Live team radio with F1 TV **Access** or anonymously: not verified (no live session could be tested
+  from the development environment, and the bundled live recording has none). If F1 does not send the
+  topic, the panel says so; it does not pretend.
+* OpenF1 coverage for 2026 sessions: not verified (OpenF1 was not reachable from the development
+  environment); the code treats any OpenF1 answer, including an empty one, as optional.
+* No live audio stream of team radio exists in any public source; "live" here means clips published
+  during the session.
 
 ## 10. Troubleshooting
 

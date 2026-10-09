@@ -487,14 +487,15 @@ an explicit allowlist. Funnel itself is configured with one rule: everything on 
 | `/api/tv/status`, `/api/tv/logout` | GET / POST | the approved page's state / end | approved page: session cookie **and** page secret |
 | `/tv/live/index.m3u8`, `/tv/live/live_NNNNN.ts` | GET | the live stream | approved page: session cookie **and** page secret |
 | `/` | GET | the dashboard inside `/tv`'s iframe | approved `/tv` page or the trusted phone, else → `/tv` |
-| `/static/` `style.css` `tv.css` `app.js` `components/{voyo_player.js,voyo_player.css,f1time.js,qrcode.js,pitlane.js}` | GET | the dashboard's code | anyone (code only) |
+| `/static/` `style.css` `tv.css` `app.js` `components/{voyo_player.js,voyo_player.css,f1time.js,qrcode.js,pitlane.js,team_radio.js}` | GET | the dashboard's code | anyone (code only) |
 | `/api/track/layouts`, `/api/media/catalog` | GET | read by the dashboard / remote | approved `/tv` page or the trusted phone |
+| `/api/radio/audio/<16 hex>` | GET | TEAM RADIO playback: a clip of the session shown now, fetched from the F1 archive | approved `/tv` page or the trusted phone |
 | `/remote` | GET | the phone remote page | anyone - shows only "not trusted" + its own code |
 | `/ws` (WebSocket) | - | dashboard socket; `?client=remote` for the remote | dashboard: approved page, **read-only**; remote: **only the trusted phone** (state, control, approvals); any other device learns only its own name/code |
 
 **Not public** (examples): `/disk`, `/disk-static/*`, `/api/disk/*` (login, setup, security, recordings,
 VOYO account), `/api/health`, `/api/state`, `/api/sync*`, `/api/mode`, `/api/remote/*` (incl. the token
-QR info), `/api/voyo/*`, `/f1tv/*`, `/api/diagnostics`, `/tv/`, `/static/remote.html`, the PC launcher /
+QR info), `/api/voyo/*`, `/api/radio/clips`, `/api/radio/transcript`, `/f1tv/*`, `/api/diagnostics`, `/tv/`, `/static/remote.html`, the PC launcher /
 clock bridge / capture endpoints.
 
 ### The rules the gateway enforces

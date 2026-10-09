@@ -36,7 +36,14 @@
 #stage.tv-RACE_VIEW .wx-box .wx-sec { margin: 6px 0 4px; }
 #stage.tv-RACE_VIEW .wx-box .wx-text.dim, #stage.tv-RACE_VIEW .wx-foot { display: none; }
 #stage.tv-RACE_VIEW .wx-box h2 .wx-lap { font-size: 16px; }
+#stage.tv-RACE_VIEW #rc-row { display: contents; }
 #stage.tv-RACE_VIEW #rc-panel { position: absolute; left: 934px; top: 728px; width: 560px; height: 344px; }
+/* TEAM RADIO under the newest race-control messages, in the same slot next to the map / driver */
+#stage.tv-RACE_VIEW:not(.no-radio) #rc-panel { height: 128px; }
+#stage.tv-RACE_VIEW #radio-panel { position: absolute; left: 934px; top: 864px; width: 560px; height: 208px; }
+#stage.tv-RACE_VIEW .rd-filters input, #stage.tv-RACE_VIEW .rd-team { display: none; }
+#stage.tv-RACE_VIEW .rd-item { grid-template-columns: 4px 72px 80px 24px auto; }
+#stage.tv-RACE_VIEW .rd-new { top: 64px; }
 #stage.tv-RACE_VIEW #race-info { display: flex; position: absolute; left: 1502px; top: 728px; width: 410px; height: 344px; }
 /* banners: stacked at the top of the right column (the VOYO window covers the left part); the
  * leaderboard moves down by their height - they never lie on top of a panel */

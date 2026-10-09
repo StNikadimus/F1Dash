@@ -505,3 +505,19 @@ race_min_video_seconds = 8100
 # if it was at most this many days ago (shown as "season ASSUMED"); otherwise choose it.
 # 0 = never assume.
 assume_recent_season_days = 21
+
+# ---------------------------------------------------------------------------
+# TEAM RADIO panel (main/README.md "Team radio"): the radio clips F1 published for the session shown -
+# from the live-timing TeamRadio topic (live: whatever F1 sends on this connection - F1 TV Access does
+# not officially include live team radio), the session's archive (replay / VOD) and, for archived
+# sessions without one, OpenF1's selection. The browser plays /api/radio/audio/<id>: this server
+# fetches the MP3 from archive_base on request (never stored on disk; a small memory cache).
+# ---------------------------------------------------------------------------
+[team_radio]
+enabled = true
+openf1_fallback = true      # VOD: OpenF1's clips when the F1 archive has no TeamRadio stream
+audio_cache_mb = 12         # in-memory cache of played clips (seeking / replays)
+max_clip_mb = 8             # a bigger file is refused
+fetch_timeout_s = 10
+transcripts = true          # accept AI transcripts from tools/transcribe_radio.py (optional; shown as "AI")
+archive_base = "https://livetiming.formula1.com/static/"

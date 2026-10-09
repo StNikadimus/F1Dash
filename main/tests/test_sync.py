@@ -640,7 +640,7 @@ class VodLoadAfterSyncTest(unittest.TestCase):
 
             async def offline(*a, **k):
                 raise OpenF1Error("offline (test)")
-            client.session = client.laps = client.race_control = offline
+            client.session = client.laps = client.race_control = client.team_radio = offline
             src = vodmod.VodSource({"session_key": 11253}, client, Path("/nonexistent"))
             metas, loaded = [], []
             src.on_meta = lambda sess, ref: metas.append(sess["session_key"])
