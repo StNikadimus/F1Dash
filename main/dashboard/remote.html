@@ -101,6 +101,10 @@
   #tvq-ok { background: var(--green); color: #04150c; border-color: var(--green); }
   #tvq-deny { border-color: var(--red); color: var(--red); }
   .tvq-more { font-size: 12px; color: var(--text-3); margin-top: 8px; }
+  /* from the internet (Tailscale Funnel) and not the trusted phone: no controls at all */
+  #locked { display: none; margin: 18px 12px; padding: 16px; border: 1px solid var(--line-2, #2a3847); border-radius: 8px; line-height: 1.5; }
+  #locked b { color: var(--amber, #ffb000); }
+  body.locked #locked { display: block; } body.locked main, body.locked #tvreq, body.locked .now { display: none !important; }
 </style>
 </head>
 <body class="off">
@@ -116,6 +120,11 @@
     <button id="dv-rename" class="always">RENAME</button>
   </div>
 </header>
+<div id="locked">
+  <b>THIS DEVICE IS NOT THE TRUSTED PHONE.</b><br>
+  Over the internet this remote works only on the phone chosen in <b>/disk → SECURITY → USE FOR AUTH</b>
+  (at home, on the server's network). Its code is shown above; then open this page again.
+</div>
 <div id="tvreq" hidden>
   <div class="tvq-box">
     <div class="tvq-l">TV ACCESS REQUEST</div>
@@ -330,6 +339,8 @@
       case "sync": R.sync = m; break;
       case "sync_result": onSyncResult(m); return;
       case "device": showDevice(m); return;
+      case "locked": document.body.classList.add("locked"); showTvRequests([]); return;   // public, not trusted
+      case "reload": location.reload(); return;                                            // trust changed
       case "tv_requests": showTvRequests(m.requests || []); return;
       case "tv_decided": toast(m.ok ? "TV " + String(m.status || "").toUpperCase() : "Not done: " + (m.error || "?")); return;
       default: return;

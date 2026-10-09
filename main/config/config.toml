@@ -30,6 +30,17 @@ login_max_failures = 5      # wrong /disk passwords per address in 5 min, then .
 lockout_minutes = 5         # ... that address waits this long
 protect_dashboard = false   # true: the plain dashboard "/" (+ its APIs / WebSocket) also needs an approved /tv page or a /disk login
 
+# ---------------------------------------------------------------------------
+# PUBLIC ACCESS through Tailscale Funnel (server/README.md "Public access"): a separate gateway on
+# 127.0.0.1:<port> that forwards ONLY /tv and /remote (and what they need) - never /disk or the rest.
+# Off by default; on the server switch it on with server/systemd/public-gateway.conf (a unit drop-in).
+# A wrong or empty hostname keeps it off (fail closed).
+# ---------------------------------------------------------------------------
+# [public]
+# enabled = false
+# hostname = ""              # this machine's Tailscale name, e.g. "f1server.tail1234.ts.net"
+# port = 8090                # tailscale funnel --bg --https=8443 http://127.0.0.1:8090
+
 [source]
 # Mode at start - switchable at any time on the dashboard (MODE: AUTO / LIVE / VOD, no restart):
 # "auto"   - AUTO: LIVE while an F1 session is on (90 min before its start .. 60 min after its

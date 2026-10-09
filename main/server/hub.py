@@ -45,6 +45,7 @@ class Client:
         self.addr = addr
         self.kind = kind                         # "dashboard" | "remote" (phone)
         self.device_id: Optional[str] = None    # /remote: the device identity (server/security.py)
+        self.public = False                      # came through the public gateway (server/public_gateway.py)
         self.last_sync = 0.0
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=400)
         self.task: Optional[asyncio.Task] = None

@@ -710,6 +710,15 @@ recording are kept.
 
 ---
 
+## 14b. Optional: /tv and /remote from anywhere (Tailscale Funnel)
+
+Off unless you set it up. It makes only `/tv` and `/remote` reachable at `https://<server>.<tailnet>.ts.net:8443`
+(no app on the TV, no port forwarding); `/disk` stays on the home network. Follow
+`server/README.md` → **Public access** (prerequisites, the `public-gateway.conf` drop-in, `tailscale funnel`,
+checks from outside, rollback).
+
+---
+
 ## 15. Troubleshooting
 
 | Problem | Fix |

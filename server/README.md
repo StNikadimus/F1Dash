@@ -458,7 +458,159 @@ The trusted phone stays. **Lost the phone:** sign in to `/disk`, press **REMOVE 
 - `/api/health` tells programs on the server itself (127.0.0.1) whether a recording is running (for
   the update script); from the network it shows only what it showed before.
 - The HTML/JS files of the pages (`/disk-static`, `/tv-static`) are public, but contain no data.
-- Don't forward the ports to the internet.
+- Don't forward the ports to the internet. For access from outside use the Funnel gateway (**Public access** below), which exposes only `/tv` and `/remote`.
+
+## Public access: `/tv` and `/remote` through Tailscale Funnel
+
+Lets a TV, phone or laptop **anywhere** open `https://<server>.<tailnet>.ts.net:8443/tv` (or `/remote`) in a
+normal browser - no Tailscale app on that device, no router port forwarding. `/disk` and everything else stay
+on your home network. **Off by default.**
+
+```
+browser (internet) --https--> Tailscale Funnel (TLS, :8443) --> tailscaled on the server
+   --http--> 127.0.0.1:8090  PUBLIC GATEWAY (main/server/public_gateway.py, allowlist)  --> the F1 app
+LAN: 192.168.10.140:8080 (http) and :443 (https) are unchanged and do not go through the gateway.
+```
+
+**Why a gateway and not Funnel's own path rules:** `/tv` shows the dashboard, which lives at `/`, and a `/`
+mount in `tailscale serve`/`funnel` is a catch-all (it matches every path that no longer mount matches -
+tailscale's `getServeHandler`). So Funnel sends everything to the gateway, and the gateway forwards only
+an explicit allowlist. Funnel itself is configured with one rule: everything on :8443 -> `127.0.0.1:8090`.
+
+### What is reachable from the internet (all else: 404, never reaches the application)
+
+| Path | Method | Why | Who gets data |
+|---|---|---|---|
+| `/tv` | GET | the TV page: the approval screen first | anyone (no data in it) |
+| `/tv-static/tv.css`, `tv.js`, `vendor/hls.light.min.js` | GET | its code | anyone (code only) |
+| `/api/tv/auth/request`, `/api/tv/auth/status` | POST | the per-load challenge | anyone, rate-limited; the result only for that page |
+| `/api/tv/status`, `/api/tv/logout` | GET / POST | the approved page's state / end | approved page: session cookie **and** page secret |
+| `/tv/live/index.m3u8`, `/tv/live/live_NNNNN.ts` | GET | the live stream | approved page: session cookie **and** page secret |
+| `/` | GET | the dashboard inside `/tv`'s iframe | approved `/tv` page or the trusted phone, else → `/tv` |
+| `/static/` `style.css` `tv.css` `app.js` `components/{voyo_player.js,voyo_player.css,f1time.js,qrcode.js,pitlane.js}` | GET | the dashboard's code | anyone (code only) |
+| `/api/track/layouts`, `/api/media/catalog` | GET | read by the dashboard / remote | approved `/tv` page or the trusted phone |
+| `/remote` | GET | the phone remote page | anyone - shows only "not trusted" + its own code |
+| `/ws` (WebSocket) | - | dashboard socket; `?client=remote` for the remote | dashboard: approved page, **read-only**; remote: **only the trusted phone** (state, control, approvals); any other device learns only its own name/code |
+
+**Not public** (examples): `/disk`, `/disk-static/*`, `/api/disk/*` (login, setup, security, recordings,
+VOYO account), `/api/health`, `/api/state`, `/api/sync*`, `/api/mode`, `/api/remote/*` (incl. the token
+QR info), `/api/voyo/*`, `/f1tv/*`, `/api/diagnostics`, `/tv/`, `/static/remote.html`, the PC launcher /
+clock bridge / capture endpoints.
+
+### The rules the gateway enforces
+
+* **Exact paths only** - a path with any `%`-encoding, `//`, `.`/`..` segments, `\`, `;`, control or
+  non-ASCII characters, or over 200 characters is refused (400), never normalised. Case matters.
+* **Methods per route** (no HEAD/OPTIONS/PUT/DELETE/TRACE ...); WebSocket only on `/ws`.
+* **Query parameters per route** (`/?layout=`, `/tv?next=/`, `/api/media/catalog?year=`, `/ws?client=`,
+  `/tv/live/*?p=`); anything else - in particular `?token=` - is refused (400). The remote token is never
+  used, shown or accepted on the public side.
+* **Host:** only the configured `*.ts.net` name (any port) - else 421.
+* **Visitor address** from `X-Forwarded-For` (set by tailscaled, client copies removed by it); a loopback,
+  missing or invalid one becomes `public` - a visitor can never look like the server itself (the things the
+  app allows only to 127.0.0.1 stay local).
+* **https** for the app (Funnel terminated TLS): cookies are `Secure`, `HttpOnly`, `SameSite` as on the LAN,
+  host-only (`*.ts.net` cookies are separate from `192.168.10.140` ones).
+* **Rate limits:** 600 requests/min, 6 open WebSockets and 30 WebSocket connects/min per visitor, 40 public WebSockets in all; TV challenges
+  6/min per visitor and 30 per 10 min for all public visitors; new `/remote` identities 5/hour per visitor
+  and 40/hour in all; renames 5 per 10 min.
+* **Headers:** `Content-Security-Policy` (scripts only from the server - `/remote`'s inline script by its
+  SHA-256; no plugins; frames only the dashboard in `/tv`; images also RainViewer radar tiles), `nosniff`,
+  `no-referrer`, `X-Frame-Options`, HSTS, `Cross-Origin-Opener/Resource-Policy`, `Permissions-Policy`,
+  `no-store` for pages and APIs, no `Server` header. Errors are a bare `{"ok":false,"error":"not found"}`.
+* **Logging:** refusals are logged with the path only (never the query string - it may carry a page secret).
+* **Fail closed:** `[public] enabled` with an empty / invalid hostname, a privileged port or the dashboard's
+  own port → no gateway at all (log: `PUBLIC GATEWAY OFF`). Port 8090 busy → no gateway. Gateway not running
+  → Funnel answers 502. The gateway listens on 127.0.0.1 only.
+
+`/tv` keeps all its rules over Funnel: a new approval on the trusted phone for **every** load, the per-page
+secret on every API call and video piece, single-use challenges, nothing before the approval. `/disk` can
+never approve. The phone approves TVs on the LAN and on the internet alike (one list of challenges).
+
+### Setting it up (by hand, on the server - nothing here is automatic)
+
+0. **Prerequisites:** Tailscale on the server, signed in (`tailscale status`), version **1.52 or newer**
+   (`tailscale version`; the `--bg`/`--https` syntax). In the Tailscale admin console: **DNS → MagicDNS** and
+   **HTTPS Certificates** on. **Funnel needs the `funnel` node attribute** in the tailnet policy - this is
+   the one policy change, and it is required: Funnel cannot be used without it. Grant it **only to this
+   server** (e.g. tag the server `tag:f1dash` and use `"nodeAttrs": [{"target": ["tag:f1dash"], "attr": ["funnel"]}]`),
+   not to `autogroup:member`. (`tailscale funnel` prints a link to the admin console if it is missing.)
+1. **Update the code** (a release with this feature): `sudo /opt/f1-dashboard/server/update-f1dash.sh`.
+2. **Your hostname:** `tailscale status --json | grep -m1 '"DNSName"'` → e.g. `f1server.tail1234.ts.net.`
+   (use it without the final dot).
+3. **Switch the gateway on** (a systemd drop-in; the repository and `server/.env` stay untouched):
+   ```bash
+   sudo mkdir -p /etc/systemd/system/f1-dashboard.service.d
+   sudo cp /opt/f1-dashboard/server/systemd/public-gateway.conf /etc/systemd/system/f1-dashboard.service.d/
+   sudo nano /etc/systemd/system/f1-dashboard.service.d/public-gateway.conf     # set F1DASH_PUBLIC_HOSTNAME
+   sudo systemctl daemon-reload
+   sudo /opt/f1-dashboard/server/update-f1dash.sh --force-restart             # refuses during a recording
+   journalctl -u f1-dashboard -n 50 --no-pager | grep -i "public gateway"     # "Public gateway for https://..."
+   ```
+4. **Check it locally, before anything is public:** `sudo /opt/f1-dashboard/server/update-f1dash.sh --verify-only`
+   - its "public gateway" block must be all `ok` (`/tv` approval screen, `/disk` & co. 404, tricks 400, other
+   hosts 421).
+5. **Open Funnel** (port 8443, so nothing that reaches port 443 changes):
+   ```bash
+   sudo tailscale funnel --bg --https=8443 http://127.0.0.1:8090
+   tailscale funnel status          # https://<host>:8443 (Funnel on) |-- / proxy http://127.0.0.1:8090
+   ```
+   Only this one rule. Do not add `tailscale serve`/`funnel` rules for 8080 or 443.
+6. **Check from the internet** (a phone on mobile data with Wi-Fi off, or any computer outside):
+   ```bash
+   H=https://<host>:8443
+   curl -s -o /dev/null -w '%{http_code}\n' $H/tv                 # 200 (approval screen)
+   curl -s -o /dev/null -w '%{http_code}\n' $H/disk               # 404
+   curl -s -o /dev/null -w '%{http_code}\n' $H/api/disk/status    # 404
+   curl -s -o /dev/null -w '%{http_code}\n' $H/api/health         # 404
+   curl -s -o /dev/null -w '%{http_code}\n' $H/api/tv/status      # 401
+   curl -s -o /dev/null -w '%{http_code}\n' $H/                   # 303 (to /tv)
+   curl -s -o /dev/null -w '%{http_code}\n' --path-as-is $H/tv/../disk   # 400
+   curl -s -o /dev/null -w '%{http_code}\n' "$H/remote?token=x"   # 400
+   ```
+7. **The phone** (one time): open `https://<host>:8443/remote` on it - it shows *THIS DEVICE IS NOT THE
+   TRUSTED PHONE* and a code. At home, in `/disk` → SECURITY press **USE FOR AUTH** on that code; the phone
+   reloads into the full remote. Bookmark that URL. (There is one trusted device: the phone's LAN identity
+   `https://192.168.10.140/remote` is then no longer the approver - use the `ts.net` address on the phone at
+   home too, or switch back in `/disk`.)
+8. **The TV:** open `https://<host>:8443/tv`, approve the code on the phone - every time it is loaded.
+
+### Turning it off / rollback
+
+```bash
+sudo tailscale funnel --https=8443 off                         # 1. nothing public any more (immediate)
+tailscale funnel status                                        #    "No serve config"
+sudo rm /etc/systemd/system/f1-dashboard.service.d/public-gateway.conf   # 2. no gateway
+sudo systemctl daemon-reload && sudo /opt/f1-dashboard/server/update-f1dash.sh --force-restart
+sudo /opt/f1-dashboard/server/update-f1dash.sh --rollback      # 3. (only if needed) the previous code
+```
+
+Then make the phone's LAN identity the approver again in `/disk` (USE FOR AUTH) if you switched it. Step 1
+alone already closes everything from the internet; the LAN works the same with or without the gateway.
+
+### Limits and what was tested
+
+* The `*.ts.net` name is **public knowledge** (Tailscale's certificates are in Certificate Transparency logs);
+  nothing relies on it being secret. Anyone on the internet can load `/tv` and `/remote` and create
+  approval requests (rate-limited) - your phone may show requests you did not expect: **DENY** them, and
+  turn Funnel off (step 1) if it keeps happening.
+* From the internet the dashboard is **read-only**: MODE / SYNC / circuit choices in the dashboard do
+  nothing there; the trusted phone's remote controls it as on the LAN. VOYO embedding and the CDN hls.js
+  inside the dashboard are blocked by the CSP (the `/tv` live stream uses the bundled hls.js).
+* The dashboard inside `/tv` is an iframe, which cannot send the page secret: for `/` and its two read APIs
+  the approved page's session cookie (or the trusted phone's device cookie) is enough while that approval
+  lasts. The stream and the `/tv` APIs need the secret.
+* Per-visitor limits use the address tailscaled reports; visitors behind one address (CGNAT, a company
+  proxy) share them.
+* `/remote`'s CSP hash is computed at start: after `remote.html` changes the server must restart (the update
+  script does).
+* Automated (`main/tests/test_public_gateway.py`, temporary data directories): allowlist, path / host / method
+  / query tricks, private routes, WebSockets, per-load approval, stale / forged / replayed secrets, untrusted
+  devices, rate limits, cookies / headers, LAN unchanged. Also run by hand here: the real server with the
+  gateway on 127.0.0.1, `curl --path-as-is` and raw-socket probes, and three headless browsers through a
+  local TLS proxy that imitates Funnel for a `*.ts.net` name (approve, reload, dashboard iframe, WebSockets,
+  live files, no CSP violations). **Not testable here:** real Tailscale Funnel - steps 4-8 above are the
+  check on the server.
 
 ## Updating the server: `server/update-f1dash.sh`
 
