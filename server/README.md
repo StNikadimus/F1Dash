@@ -298,7 +298,7 @@ the same style as the dashboard. It shows:
 
 | Part | What it shows |
 |---|---|
-| **State** (top bar + *NOW*) | `RECORDING` (session, how long, video size), `OPENING` (VOYO opened, waiting for the video), `REST · nothing to do · next: <GP> <session>`, `WAITING FOR DISK`, `PLAYER OFF` (the `f1-voyo-player` service isn't running), `WATCHING (PC)`, `DISK ERROR` |
+| **State** (top bar + *NOW*) | `RECORDING` (session, how long, video size), `OPENING` (VOYO opened, waiting for the video), `REST · nothing to do · next: <GP> <session>`, `WAITING FOR DISK`, `DISK FULL` (less than `min_free_bytes` free: the video capture stops instead of filling the system disk with its spool; timeline / sync data go on), `PLAYER OFF` (the `f1-voyo-player` service isn't running), `WATCHING (PC)`, `DISK ERROR` |
 | **Disk** | used / free / total of the recording disk, how much the recordings take, ≈ hours of video still fitting, writable or not, the reserve (`min_free_bytes`) |
 | **Keep video** | how many days the video of each session type is kept (Practice 1–3, Sprint Qualifying, Sprint, Qualifying, Grand Prix, other; 0 = forever); you can change it there, see below |
 | **Configuration** | recording path, encoder (Quick Sync / CPU), picture size, which sessions, the window before/after |
@@ -359,8 +359,32 @@ slot**. You don't need a PC or a VOYO window.
 - **When nothing is being recorded:** `/tv` shows "NO LIVE STREAM · next: <GP> <session> - the
   stream starts in …", and the dashboard still works.
 - **Layouts:** **1** RACE VIEW (dashboard + video), **2** VIDEO (big video), **3** DASHBOARD only,
-  **M** sound, **F** fullscreen. Move the mouse to see the buttons. Sound starts muted (browsers
-  block autoplay with sound); click once.
+  **M** sound, **F** fullscreen, **Space / P** play / pause this TV's video. Move the mouse to see the
+  controls, one panel with three rows:
+  - layouts;
+  - LIVE / REPLAYS, SOUND, FULLSCREEN, LOG OUT, RECORDER;
+  - the stream status (ON AIR / OFF AIR / REPLAY), a label rather than a button.
+
+  Sound starts muted (browsers block autoplay with sound); click once. Every key of `/tv`, the
+  dashboard and the remote: [`main/keybinds.md`](../main/keybinds.md).
+- **LIVE / REPLAYS (the player panel):** press **B** on the TV's keyboard, **LIST / EPG** on an IR
+  remote (once its scancode is learned), or **LIVE / REPLAYS** on the phone's `/remote` page. A panel opens in the video window:
+  - transport (only while a replay plays): **◀ ▶** seek 10 s, **OK** play / pause;
+  - volume: **◀ ▶** quieter / louder, **OK** mute;
+  - **LIVE**: back to the live stream;
+  - the **recordings on the disk that have video**, newest first, with Grand Prix, session, date and
+    time, length and status (COMPLETE / RECORDING NOW / INTERRUPTED). **OK** plays one from the start.
+
+  **▲ ▼** move, **BACK / Esc** closes the panel. While it is open, the arrows, OK and BACK drive the
+  player; once it is closed they drive the dashboard again. The video shows which source plays
+  (`● LIVE` or `▶ REPLAY · <GP> · <session>`); the replay keeps playing behind the closed panel. The
+  keys go the remote's usual way (key → server → screens), so the phone and a keyboard on the TV do
+  the same thing.
+- **How replays play:** the recorded segments (`<path>/<id>/capture/*.mp4`, fragmented MP4) are
+  played as they are, through one HLS playlist built on request (`/tv/replay/<id>/index.m3u8`, byte
+  ranges of the files - no remux, no copy, nothing written; `main/server/replays.py`). Only segments
+  listed in that package are served, and only to an approved `/tv` page, exactly like the live
+  stream. The TV's browser needs H.264 + AAC (Chrome, Edge, Firefox, Safari).
 - **Approval - every time:** each load of `/tv` (first open, reload, new tab, browser restarted,
   the URL in another browser) shows a new code (e.g. `C6X-S6V`) and waits. Your **trusted phone**
   (its `/remote` page) shows the same code with **APPROVE / DENY**. Only that load of the page is
@@ -490,6 +514,7 @@ an explicit allowlist. Funnel itself is configured with one rule: everything on 
 | `/api/tv/auth/request`, `/api/tv/auth/status` | POST | the per-load challenge | anyone, rate-limited; the result only for that page |
 | `/api/tv/status`, `/api/tv/logout` | GET / POST | the approved page's state / end | approved page: session cookie **and** page secret |
 | `/tv/live/index.m3u8`, `/tv/live/live_NNNNN.ts` | GET | the live stream | approved page: session cookie **and** page secret |
+| `/api/tv/replays`, `/tv/replay/<id>/index.m3u8`, `/tv/replay/<id>/<segment>.mp4` | GET | REPLAYS in the `/tv` player: the recordings with video, a recording's playlist and its segments | approved page: session cookie **and** page secret |
 | `/` | GET | the dashboard inside `/tv`'s iframe | approved `/tv` page or the trusted phone, else → `/tv` |
 | `/static/` `style.css` `tv.css` `app.js` `components/{voyo_player.js,voyo_player.css,f1time.js,qrcode.js,pitlane.js,team_radio.js}` | GET | the dashboard's code | anyone (code only) |
 | `/api/track/layouts`, `/api/media/catalog` | GET | read by the dashboard / remote | approved `/tv` page or the trusted phone |

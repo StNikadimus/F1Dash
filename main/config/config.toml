@@ -264,6 +264,9 @@ KEY_RED = "SYNC_MARK"
 KEY_GREEN = "SYNC_RESYNC"
 KEY_YELLOW = "SYNC_DEBUG"
 KEY_BLUE = "SYNC_START"
+KEY_B = "PLAYER_MENU"             # the /tv player: LIVE / REPLAYS panel (while it is open the arrows, OK and BACK
+KEY_LIST = "PLAYER_MENU"          # drive it - see README "LIVE / REPLAYS"); IR remote LIST / GUIDE keys too
+KEY_EPG = "PLAYER_MENU"
 
 # Overrides while a TV mode with video is shown (RACE_VIEW / VIDEO_FOCUS).
 # Keys not listed here keep their normal meaning (Up/Down still select drivers).

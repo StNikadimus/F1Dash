@@ -53,6 +53,11 @@ ROUTES: list[tuple[re.Pattern, frozenset, str, str]] = [
     (re.compile(r"^/api/tv/logout$"), frozenset({"POST"}), "http", ""),
     (re.compile(r"^/api/tv/status$"), frozenset({"GET"}), "http", ""),
     (re.compile(r"^/tv/live/(index\.m3u8|live_[0-9]{5}\.ts)$"), frozenset({"GET"}), "http", ""),
+    # REPLAYS in the /tv player: the recordings list and a recording's playlist / segments (the app checks
+    # the approved page: session cookie + page secret, like the live stream)
+    (re.compile(r"^/api/tv/replays$"), frozenset({"GET"}), "http", ""),
+    (re.compile(r"^/tv/replay/[A-Za-z0-9_-]{4,64}/(index\.m3u8|[A-Za-z0-9_.-]{1,96}\.mp4)$"), frozenset({"GET"}),
+     "http", ""),
     # the dashboard inside /tv's iframe (and what it reads) - only for an approved /tv page / the trusted phone
     (re.compile(r"^/$"), frozenset({"GET"}), "http", "view"),
     (re.compile(r"^/static/" + STATIC_DASH + r"$"), frozenset({"GET"}), "http", ""),
@@ -66,7 +71,7 @@ ROUTES: list[tuple[re.Pattern, frozenset, str, str]] = [
 ]
 # the only query parameters a public route accepts (exact path; "/tv/live/" as a prefix)
 QUERY_KEYS = {"/": {"layout"}, "/tv": {"next"}, "/api/media/catalog": {"year"}, "/ws": {"client"}}
-QUERY_PREFIX_KEYS = {"/tv/live/": {"p"}}
+QUERY_PREFIX_KEYS = {"/tv/live/": {"p"}, "/tv/replay/": {"p"}}
 
 
 def config_problem(pub: dict, http_port: int, https_port: int) -> Optional[str]:
@@ -272,7 +277,7 @@ class PublicGateway:
 
         extra = self._sec_headers(path, scope)
         own = {k for k, _v in extra}                       # the gateway's headers replace the app's
-        is_static = path.startswith(("/static/", "/tv-static/", "/tv/live/", "/api/radio/audio/"))
+        is_static = path.startswith(("/static/", "/tv-static/", "/tv/live/", "/tv/replay/", "/api/radio/audio/"))
 
         async def send_secured(message):
             if message["type"] == "http.response.start":

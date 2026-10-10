@@ -178,6 +178,7 @@ class VoyoStreamRecorder:
         self._auto_state: Optional[str] = None
         self._anchor_sig: Optional[str] = None
         self._said_error = False
+        self._space_said = True                               # last "enough free space for video" said
 
     # ------------------------------------------------------------------ start / checks
     def start(self) -> "VoyoStreamRecorder":
@@ -609,14 +610,28 @@ class VoyoStreamRecorder:
     def status(self) -> dict:
         return {"enabled": self.enabled, "ok": self.ok, "path": str(self.root) if self.root else None,
                 "error": self.error, "free_bytes": self.free_bytes() if self.ok else None,
-                "min_free_bytes": self.min_free, "capture": self.capture_enabled,
+                "min_free_bytes": self.min_free, "space_ok": self._space_ok() if self.ok else None,
+                "capture": self.capture_enabled,
                 "current": self.cur["stream_instance_id"] if self.cur else None}
+
+    def capture_space_ok(self) -> bool:
+        """Room for more video (min_free_bytes). When the disk runs full the capture is stopped instead of
+        piling its segments up in the capturing machine's spool (the system disk) - said once each way."""
+        ok = self._space_ok()
+        if ok != self._space_said:
+            self._space_said = ok
+            if not ok:
+                log.warning("VOYO stream recording: less than min_free_bytes (%s) free on %s - video capture "
+                            "stopped (timeline / sync data go on)", _human(self.min_free), self.root)
+            else:
+                log.info("VOYO stream recording: enough free space on %s again - video capture on", self.root)
+        return ok
 
     def clock_reply(self) -> dict:
         """Returned to the PC's clock bridge with every sample: which package is open, whether the
         PC should run the (opt-in) window capture for it."""
         return {"channel": self.channel, "instance": self.cur["stream_instance_id"] if self.cur else None,
-                "capture": bool(self.capture_enabled and self.ok and self.cur is not None),
+                "capture": bool(self.capture_enabled and self.ok and self.cur is not None and self.capture_space_ok()),
                 "segment_seconds": int(self.rc.get("capture_segment_seconds", 60)),
                 "fps": int(self.rc.get("capture_fps", 30)), "crf": int(self.rc.get("capture_crf", 23))}
 
