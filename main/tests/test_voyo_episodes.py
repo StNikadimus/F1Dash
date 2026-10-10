@@ -221,6 +221,71 @@ class ProductionEventPageTest(unittest.TestCase):
         self.assertEqual({e.id: e.kind for e in numbered}["63660753"], None)
 
 
+def utc(*a):
+    return datetime(*a, tzinfo=timezone.utc).timestamp()
+
+
+class StaleEventPageTest(unittest.TestCase):
+    """A card dated more than a day from the SCHEDULED session is an older weekend's: never recorded instead.
+    (The Singapore page still set when the next weekend's sessions come: its recordings must not be taken.)"""
+
+    def test_stale_page_is_not_found_with_its_reason(self):
+        eps = ve.episodes_from_page(singapore())
+        for kind in ("practice1", "sprint_qualifying", "sprint", "qualifying"):
+            s = ve.select_episode(eps, kind, "United States Grand Prix", utc(2026, 10, 23, 17, 30))
+            self.assertEqual((s.state, s.episode), ("NOT_FOUND", None), kind)
+            self.assertIn("probably stale", s.reason)
+            self.assertIn("2026-10-23", s.reason)
+            self.assertEqual(len(s.candidates), 1)                     # shown on /disk, not taken
+
+    def test_the_right_weekend_is_taken(self):
+        eps = ve.episodes_from_page(singapore())
+        for kind, want, start in (("practice1", FP1, utc(2026, 10, 9, 9, 30)), ("sprint_qualifying", SQ, utc(2026, 10, 9, 13, 30)),
+                                  ("sprint", SPRINT, utc(2026, 10, 10, 9, 0)), ("qualifying", QUALI, utc(2026, 10, 10, 13, 0))):
+            s = ve.select_episode(eps, kind, "Singapore Grand Prix", start)
+            self.assertEqual((s.state, s.episode.id), ("SELECTED", want), kind)
+
+    def test_one_day_either_side_and_time_zones(self):
+        def pick(card_date, start):
+            eps = ve.episodes_from_page([card(QUALI, "F1 kvalifikacije", card_date)])
+            return ve.select_episode(eps, "qualifying", None, start).state
+        noon = utc(2026, 10, 10, 12, 0)
+        self.assertEqual(pick("9. 10. 2026", noon), "SELECTED")         # a day before
+        self.assertEqual(pick("11. 10. 2026", noon), "SELECTED")        # a day after
+        self.assertEqual(pick("8. 10. 2026", noon), "NOT_FOUND")        # two days: another weekend's
+        self.assertEqual(pick("12. 10. 2026", noon), "NOT_FOUND")
+        late = utc(2026, 10, 10, 23, 30)                                # 10 Oct UTC = 11 Oct 01:30 in Slovenia
+        self.assertEqual(pick("12. 10. 2026", late), "SELECTED")        # a day after the Slovenian date
+        self.assertEqual(pick("9. 10. 2026", late), "SELECTED")         # a day before the UTC date
+        self.assertEqual(pick("13. 10. 2026", late), "NOT_FOUND")
+        self.assertEqual(pick("8. 10. 2026", late), "NOT_FOUND")
+
+    def test_several_candidates(self):
+        old = card("63650001", "F1 kvalifikacije", "27. 9. 2026")
+        new = card(QUALI, "F1 kvalifikacije", "10. 10. 2026")
+        start = utc(2026, 10, 10, 13, 0)
+        s = ve.select_episode(ve.episodes_from_page([old, new]), "qualifying", None, start)
+        self.assertEqual((s.state, s.episode.id), ("SELECTED", QUALI))  # the stale one is dropped
+        s = ve.select_episode(ve.episodes_from_page([old, card("63650002", "F1 kvalifikacije", "26. 9. 2026")]),
+                              "qualifying", None, start)
+        self.assertEqual((s.state, len(s.candidates)), ("NOT_FOUND", 2))
+        twins = [new, card("63661275", "F1 kvalifikacije", "10. 10. 2026")]
+        self.assertEqual(ve.select_episode(ve.episodes_from_page(twins), "qualifying", None, start).state, "AMBIGUOUS")
+
+    def test_unknown_dates_keep_todays_behaviour(self):
+        start = utc(2026, 10, 23, 17, 30)
+        for text in ("", "pet, 9. okt", "V ŽIVO"):                       # no date it understands: not judged by date
+            eps = ve.episodes_from_page([card(QUALI, "F1 kvalifikacije", text)])
+            self.assertIsNone(eps[0].date, text)
+            s = ve.select_episode(eps, "qualifying", None, start)
+            self.assertEqual((s.state, s.episode.id), ("SELECTED", QUALI), text)
+        eps = ve.episodes_from_page([card(QUALI, "F1 kvalifikacije", ""), card("63650001", "F1 kvalifikacije", "27. 9. 2026")])
+        self.assertEqual(ve.select_episode(eps, "qualifying", None, start).episode.id, QUALI)
+        # no scheduled start (the "record" command): no date check, as before
+        eps = ve.episodes_from_page(singapore())
+        self.assertEqual(ve.select_episode(eps, "qualifying").episode.id, QUALI)
+
+
 class ManifestAndVerificationTest(unittest.TestCase):
     DASH = f"https://vod.cdn.example.net/vod/{FP1}/dash/manifest.mpd?token=SECRET123&exp=999"
     HLS = f"https://live.cdn.example.net/hls/{SPRINT}/master.m3u8?hdnts=exp=1~acl=/*~hmac=abcdef"

@@ -350,6 +350,13 @@ states:
      qualifying recording and exactly one unnumbered practice (and no numbered one), that practice
      is Practice 1. VOYO names it "F1 prosti trening".
 
+   - a recording whose card date is more than one day from the session's **scheduled** day (not
+     today's date) belongs to another weekend -> not taken. When no other recording of that kind is
+     left, the result is **NOT FOUND** with "the event page is probably stale" (for example last
+     weekend's page is still set). The session day is taken in UTC and in Slovenian time (UTC+1 / +2),
+     because VOYO shows Slovenian dates. A card without a date the player understands is not judged by
+     date.
+
    **Another session is never recorded instead.**
 4. **OPENING / VERIFYING:** the recording's page is opened. Recording starts only when the player
    shows that episode id, either in its `mediaId` or in the path of the DASH / HLS manifest it

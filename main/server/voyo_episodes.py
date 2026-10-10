@@ -264,6 +264,27 @@ def _tokens(s: Optional[str]) -> set:
     return {w for w in normalize(s).split() if len(w) > 2 and w not in stop}
 
 
+DATE_SLACK_DAYS = 1                      # a card may say the day before / after the session (time zones)
+
+
+def session_day(session_start: float) -> str:
+    return datetime.fromtimestamp(session_start, timezone.utc).date().isoformat()
+
+
+def off_session_day(e: Episode, session_start: float) -> bool:
+    """True when the card's date is more than DATE_SLACK_DAYS from the SCHEDULED session's day (never from today:
+    a recording window opens before the session and closes after it). The session day is taken in UTC and in
+    Slovenian time (UTC+1 / +2: VOYO's cards show the Slovenian date). A card without a recognised date: False."""
+    if not e.date:
+        return False
+    try:
+        card = datetime.fromisoformat(e.date).date()
+    except ValueError:
+        return False
+    days = {datetime.fromtimestamp(session_start + off, timezone.utc).date() for off in (0, 2 * 3600)}
+    return min(abs((card - d).days) for d in days) > DATE_SLACK_DAYS
+
+
 def select_episode(episodes: list[Episode], kind: str, meeting: Optional[str] = None,
                    session_start: Optional[float] = None) -> Selection:
     """The one recording of ``kind`` - or why there is none. Never another kind, never a guess."""
@@ -271,6 +292,15 @@ def select_episode(episodes: list[Episode], kind: str, meeting: Optional[str] = 
         return Selection("NOT_FOUND", None, f"unknown session kind {kind!r}")
     same = [e for e in episodes if e.kind == kind and not e.excluded]
     unsure = [e for e in episodes if e.kind is None and e.confidence == "low" and not e.excluded]
+    if session_start and same:                # a card dated another day is an older weekend's (a stale page)
+        stale = [e for e in same if off_session_day(e, session_start)]
+        same = [e for e in same if e not in stale]
+        if not same:
+            days = ", ".join(sorted({e.date for e in stale}))
+            return Selection("NOT_FOUND", None, f"no {KIND_LABELS[kind]} recording of this session's date on the "
+                                                f"page: the {KIND_LABELS[kind]} recording there is from {days}, the "
+                                                f"session is on {session_day(session_start)} - the event page is "
+                                                "probably stale (an older weekend's)", stale)
     if not same:
         seen = sorted({KIND_LABELS.get(e.kind, e.kind) for e in episodes if e.kind and not e.excluded})
         note = f"; {len(unsure)} title(s) too unclear to tell" if unsure else ""

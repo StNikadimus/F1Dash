@@ -46,8 +46,8 @@ def player(t, media_id=SPRINT, paused=False, duration=None, live=None, **kw):
 class Driver:
     """Runs a SessionRecorder like the player does: discover when asked, then one step per tick."""
 
-    def __init__(self, kind="sprint", until=None, limits=None, page=WEEKEND):
-        self.s = SessionRecorder(Target(kind, "Chinese Grand Prix", ve_label(kind), T0, until), ORIGIN + "/f1/vn-kitajske",
+    def __init__(self, kind="sprint", until=None, limits=None, page=WEEKEND, start=T0):
+        self.s = SessionRecorder(Target(kind, "Chinese Grand Prix", ve_label(kind), start, until), ORIGIN + "/f1/vn-kitajske",
                                  limits or Limits())
         self.page = page
         self.now = T0
@@ -232,6 +232,20 @@ class ProductionEventPageTest(unittest.TestCase):
         d.page = singapore_page()                                   # the page shows the address later: retried
         d.tick(dt=121)
         self.assertEqual((d.s.state, d.s.episode_url), ("OPENING", ORIGIN + EP + QUALI))
+
+
+    def test_last_weekends_page_is_not_recorded_for_the_next_weekend(self):
+        nxt = T0 + 13 * 86400                                        # the next weekend's qualifying, page not changed
+        d = Driver("qualifying", page=singapore_page(), start=nxt, limits=Limits(discover_retry_s=60))
+        d.now = nxt - 900                                            # the window opens before the session
+        acts = d.tick()
+        self.assertEqual(d.s.state, "NOT_FOUND")
+        self.assertIn("probably stale", d.s.problem)
+        self.assertFalse(any(a[0] == "navigate" for a in acts))
+        self.assertIsNone(d.s.key)
+        self.assertEqual(d.tick(dt=30), [])                          # looked at again after discover_retry_s
+        self.assertEqual(d.tick(dt=31), [])
+        self.assertEqual(d.s.state, "NOT_FOUND")
 
 
 CHROME = next((c for c in (os.environ.get("CHROME_BIN"), "/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
