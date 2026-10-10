@@ -482,6 +482,16 @@ class Security:
                     return True
         return False
 
+    def withdraw(self, r: dict) -> bool:
+        """The page that asked is gone (closed / left): its open challenge ends - it disappears from the phone and
+        can no longer be approved. Only a pending or approved-but-unused one; a decision already made stays."""
+        with self._lock:
+            if r["status"] not in ("pending", "approved"):
+                return False
+            r["status"] = "withdrawn"
+        log.info("/tv authorization request %s (%s) withdrawn by its page", r["code"], r["device"])
+        return True
+
     def request_for(self, browser: Optional[str], page: Optional[str]) -> Optional[dict]:
         """The challenge of THIS page: both the browser's cookie and the page's own secret must match."""
         if not browser or not page or len(browser) > 200 or len(page) > 200:

@@ -1369,14 +1369,23 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
 
     async def api_tv_logout(request: Request) -> Response:
         """The TV page ends its authorization (LOG OUT button, or the page being left - sendBeacon with the
-        page secret as the body). Only the page itself can: cookie + its page secret."""
+        page secret as the body). Only the page itself can: cookie + its page secret.
+        A page still waiting for approval that is closed / left withdraws its open request the same way
+        (body "challenge:<its challenge>"): its request cookie + its own challenge secret, nothing else."""
         if not _same_origin(request):
             return JSONResponse({"ok": False, "error": "cross-site request refused"}, status_code=403)
         page = request.headers.get("x-f1-tv-page")
         if not page:
             if int(request.headers.get("content-length") or 0) > 1024:
                 return _tv_denied()
-            page = (await request.body())[:200].decode("ascii", "replace").strip()
+            page = (await request.body())[:220].decode("ascii", "replace").strip()
+            if page.startswith("challenge:"):
+                r = security.request_for(request.cookies.get(COOKIE_TVREQ), page[len("challenge:"):])
+                if r is None:
+                    return _tv_denied()
+                if security.withdraw(r):
+                    push_remote_state()                        # the phone stops showing it
+                return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
         tok = request.cookies.get(COOKIE_TV)
         if security.tv_page(tok, page) is None:
             return _tv_denied()
