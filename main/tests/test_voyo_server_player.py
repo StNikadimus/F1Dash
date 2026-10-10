@@ -390,5 +390,201 @@ class LoginTest(unittest.TestCase):
         self.assertFalse(cl.call_args.kwargs["save_unverified"])
 
 
+class FakeDashboard:
+    """A real HTTP server on 127.0.0.1 answering like the dashboard server would: {path: (status, body)}.
+    Records the headers it got (the status command must not send credentials)."""
+
+    def __init__(self, routes):
+        import http.server
+        import threading
+        self.routes, self.seen = routes, []
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                outer.seen.append((self.path, dict(self.headers)))
+                status, body = outer.routes.get(self.path, (404, {"ok": False, "error": "not found"}))
+                raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *a):
+                pass
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def free_port():
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+DISK_401 = (401, {"ok": False, "error": "login required", "auth": "disk"})
+
+
+def health(state="RECORDING", busy=True, recorder=True):
+    return (200, {"ok": True, "mode": "live", **({"recorder": {"state": state, "busy": busy}} if recorder else {})})
+
+
+class StatusReachabilityTest(unittest.TestCase):
+    """status / test: an HTTP 401 from /api/voyo/recordings is a running server that wants a /disk login -
+    not "not reachable"; the recording state comes from /api/health (this machine only)."""
+
+    def setUp(self):
+        import tools.voyo_server_player as vsp
+        self.vsp = vsp
+        self.servers = []
+        self._p = [mock.patch.object(vsp, "Schedule"), mock.patch.object(vsp, "heartbeat")]
+        for p in self._p:
+            p.start()
+        vsp.Schedule.return_value.windows.return_value = []
+
+    def tearDown(self):
+        for p in self._p:
+            p.stop()
+        for srv in self.servers:
+            srv.close()
+
+    def dash(self, routes):
+        srv = FakeDashboard(routes)
+        self.servers.append(srv)
+        return srv
+
+    def player(self, server):
+        from types import SimpleNamespace
+        return SimpleNamespace(sp={"enabled": True, "when": "schedule"}, server=server, stream_url=lambda: "https://voyo.si/x",
+                               profile=Path(tempfile.gettempdir()), open=lambda *a: None, tick=lambda: None,
+                               close=lambda *a: None)
+
+    def status(self, server):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.vsp.cmd_status(self.player(server))
+        lines = {ln.split()[0]: ln for ln in buf.getvalue().splitlines() if ln.strip()}
+        return buf.getvalue(), lines
+
+    def run_test_cmd(self, server):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf), mock.patch.object(self.vsp, "_post"):
+            self.vsp.cmd_test(self.player(server), 0, None)
+        return buf.getvalue()
+
+    def test_401_means_reachable_and_the_recorder_state_comes_from_health(self):
+        d = self.dash({"/api/voyo/recordings": DISK_401, "/api/health": health("RECORDING", True)})
+        out, ln = self.status(d.url)
+        self.assertNotIn("not reachable", out)
+        self.assertIn("reachable - the details need a /disk login (HTTP 401)", ln["recordings"])
+        self.assertIn("RECORDING", ln["recorder"])
+        self.assertIn("busy: yes", ln["recorder"])
+        for path, headers in d.seen:                          # no credentials sent, none printed
+            self.assertFalse({"Cookie", "X-Remote-Token", "Authorization"} & set(headers), path)
+
+    def test_403_too(self):
+        d = self.dash({"/api/voyo/recordings": (403, {"ok": False}), "/api/health": health("REST", False)})
+        out, ln = self.status(d.url)
+        self.assertIn("(HTTP 403)", ln["recordings"])
+        self.assertIn("REST  (busy: no)", ln["recorder"])
+
+    def test_recorder_states_are_shown_as_they_are(self):
+        for state, busy in (("OFF", False), ("DISK ERROR", False), ("WAITING FOR DISK", False),
+                            ("PLAYER OFF", False), ("OPENING", True)):
+            d = self.dash({"/api/voyo/recordings": DISK_401, "/api/health": health(state, busy)})
+            _out, ln = self.status(d.url)
+            self.assertIn(f"{state}  (busy: {'yes' if busy else 'no'})", ln["recorder"], state)
+
+    def test_server_not_running(self):
+        url = f"http://127.0.0.1:{free_port()}"
+        out, ln = self.status(url)
+        self.assertIn("dashboard server not reachable (", ln["recordings"])
+        self.assertIn("UNKNOWN - dashboard server not reachable", ln["recorder"])
+        self.assertNotIn("busy", ln["recorder"])                # nothing claimed about recording
+
+    def test_health_without_recorder_state_is_unknown(self):
+        for h in (health(recorder=False), (500, {"ok": False}), (200, b"<html>not json</html>"),
+                  (200, {"ok": True, "recorder": {"busy": True}})):
+            d = self.dash({"/api/voyo/recordings": DISK_401, "/api/health": h})
+            _out, ln = self.status(d.url)
+            self.assertIn("UNKNOWN", ln["recorder"], h)
+            self.assertNotIn("busy: yes", ln["recorder"], h)
+
+    def test_200_still_shows_the_recorder_of_the_list(self):
+        rec = {"status": {"path": "/mnt/x/viewer", "ok": True}, "server_player": {"path": "/mnt/x", "ok": True,
+               "error": None}, "recordings": []}
+        d = self.dash({"/api/voyo/recordings": (200, rec), "/api/health": health("REST", False)})
+        _out, ln = self.status(d.url)
+        self.assertIn("/mnt/x  ok=True", ln["recordings"])
+        self.assertIn("REST", ln["recorder"])
+
+    def test_other_http_errors_are_said_as_such(self):
+        d = self.dash({"/api/voyo/recordings": (500, {"ok": False}), "/api/health": health("REST", False)})
+        _out, ln = self.status(d.url)
+        self.assertIn("answered HTTP 500", ln["recordings"])
+        self.assertNotIn("not reachable", ln["recordings"])
+
+    def test_cmd_test_401_is_not_a_dead_server(self):
+        d = self.dash({"/api/voyo/recordings": DISK_401, "/api/health": health("RECORDING", True)})
+        out = self.run_test_cmd(d.url)
+        self.assertNotIn("not reachable", out)
+        self.assertIn("needs a /disk login (HTTP 401)", out)
+        self.assertIn("Recorder: RECORDING  (busy: yes)", out)
+
+    def test_cmd_test_server_not_running(self):
+        out = self.run_test_cmd(f"http://127.0.0.1:{free_port()}")
+        self.assertIn("dashboard server not reachable - is it running?", out)
+
+    def test_cmd_test_200_lists_the_recording(self):
+        rec = {"recordings": [{"channel": "server_player", "stream_instance_id": "abc123", "status": "closed",
+                               "watched_seconds": 60, "capture_segments": 1, "capture_bytes": 2e6}]}
+        d = self.dash({"/api/voyo/recordings": (200, rec)})
+        out = self.run_test_cmd(d.url)
+        self.assertIn("recording abc123: closed, 60 s, 1 video segment(s), 2.0 MB", out)
+
+
+class HealthRecorderEndToEndTest(unittest.TestCase):
+    """The real /api/health of create_app: the recorder state only for this machine (what status reads)."""
+
+    def test_real_health_answer_parses(self):
+        import server.app as appmod
+        import tools.voyo_server_player as vsp
+        from starlette.testclient import TestClient
+        d = Path(tempfile.mkdtemp())
+        env = {"F1DASH_VOYO_SERVER_PLAYER_ENABLED": "true", "F1DASH_VOYO_RECORDING_PATH": str(d / "rec"),
+               "F1DASH_VOYO_RECORDING_REQUIRE_MOUNT": "", "F1DASH_VOYO_RECORDING_MOUNT_MARKER": "",
+               "F1DASH_VOYO_RECORDING_MIN_FREE_BYTES": "0"}
+        try:
+            with mock.patch.dict(os.environ, env), mock.patch.object(appmod, "DATA_DIR", d):
+                cfg = load_config()
+                cfg["source"]["mode"] = "test"
+                c = TestClient(appmod.create_app(cfg))
+                self.assertEqual(c.get("/api/voyo/recordings").status_code, 401)        # unchanged: /disk only
+                lan = c.get("/api/health").json()
+                with mock.patch.object(appmod, "LOOPBACK", appmod.LOOPBACK | {"testclient"}):
+                    local = c.get("/api/health").json()
+            self.assertNotIn("recorder", lan)                                           # unchanged: LAN gets nothing
+            routes = {"/api/voyo/recordings": DISK_401, "/api/health": (200, local)}
+            srv = FakeDashboard(routes)
+            try:
+                rec, why = vsp.recorder_state(srv.url)
+            finally:
+                srv.close()
+            self.assertEqual(rec, {"state": "PLAYER OFF", "busy": False}, why)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

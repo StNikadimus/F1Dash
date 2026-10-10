@@ -44,6 +44,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -605,6 +606,47 @@ class Schedule:
 
 
 # ---------------------------------------------------------------------------------------------
+# the dashboard server, read from this machine (status / test)
+# ---------------------------------------------------------------------------------------------
+def get_json(url: str, timeout: float) -> tuple[Optional[int], object, str]:
+    """GET -> (HTTP status, JSON body, problem). Status None = no answer at all (not running, refused,
+    timed out); an HTTP error status (401 ...) means the server IS there and answered."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            code, raw = r.status, r.read()
+    except urllib.error.HTTPError as exc:                 # an answer (401 / 403 / 500 ...) - before OSError
+        exc.close()
+        return exc.code, None, f"HTTP {exc.code}"
+    except (OSError, ValueError) as exc:                  # URLError (refused, DNS), timeout
+        return None, None, str(getattr(exc, "reason", None) or exc) or type(exc).__name__
+    try:
+        return code, json.loads(raw), ""
+    except ValueError:
+        return code, None, "not a JSON answer"
+
+
+def recorder_state(server: str, timeout: float = 3) -> tuple[Optional[dict], str]:
+    """The recording side's state from /api/health - the dashboard server tells it only to this machine
+    (loopback; server/update-f1dash.sh uses it too). -> ({"state", "busy"} or None, why not)."""
+    code, body, problem = get_json(f"{server}/api/health", timeout)
+    if code is None:
+        return None, f"dashboard server not reachable ({problem})"
+    if code != 200:
+        return None, f"/api/health answered {problem}"
+    rec = body.get("recorder") if isinstance(body, dict) else None
+    if not isinstance(rec, dict) or not rec.get("state"):
+        return None, "/api/health did not say (not asked from this machine, or the server could not tell)"
+    return {"state": str(rec.get("state")), "busy": rec.get("busy") is True}, ""
+
+
+def recorder_line(server: str) -> str:
+    rec, why = recorder_state(server)
+    if rec is None:
+        return f"UNKNOWN - {why}"
+    return f"{rec['state']}  (busy: {'yes' if rec['busy'] else 'no'})"
+
+
+# ---------------------------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------------------------
 def heartbeat(player: Player, nxt: Optional[dict], problem: str = "") -> list:
@@ -690,14 +732,23 @@ def cmd_test(player: Player, minutes: float, url: Optional[str]) -> None:
     finally:
         player.close("test finished")
         heartbeat(player, None)
+    code, st, problem = get_json(f"{player.server}/api/voyo/recordings", 5)
+    if code is None:
+        log(f"dashboard server not reachable - is it running? (the recordings are written by it; {problem})")
+        return
+    if code in (401, 403):
+        log(f"dashboard server reachable; the recordings list needs a /disk login ({problem}) - see the /disk "
+            f"page. Recorder: {recorder_line(player.server)}")
+        return
     try:
-        with urllib.request.urlopen(f"{player.server}/api/voyo/recordings", timeout=5) as r:
-            recs = [x for x in json.loads(r.read())["recordings"] if x.get("channel") == "server_player"][:1]
+        if code != 200:
+            raise ValueError(problem)
+        recs = [x for x in st["recordings"] if x.get("channel") == "server_player"][:1]
         for x in recs:
             log(f"recording {x['stream_instance_id']}: {x['status']}, {x['watched_seconds']} s, "
                 f"{x['capture_segments']} video segment(s), {x['capture_bytes'] / 1e6:.1f} MB")
-    except (OSError, ValueError, KeyError):
-        log("dashboard server not reachable - is it running? (the recordings are written by it)")
+    except (ValueError, KeyError, TypeError) as exc:
+        log(f"dashboard server answered, but not with the recordings list ({exc or problem})")
 
 
 class LoginWatch:
@@ -859,13 +910,17 @@ def cmd_status(player: Player) -> None:
     print(f"stream page        {player.stream_url() or 'NOT SET (run login)'}")
     print(f"profile            {player.profile}  ({'exists' if player.profile.exists() else 'new - sign in first'})")
     print(f"dashboard server   {player.server}")
-    try:
-        with urllib.request.urlopen(f"{player.server}/api/voyo/recordings", timeout=3) as r:
-            st = json.loads(r.read())
+    code, st, problem = get_json(f"{player.server}/api/voyo/recordings", 3)
+    if code is None:
+        print(f"recordings         dashboard server not reachable ({problem})")
+    elif code in (401, 403):
+        print(f"recordings         dashboard server reachable - the details need a /disk login ({problem})")
+    elif code == 200 and isinstance(st, dict):
         rs = st.get("server_player") or st.get("status") or {}
         print(f"recordings         {rs.get('path')}  ok={rs.get('ok')} {rs.get('error') or ''}")
-    except (OSError, ValueError):
-        print("recordings         dashboard server not reachable")
+    else:
+        print(f"recordings         dashboard server answered {problem or f'HTTP {code}'}")
+    print(f"recorder           {recorder_line(player.server)}")
     for w in [w for w in Schedule(sp).windows(time.time()) if w["open_until"] > time.time()][:5]:
         print(f"next               {w['meeting']} {w['session_name']}: "
               f"{datetime.fromtimestamp(w['open_from'], timezone.utc):%a %d %b %H:%M} - "
