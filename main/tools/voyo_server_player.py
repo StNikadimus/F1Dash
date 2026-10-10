@@ -7,6 +7,10 @@
     python tools/voyo_server_player.py run       # the service: open + record around every F1 session
     python tools/voyo_server_player.py test [--minutes 5] [--url URL]   # open + record now
     python tools/voyo_server_player.py status    # what is installed / configured, next sessions
+    python tools/voyo_server_player.py discover [--url EVENT_PAGE]   # read-only: the recordings on the event
+                                                 # page and which one each session kind would record
+    python tools/voyo_server_player.py record --kind sprint [--meeting NAME] [--url EVENT_PAGE]
+                                                 # record that session now (find, verify, record to its end)
 
 (server/voyo-player.sh runs this with the server's environment; server/systemd/f1-voyo-player.service
 keeps "run" going.)
@@ -19,9 +23,15 @@ How it works - all on the Linux server, next to the dashboard backend:
   (``login``: you sign in yourself over VNC; the password is never stored by this tool - Chrome keeps
   its normal session cookie in the profile), opening ``stream_url`` (the F1 live page);
 * before each F1 session of ``record_sessions`` (the official schedule, livetiming.formula1.com
-  Index.json) minus ``lead_minutes`` it opens the stream, presses play / unmute / the player's own
+  Index.json) minus ``lead_minutes`` it opens VOYO, presses play / unmute / the player's own
   fullscreen (like you would - script in the page through Chrome's local DevTools port), and keeps
   it until ``trail_minutes`` after the scheduled end (longer while the live feed still runs);
+* WHICH recording (``episode_select = "auto"``, tools/voyo_session.py + server/voyo_episodes.py): the
+  event page lists several recordings, so the session's own one is found by its title, opened, and
+  verified (its episode id in the player / the HLS or DASH manifest) BEFORE anything is recorded;
+  none / several matching -> nothing is recorded, /disk says why. While recording it watches the video,
+  the sign-in, Chrome, the recorder's file and the sound, recovers into the SAME package, and closes it
+  with a report the server checks for completeness (COMPLETE / INCOMPLETE);
 * the read-only clock bridge (tools/voyo_clock.py, channel "server_player") posts the video
   position to the dashboard server -> its own stream instances -> VOYO stream recordings
   ([voyo.recording] path, channel "server_player"), F1 session + LIVE DATA DELAY attached;
@@ -36,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import json
 import os
 import secrets
@@ -55,8 +66,11 @@ ROOT = Path(__file__).resolve().parent.parent                       # main/
 sys.path.insert(0, str(ROOT))
 from server.config import DATA_DIR, load_config, resolve_path  # noqa: E402
 from server.voyo_recording import session_kind  # noqa: E402
+from server import voyo_episodes as ve  # noqa: E402
+from tools.voyo_session import EPISODES_JS, PAGE_JS, Limits, Obs, SessionRecorder, Target  # noqa: E402
 
 STATE = DATA_DIR / "voyo_server_player.json"
+LOCK = DATA_DIR / "voyo_server_player.lock"
 SINK = "f1voyo"
 CHROMES = ("google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser")
 
@@ -218,6 +232,31 @@ def find_browser(sp: dict) -> Optional[str]:
     return None
 
 
+def pulse_runtime_dir(preferred: Path) -> Path:
+    """PulseAudio's socket path must fit a UNIX socket address (108 bytes): a long data directory gets a
+    short private folder in the temp directory instead (owner-only)."""
+    if len(str(preferred / "native")) <= 100:
+        return preferred
+    import tempfile
+    d = Path(tempfile.gettempdir()) / f"f1voyo-pulse-{os.getuid() if hasattr(os, 'getuid') else 0}"
+    d.mkdir(mode=0o700, exist_ok=True)
+    return d
+
+
+def display_alive(sock: Path) -> bool:
+    """An X server answers on this socket (a leftover socket of a dead one refuses the connection)."""
+    import socket
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    c.settimeout(1.0)
+    try:
+        c.connect(str(sock))
+        return True
+    except OSError:
+        return False
+    finally:
+        c.close()
+
+
 def has_widevine(browser: Optional[str]) -> bool:
     """Google Chrome ships the Widevine CDM VOYO's player needs (most distro Chromium builds do not)."""
     if not browser:
@@ -271,12 +310,15 @@ class Player:
         self.cdp_port = int(self.sp.get("cdp_port", 9224))
         self.profile = resolve_path(str(self.sp.get("profile") or "data/browser-profiles/voyo-server"))
         self.xvfb, self.pulse, self.chrome, self.vnc = Proc("Xvfb"), Proc("pulseaudio"), Proc("chrome"), Proc("x11vnc")
-        self.pulse_dir = DATA_DIR / "voyo-server-pulse"
+        self.pulse_dir = pulse_runtime_dir(DATA_DIR / "voyo-server-pulse")
+        self.audio_problem = ""                            # why there is no sound (shown, recorded without it)
         self.bridge = None
         self.capture = None
         self.hint: dict = {}
         self.opened_at = 0.0
         self.last_play = 0.0
+        self.session: Optional[SessionRecorder] = None    # episode mode: the session being recorded
+        self.page_now: Optional[str] = None                # the page Chrome was told to show (episode mode)
 
     # ------------------------------------------------------------------ environment
     def env(self) -> dict:
@@ -291,8 +333,18 @@ class Player:
         n = self.display.lstrip(":").split(".")[0]
         sock = Path(f"/tmp/.X11-unix/X{n}")
         if sock.exists():
-            log(f"virtual screen {self.display} already exists - using it")
-            return
+            if display_alive(sock):
+                log(f"virtual screen {self.display} already exists - using it")
+                return
+            # a screen that died (crash, SIGKILL) leaves its socket behind: "using" it, Chrome never starts
+            # and nothing is recorded - remove the leftovers and start a new one
+            lock = Path(f"/tmp/.X{n}-lock")
+            log(f"virtual screen {self.display}: a dead one's socket was left behind - removing it")
+            for f in (sock, lock):
+                try:
+                    f.unlink()
+                except OSError as exc:
+                    log(f"cannot remove {f} ({exc}) - choose another [voyo.server_player] display")
         if not shutil.which("Xvfb"):
             raise SystemExit("Xvfb is not installed (server/setup-voyo-player.sh)")
         res = str(self.sp.get("resolution") or "1920x1080")
@@ -320,6 +372,14 @@ class Player:
             if (self.pulse_dir / "native").exists():
                 break
             time.sleep(0.1)
+        if not (self.pulse_dir / "native").exists():
+            # PulseAudio may run on without its socket (the module failed): ffmpeg could then never open the
+            # sound and would record nothing at all - record the picture alone and say so
+            self.pulse.stop()
+            self.audio_problem = f"PulseAudio did not start (no socket in {self.pulse_dir}) - recording without sound"
+            log(f"WARNING: {self.audio_problem}")
+            return
+        self.audio_problem = ""
         log(f"sound: PulseAudio null sink '{SINK}' (recorded from {SINK}.monitor)")
 
     def start_chrome(self, url: str) -> None:
@@ -453,7 +513,7 @@ class Player:
             if str(st.get("url") or "").startswith("chrome-error:") and time.monotonic() - self.last_reload > 60:
                 self.last_reload = time.monotonic()
                 log("the VOYO page did not load (network error) - loading it again")
-                self.cdp([("Page.navigate", {"url": self.stream_url() or "https://voyo.si/"})])
+                self.cdp([("Page.navigate", {"url": self.page_now or self.stream_url() or "https://voyo.si/"})])
                 return
             # VOYO signed us out: sign in again with the saved account (at most every 10 min)
             lf = (self.evaluate(LOGIN_FIND_JS) or {}) if CREDS.exists() else {}
@@ -498,6 +558,7 @@ class Player:
         from tools.voyo_capture import VoyoWindowCapture
         from tools.voyo_clock import VoyoClockBridge
         self.hint = hint
+        self.page_now = url
         self.start_display()
         self.start_audio()
         self.start_chrome(url)
@@ -544,10 +605,261 @@ class Player:
     def tick(self) -> None:
         """While open: Chrome alive, the video playing."""
         if not self.chrome.alive():
-            log("Chrome stopped - opening the stream again")
-            self.start_chrome(self.stream_url() or "https://voyo.si/")
+            # the page that was being recorded - not the configured / learned stream page (with `test --url`
+            # that is another page, and VOYO's start page plays nothing: the recording ended there)
+            log("Chrome stopped - opening the same page again")
+            self.start_chrome(self.page_now or self.stream_url() or "https://voyo.si/")
             time.sleep(5)
         self.ensure_playing()
+
+    # ------------------------------------------------------------------ episode mode: one session, verified
+    def episode_mode(self) -> bool:
+        """auto (default): find the session's own recording on the VOYO event page, verify it, record it.
+        off: the old way - record whatever stream_url plays."""
+        return str(self.sp.get("episode_select") or "auto").lower() != "off"
+
+    def event_url(self) -> Optional[str]:
+        """The VOYO page that lists the weekend's recordings: [voyo.server_player] event_url, else the stream
+        page (the /disk page / stream_url / the page learned at login)."""
+        return str(self.sp.get("event_url") or "") or self.stream_url()
+
+    def limits(self) -> Limits:
+        lim = Limits()
+        for k in ("verify_timeout_s", "stall_play_s", "stall_reload_s", "grow_restart_s", "discover_retry_s"):
+            if self.sp.get(k) is not None:
+                setattr(lim, k, float(self.sp[k]))
+        lim.verification = str(self.sp.get("episode_verification") or "strict").lower()
+        lim.vod_from_start = bool(self.sp.get("vod_from_start", True))
+        return lim
+
+    def open_session(self, target: Target, event_url: str) -> None:
+        """Start a SessionRecorder: Chrome on the event page; nothing is recorded before the recording is
+        selected AND verified (the clock bridge posts nothing, the screen recorder waits)."""
+        from tools.voyo_capture import VoyoWindowCapture
+        from tools.voyo_clock import VoyoClockBridge
+        self.session = SessionRecorder(target, event_url, self.limits())
+        self.hint = {"meeting": target.meeting, "session_name": target.session_name,
+                     "start": datetime.fromtimestamp(target.start, timezone.utc).isoformat() if target.start else None}
+        self.start_display()
+        self.start_audio()
+        self.start_chrome(event_url)
+        self.page_now = event_url
+        match = (urlparse(event_url).netloc or "voyo").lower()
+        self.bridge = VoyoClockBridge(self.server, self.cdp_port, self.token, 5.0, match=match, log=log,
+                                      channel="server_player")
+        self.bridge.gate = lambda: self.session is not None and self.session.recording_wanted()
+        self.bridge.extra = lambda: {"session_hint": self.hint, "recording": self._recording_id()}
+        audio = {"format": "pulse", "device": f"{SINK}.monitor"} if self.pulse.alive() else ""
+        if audio:
+            os.environ.update(PULSE_SERVER=f"unix:{self.pulse_dir / 'native'}")
+        self.capture = None
+        if self.sp.get("record_video", True):
+            seg = int(self.rc.get("capture_segment_seconds", 60))
+            self.capture = VoyoWindowCapture(
+                self.server, self.token, self.rc, DATA_DIR / "voyo_server_spool",
+                lambda: {"window_id": "0", "display": self.display, "audio": audio}, log=log,
+                live_dir=DATA_DIR / "live" if self.sp.get("live_stream", True) else None,
+                override=lambda: {"instance": self.session.key, "segment_seconds": seg}
+                if self.session is not None and self.session.recording_wanted() and self.session.key else None)
+            self.bridge.on_reply = self.capture.on_reply
+        self.bridge.start()
+        if self.capture is not None:
+            self.capture.start()
+        if self.audio_problem and self.sp.get("audio", True):
+            self.session._issue(time.time(), "no sound: " + self.audio_problem)
+        self.opened_at = time.monotonic()
+        log(f"OPEN for {target.label()} - looking for its recording on {ve.redact_url(event_url)}")
+
+    def _recording_id(self) -> Optional[dict]:
+        ss = self.session
+        if ss is None or not ss.key:
+            return None
+        ep = ss.episode or {}
+        return {"key": ss.key, "episode_id": ep.get("id"), "title": ep.get("title"), "kind": ss.target.kind,
+                "format": (ss.verification or {}).get("format"), "verified": (ss.verification or {}).get("reason"),
+                "live": ss.live, "meeting": ss.target.meeting, "session_name": ss.target.session_name}
+
+    def audio_streams(self) -> Optional[int]:
+        """Chrome's sound streams into the f1voyo sink right now (pactl); None = cannot tell."""
+        if not self.pulse.alive() or not shutil.which("pactl"):
+            return None
+        try:
+            r = subprocess.run(["pactl", "list", "short", "sink-inputs"], capture_output=True, text=True, timeout=5,
+                               env=dict(os.environ, PULSE_SERVER=f"unix:{self.pulse_dir / 'native'}"))
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return len([ln for ln in r.stdout.splitlines() if ln.strip()]) if r.returncode == 0 else None
+
+    def _navigate(self, url: str) -> None:
+        self.page_now = url
+        try:
+            self.cdp([("Page.navigate", {"url": url})])
+        except Exception as exc:  # noqa: BLE001
+            log(f"page not reachable to open {ve.redact_url(url)} ({exc})")
+
+    def _discover(self, event_url: Optional[str] = None) -> Optional[dict]:
+        """The event page's recordings (EPISODES_JS) - opens the event page first if another page is shown."""
+        event_url = event_url or self.session.event_url
+        cur = self.page_url() or ""
+        if urlsplit_path(cur) != urlsplit_path(event_url):
+            self._navigate(event_url)
+            for _ in range(20):
+                time.sleep(1)
+                if urlsplit_path(self.page_url() or "") == urlsplit_path(event_url):
+                    break
+            time.sleep(3)                                    # the page's own scripts fill the rows
+        try:
+            res = self.cdp([("Runtime.evaluate", {"expression": EPISODES_JS, "returnByValue": True,
+                                                  "awaitPromise": True})])
+            val = ((res[0] or {}).get("result") or {}).get("value") if res else None
+        except Exception as exc:  # noqa: BLE001
+            log(f"the event page could not be read ({exc})")
+            return None
+        if isinstance(val, dict):
+            n = len(val.get("items") or [])
+            eps = ve.episodes_from_page(val.get("items") or [])
+            log(f"event page {ve.redact_url(event_url)}: {n} link(s), {len(eps)} recording(s): " +
+                ("; ".join(f"{e.id} {ve.KIND_LABELS.get(e.kind, '-' if not e.excluded else 'not a session')} "
+                           f"\"{e.title[:50]}\"" for e in eps[:12]) or "none"))
+        return val if isinstance(val, dict) else None
+
+    def session_tick(self) -> None:
+        """One step of the session recorder + its actions."""
+        ss = self.session
+        if ss is None:
+            return
+        if not self.chrome.alive():
+            log("Chrome stopped - opening the page again")
+            self.start_chrome(self.page_now or ss.episode_url or ss.event_url)
+            if ss.state == "RECORDING":                     # counted in the recording's report
+                ss.recoveries += 1
+                ss._issue(time.time(), "Chrome stopped - the recording's page was opened again")
+            time.sleep(5)
+        obs = Obs(now=time.time(), page=self.inspect(), capture=self.capture.health() if self.capture else None,
+                  audio_streams=self.audio_streams() if ss.state == "RECORDING" else None,
+                  chrome_alive=self.chrome.alive())
+        acts = ss.step(obs)
+        if ("discover",) in acts:
+            if (obs.page or {}).get("login_form") and time.monotonic() - self.last_login_try > 300:
+                self.auto_login("the event page asks for it")         # VOYO lists the recordings signed in
+            page = self._discover()
+            if page is None:
+                ss._issue(obs.now, "the VOYO event page could not be read (Chrome / network / sign-in?) - trying again")
+                ss._next_try = obs.now + 30
+                return
+            obs.episodes = page
+            acts = ss.step(obs)
+            if ss.key and ss.state == "OPENING" and ss.key in (load_state().get("recorded") or {}):
+                ss.end_reason = f"already recorded ({ss.key})"
+                ss.state = "DONE"
+                log(f"{ss.target.label()}: {ss.end_reason} - not recorded twice")
+                return
+        self.note = f"{ss.state.lower()}: {ss.problem or (ss.selection or {}).get('reason') or ''}"[:200]
+        said = (ss.state, ss.problem)
+        if said != getattr(self, "_said_session", None):        # the journal / activity log: every change once
+            self._said_session = said
+            if ss.problem:
+                log(f"WARNING: {ss.state}: {ss.problem}" if ss.state in ("NOT_FOUND", "AMBIGUOUS", "FAILED")
+                    else f"WARNING: problem while {ss.state.lower()}: {ss.problem}")
+        for a in acts:
+            self.act(a)
+
+    def inspect(self) -> Optional[dict]:
+        try:
+            st = self.evaluate(PAGE_JS)
+        except Exception:  # noqa: BLE001
+            return None
+        return st if isinstance(st, dict) else None
+
+    def act(self, a: tuple) -> None:
+        ss = self.session
+        what = a[0]
+        if what == "note":
+            log(a[1])
+        elif what == "navigate":
+            log(f"opening {ve.redact_url(a[1])}")
+            self._navigate(a[1])
+        elif what in ("play", "unmute"):
+            self.ensure_playing()
+        elif what == "seek0":
+            log("a finished recording: starting it from the beginning")
+            self.evaluate("(() => { const v = [...document.querySelectorAll('video')].sort((a, b) => "
+                          "b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight)[0]; "
+                          "if (v) v.currentTime = 0; return !!v; })()")
+        elif what == "login":
+            self.auto_login("VOYO signed the player out")
+        elif what == "restart_capture" and self.capture is not None:
+            self.capture.restart("its file stopped growing")
+        elif what == "finish" and ss is not None:
+            self.finish_session(a[1])
+
+    def finish_session(self, why: str) -> None:
+        """The recording is over: stop the recorder (its last segment is completed and uploaded), close the
+        package with the report (the server checks the video for completeness), remember it as recorded."""
+        ss = self.session
+        log(f"FINISHING {ss.target.label()}: {why}")
+        if self.capture is not None:
+            self.capture.override = lambda: None
+            self.capture.stop()
+        if self.bridge is not None:
+            self.bridge.stop.set()
+        report = ss.report()
+        close = {"channel": "server_player", "close": True, "why": why[:80], "playback_time": 0,
+                 "recording": self._recording_id(), "report": report}
+        ans = _post("/api/sync/voyo", close, timeout=10)
+        st = load_state()
+        if ans is None:
+            # the dashboard server is away: the close (with the report the completeness check needs) is kept
+            # and sent when it is back (flush_pending)
+            log("dashboard server not reachable to close the recording - the close is sent when it is back")
+            st.setdefault("pending_close", []).append(close)
+            del st["pending_close"][:-20]
+        rec = st.setdefault("recorded", {})
+        rec[ss.key] = {"at": datetime.now(timezone.utc).isoformat(), "why": why, "recording_s": round(ss.recording_s)}
+        for k in sorted(rec, key=lambda k: rec[k].get("at") or "")[:-200]:
+            rec.pop(k, None)
+        try:
+            save_state(st)
+        except OSError as exc:
+            log(f"could not remember the recording as done ({exc})")
+        log(f"DONE {ss.target.label()}: {round(ss.recording_s / 60, 1)} min recorded, {ss.recoveries} recovery(s)"
+            + (f", problems: {'; '.join(t for _a, t in ss.issues[-3:])}" if ss.issues else ""))
+
+    def flush_pending(self) -> None:
+        """While nothing is recorded: deliver closes the server missed, upload segments left in the spool."""
+        st = load_state()
+        pend = st.get("pending_close") or []
+        if pend:
+            left = [c for c in pend if _post("/api/sync/voyo", c, timeout=10) is None]
+            if len(left) != len(pend):
+                log(f"{len(pend) - len(left)} recording close(s) delivered to the dashboard server")
+                st["pending_close"] = left
+                save_state(st)
+        spool = DATA_DIR / "voyo_server_spool"
+        if self.capture is None and spool.exists() and any(spool.glob("*/*_seg_*.mp4")):
+            from tools.voyo_capture import VoyoWindowCapture
+            VoyoWindowCapture(self.server, self.token, self.rc, spool, lambda: None, log=log) \
+                .upload_pending(deadline=time.monotonic() + 60)
+
+    def close_session(self, why: str) -> None:
+        """Leave episode mode: the session ended (or the service stops) - Chrome, sound, screen go."""
+        ss = self.session
+        if ss is not None and ss.state == "RECORDING":
+            ss.end_reason = why
+            ss.state = "DONE"
+            self.finish_session(why)
+        if self.capture is not None:
+            self.capture.override = lambda: None
+            self.capture.stop()
+        if self.bridge is not None:
+            self.bridge.stop.set()
+        self.chrome.stop()
+        self.pulse.stop()
+        self.xvfb.stop()
+        self.bridge = self.capture = None
+        log(f"CLOSED ({why})")
+        self.last_session = ss.status() if ss is not None else None
+        self.session = None
 
     # ------------------------------------------------------------------ schedule
     def feed_live(self) -> bool:
@@ -556,6 +868,44 @@ class Player:
                 return json.loads(r.read()).get("feed_live") is True
         except (OSError, ValueError):
             return False
+
+
+def urlsplit_path(url: str) -> str:
+    try:
+        p = urlparse(url)
+        return f"{p.netloc}{p.path}".rstrip("/")
+    except ValueError:
+        return ""
+
+
+class Lock:
+    """One server VOYO player at a time (the service, a test, a record or discover run share the screen, the
+    Chrome profile and the recordings): a second one stops at once instead of recording twice."""
+
+    def __init__(self, path: Path = LOCK) -> None:
+        self.path = path
+        self.fh = None
+
+    def __enter__(self) -> "Lock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fh = open(self.path, "a+")
+        try:
+            fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.fh.close()
+            raise SystemExit("another server VOYO player is running (the f1-voyo-player service or a test) - "
+                             "stop it first: sudo systemctl stop f1-voyo-player") from None
+        self.fh.seek(0)
+        self.fh.truncate()
+        self.fh.write(str(os.getpid()))
+        self.fh.flush()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        with_fh, self.fh = self.fh, None
+        if with_fh is not None:
+            fcntl.flock(with_fh, fcntl.LOCK_UN)
+            with_fh.close()
 
 
 def session_windows(index: Optional[dict], sp: dict) -> list[dict]:
@@ -660,14 +1010,21 @@ def heartbeat(player: Player, nxt: Optional[dict], problem: str = "") -> list:
     ans = _post("/api/voyo/player/status", {
         "login": player.login_result,
         "state": "open" if player.is_open else "idle", "pid": os.getpid(), "at": time.time(),
+        "recording": player.session.status() if player.session is not None else getattr(player, "last_session", None),
+        "capture": _capture_brief(player.capture.health()) if player.capture is not None else None,
         "session": " ".join(x for x in ((player.hint or {}).get("meeting"), (player.hint or {}).get("session_name"))
                             if x) if player.is_open else None,
         "note": player.note if player.is_open else None, "problem": problem or None,
-        "stream_url_set": bool(player.stream_url()), "browser": find_browser(player.sp),
+        "stream_url_set": bool(player.event_url() if player.episode_mode() else player.stream_url()),
+        "browser": find_browser(player.sp),
         "widevine": has_widevine(find_browser(player.sp)),
         "next": None if not nxt else {k: nxt.get(k) for k in ("meeting", "session_name", "kind", "start", "end",
                                                               "open_from", "open_until")}})
     return list((ans or {}).get("commands") or [])
+
+
+def _capture_brief(h: dict) -> dict:
+    return {k: h.get(k) for k in ("alive", "grew_age_s", "uploads_ok", "uploads_failed", "pending", "last_error")}
 
 
 def cmd_run(player: Player) -> None:
@@ -687,7 +1044,28 @@ def cmd_run(player: Player) -> None:
             now = time.time()
             when = str(sp.get("when") or "schedule")
             win = {"session_name": "always"} if when == "always" else sched.current(now) if when == "schedule" else None
-            if win and not player.is_open:
+            episodes = player.episode_mode() and when == "schedule"
+            if episodes:
+                ss = player.session
+                if win and ss is None and win.get("kind") in ve.KINDS and \
+                        getattr(player, "done_window", None) != (win["kind"], win["start"]):
+                    url = player.event_url()
+                    if not url:
+                        log("no VOYO event page set (event_url / the /disk page / login) - cannot look for the recording")
+                    else:
+                        until = win["open_until"]
+                        if sp.get("keep_open_while_feed_live", True) and player.feed_live():
+                            until = max(until, now + 600)
+                        player.open_session(Target(win["kind"], win.get("meeting"), win.get("session_name"),
+                                                   datetime.fromisoformat(win["start"]).timestamp(), until), url)
+                elif ss is not None:
+                    if win and sp.get("keep_open_while_feed_live", True) and player.feed_live():
+                        ss.target.until = max(ss.target.until or 0, now + 600)   # red flag / delay: still on
+                    player.session_tick()
+                    if player.session is not None and player.session.state == "DONE":
+                        player.done_window = (win or {}).get("kind"), (win or {}).get("start")
+                        player.close_session(player.session.end_reason or "done")
+            elif win and not player.is_open:
                 url = player.stream_url()
                 if not url:
                     log("no stream_url and no page learned yet - run: voyo_server_player.py login")
@@ -698,25 +1076,35 @@ def cmd_run(player: Player) -> None:
                     pass                                   # the session still runs (red flag / delay)
                 else:
                     player.close("session window over")
-            if player.is_open:
+            if player.is_open and not episodes:
                 player.tick()
             upcoming = [w for w in sched.windows(now) if w["open_until"] > now] if when == "schedule" else []
             problem = "" if player.stream_url() else "VOYO not set up: no stream page yet (voyo-player.sh login)"
             if not find_browser(sp):
                 problem = "Google Chrome is not installed (setup-voyo-player.sh)"
+            if player.session is None and not player.is_open and time.monotonic() - getattr(player, "_flushed", -1e9) > 60:
+                player._flushed = time.monotonic()
+                try:
+                    player.flush_pending()
+                except Exception as exc:  # noqa: BLE001
+                    log(f"leftover uploads failed ({exc})")
+            if episodes and not player.event_url():
+                problem = "VOYO not set up: no event page (event_url) and no stream page (voyo-player.sh login)"
             for c in heartbeat(player, upcoming[0] if upcoming else None, problem):
                 if c == "login":
                     log("LOGIN NOW (the /disk page)")
                     player.login_session()
                     heartbeat(player, upcoming[0] if upcoming else None, problem)
-            for _ in range(15):
+            for _ in range(5 if player.session is not None else 15):
                 if stop["now"]:
                     break
                 time.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:
-        if player.is_open:
+        if player.session is not None:
+            player.close_session("the server VOYO player was stopped")
+        elif player.is_open:
             player.close("stopped")
         heartbeat(player, None, "the server VOYO player was stopped")
 
@@ -913,6 +1301,8 @@ def cmd_status(player: Player) -> None:
     print(f"browser            {browser or 'NOT FOUND'}   Widevine (VOYO DRM): {'yes' if has_widevine(browser) else 'NO'}")
     print("tools              " + "  ".join(f"{k}: {'ok' if v else 'MISSING'}" for k, v in tools.items()))
     print(f"stream page        {player.stream_url() or 'NOT SET (run login)'}")
+    print(f"recording choice   {'episode (find + verify the session recording on the event page)' if player.episode_mode() else 'off (whatever the stream page plays)'}"
+          f"   event page: {ve.redact_url(player.event_url()) or 'NOT SET'}")
     print(f"profile            {player.profile}  ({'exists' if player.profile.exists() else 'new - sign in first'})")
     print(f"dashboard server   {player.server}")
     code, st, problem = get_json(f"{player.server}/api/voyo/recordings", 3)
@@ -932,23 +1322,91 @@ def cmd_status(player: Player) -> None:
               f"{datetime.fromtimestamp(w['open_until'], timezone.utc):%H:%M} UTC")
 
 
+def cmd_discover(player: Player, url: Optional[str]) -> None:
+    """Read-only: open the event page, list its recordings with the session each one is taken for, and which
+    one would be recorded for every session kind. Nothing is played or recorded."""
+    url = url or player.event_url()
+    if not url:
+        raise SystemExit("no event page - pass --url or set [voyo.server_player] event_url (or run login)")
+    player.start_display()
+    player.start_chrome(url)
+    player.page_now = url
+    try:
+        for _ in range(20):
+            time.sleep(1)
+            if player.page_url():
+                break
+        time.sleep(4)
+        page = player._discover(url) or {}
+        eps = ve.episodes_from_page(page.get("items") or [])
+        print(f"\nevent page {ve.redact_url(url)} - {len(eps)} recording(s)")
+        for e in eps:
+            what = "NOT A SESSION" if e.excluded else ve.KIND_LABELS.get(e.kind, "unclear")
+            print(f"  {e.id:<12} {what:<18} {e.confidence:<5} {e.title[:60]!r}"
+                  + (f"  {e.date}" if e.date else "") + ("  LIVE" if e.live else ""))
+        print()
+        for kind in ve.KINDS:
+            sel = ve.select_episode(eps, kind)
+            print(f"  {ve.KIND_LABELS[kind]:<18} -> {sel.state:<10} {sel.reason}")
+    finally:
+        player.chrome.stop()
+        player.xvfb.stop()
+
+
+def cmd_record(player: Player, kind: str, meeting: Optional[str], url: Optional[str], hours: float) -> None:
+    """Record one session now, the same way the service does at a scheduled session: find its recording on
+    the event page, verify it, record it to its end (live: at most ``hours``)."""
+    url = url or player.event_url()
+    if not url:
+        raise SystemExit("no event page - pass --url or set [voyo.server_player] event_url (or run login)")
+    now = time.time()
+    player.open_session(Target(kind, meeting, None, now, now + hours * 3600), url)
+    stop = {"now": False}
+    signal.signal(signal.SIGTERM, lambda *a: stop.update(now=True))
+    try:
+        while not stop["now"] and player.session is not None and player.session.state != "DONE":
+            player.session_tick()
+            heartbeat(player, None)
+            for _ in range(5):
+                if stop["now"]:
+                    break
+                time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        ss = player.session
+        player.close_session(ss.end_reason if ss is not None and ss.end_reason else "record stopped")
+        heartbeat(player, None)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["run", "login", "test", "status"])
+    ap.add_argument("command", choices=["run", "login", "test", "status", "discover", "record"])
     ap.add_argument("--minutes", type=float, default=5.0, help="test: how long")
-    ap.add_argument("--url", help="test: this page instead of stream_url")
+    ap.add_argument("--url", help="test: this page instead of stream_url; discover / record: the event page")
+    ap.add_argument("--kind", choices=ve.KINDS, help="record: the session to record")
+    ap.add_argument("--meeting", help="record: the Grand Prix (only to tell recordings of several weekends apart)")
+    ap.add_argument("--hours", type=float, default=4.0, help="record: a live recording ends after this long")
     ap.add_argument("--save-unverified", action="store_true",
                     help="login: save the open page even if no usable video player was confirmed on it")
     args = ap.parse_args()
     player = Player(load_config())
-    if args.command == "run":
-        cmd_run(player)
-    elif args.command == "login":
-        cmd_login(player, save_unverified=args.save_unverified)
-    elif args.command == "test":
-        cmd_test(player, args.minutes, args.url)
-    else:
+    if args.command == "status":
         cmd_status(player)
+        return
+    if args.command == "record" and not args.kind:
+        ap.error("record needs --kind")
+    with Lock():
+        if args.command == "run":
+            cmd_run(player)
+        elif args.command == "login":
+            cmd_login(player, save_unverified=args.save_unverified)
+        elif args.command == "test":
+            cmd_test(player, args.minutes, args.url)
+        elif args.command == "discover":
+            cmd_discover(player, args.url)
+        else:
+            cmd_record(player, args.kind, args.meeting, args.url, args.hours)
 
 
 if __name__ == "__main__":

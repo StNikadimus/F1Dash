@@ -368,6 +368,8 @@ capture_encoder = "x264"        # x264 = CPU | vaapi = Intel Quick Sync (Linux, 
 capture_preset = "veryfast"     # x264 only: ultrafast / superfast = less CPU, bigger files
 capture_vaapi_device = ""       # "" = the Intel GPU's /dev/dri/renderD* (found automatically)
 capture_max_segment_bytes = 4294967296
+spool_min_free_bytes = 2147483648  # the recording machine keeps segments in its spool until the server takes them -
+                                # below this free space there it stops recording instead of filling the disk
 
 # How long captured VIDEO files are kept, per session type, in days (0 = keep forever). The
 # metadata, timeline and sync data of a package are always kept.
@@ -410,6 +412,22 @@ profile = "data/browser-profiles/voyo-server"
 audio = true                    # PulseAudio null sink "f1voyo" (needs pulseaudio); false = video only
 vnc_port = 5900                 # "login": x11vnc on 127.0.0.1 only - reach it through an SSH tunnel
 live_stream = true              # while recording, also a live stream (HLS) for http(s)://<server>/tv - same encode
+# WHICH recording is recorded (tools/voyo_session.py, server/voyo_episodes.py; server/README.md "Which VOYO
+# recording is recorded"). One VOYO event page lists several recordings (practice, qualifying, sprint, race,
+# shows); its address does not say which one plays. "auto": at each session of record_sessions the player
+# reads the event page, takes the ONE recording whose title is that session (FP1 / Sprint kvalifikacije /
+# Dirka ...), opens it, checks that the player really plays it (its episode id in the player / the HLS or
+# DASH manifest) and only then records - none / several matching: nothing is recorded and /disk says why.
+# "off": the old way - record whatever stream_url shows.
+episode_select = "auto"
+event_url = ""                  # the VOYO page that lists the weekend's recordings; "" = the stream page above
+episode_verification = "strict" # strict = the episode id must be seen in the player | url = the page address is enough
+vod_from_start = true           # a recording that is already finished is recorded from 0:00
+verify_timeout_s = 120          # the selected recording must play (and be confirmed) within this
+stall_play_s = 20               # the video does not move: press play ...
+stall_reload_s = 75             # ... still not: open the recording again (same package - no second recording)
+grow_restart_s = 30             # the screen recorder's file does not grow (it grows every ~2 s): restart it
+discover_retry_s = 60           # the recording is not on the event page (yet) / ambiguous: look again after this
 
 # ---------------------------------------------------------------------------
 # VOYO video <-> F1 data synchronisation. See README "VOYO sync".

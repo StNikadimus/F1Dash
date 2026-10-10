@@ -52,6 +52,110 @@ FLUSH_EVERY_S = 5.0
 RETENTION_EVERY_S = 3600.0
 
 
+GAP_CHECK_S = 3.0           # a hole this long between two video segments makes a recording INCOMPLETE
+COVERAGE_MIN = 0.97         # ... as does less video than this share of the time it should cover
+SILENT_DB = -70.0
+
+
+def _f(v, lo: float, hi: float) -> Optional[float]:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if lo <= x <= hi else None
+
+
+def capture_check(rows: list, report: Optional[dict] = None, deleted: bool = False) -> dict:
+    """Is the video of a package complete? From capture.jsonl (one row per uploaded segment: its capture
+    start / end on the recording machine's clock, its real length and sound check) and - for the server
+    VOYO player - its report (how long it was RECORDING, which is what the video must cover).
+
+    COMPLETE   the segments cover >= 97 % of the expected time and no hole is longer than 3 s
+    INCOMPLETE less video than that, or holes (each listed) - e.g. a recorder that stopped after a minute
+    NO VIDEO   no segment at all
+    ``sound``: ok | missing (a segment without a sound track) | silent | unknown. Never "complete" by default:
+    a short file cannot pass as a full recording."""
+    spans = []
+    for r in rows or []:
+        a, b = _f(r.get("pc_start_epoch"), 1e9, 1e11), _f(r.get("pc_end_epoch"), 1e9, 1e11)
+        if a is None or b is None or b <= a:
+            continue
+        dur = _f(r.get("duration"), 0, 86400)
+        spans.append((a, b, dur if dur is not None else b - a, r))
+    spans.sort(key=lambda x: x[0])
+    exp_rep = _f((report or {}).get("expected_s"), 1, 7 * 86400)
+    if not spans:
+        return {"state": "NO VIDEO", "recorded_s": 0, "expected_s": round(exp_rep) if exp_rep else None,
+                "coverage": 0.0 if exp_rep else None, "gaps": [], "segments": 0, "sound": "unknown",
+                "issues": ["no video segment was stored"] if exp_rep else []}
+    recorded = sum(min(d, b - a + 2) for a, b, d, _r in spans)
+    gaps = []
+    end = spans[0][1]
+    for a, b, _d, _r in spans[1:]:
+        if a - end > GAP_CHECK_S:
+            gaps.append([round(end), round(a - end, 1)])
+        end = max(end, b)
+    span = end - spans[0][0]
+    expected = exp_rep if exp_rep else span
+    coverage = recorded / expected if expected > 0 else 1.0
+    no_audio = sum(1 for *_x, r in spans if r.get("audio") is False)
+    silent = sum(1 for *_x, r in spans if (_f(r.get("max_db"), -500, 50) is not None and float(r["max_db"]) < SILENT_DB))
+    known = sum(1 for *_x, r in spans if r.get("audio") is not None)
+    sound = "missing" if no_audio else "silent" if silent and silent >= max(1, len(spans) // 2) else         "ok" if known else "unknown"
+    issues = []
+    if coverage < COVERAGE_MIN and expected - recorded > GAP_CHECK_S:
+        issues.append(f"video covers {recorded / 60:.1f} of {expected / 60:.1f} min")
+    if gaps:
+        issues.append(f"{len(gaps)} hole(s) in the video, longest {max(g[1] for g in gaps):.0f} s")
+    if no_audio:
+        issues.append(f"{no_audio} segment(s) without a sound track")
+    if silent:
+        issues.append(f"{silent} segment(s) with only silence")
+    if deleted:
+        issues.append("video deleted (retention)")
+    part = False
+    rep = report or {}
+    dur, a, b = _f(rep.get("duration"), 1, 7 * 86400), _f(rep.get("played_from"), 0, 7 * 86400), \
+        _f(rep.get("played_to"), 0, 7 * 86400)
+    if rep.get("live") is False and dur and a is not None and b is not None and (a > 30 or b < dur - 30):
+        part = True                                   # a finished recording, not recorded from start to end
+        issues.append(f"the episode was recorded from {a / 60:.1f} to {b / 60:.1f} of its {dur / 60:.1f} min")
+    complete = (coverage >= COVERAGE_MIN or expected - recorded <= GAP_CHECK_S) and not gaps and not part
+    return {"state": "COMPLETE" if complete else "INCOMPLETE", "recorded_s": round(recorded),
+            "expected_s": round(expected), "coverage": round(min(coverage, 9.99), 3), "gaps": gaps[:20],
+            "segments": len(spans), "sound": sound, "issues": issues}
+
+
+REPORT_KEYS = {"state": 20, "key": 64, "episode_id": 16, "episode_title": 160, "selection": 300, "verified": 300,
+               "format": 8, "end_reason": 200, "problem": 300}
+REPORT_NUMS = {"live": None, "duration": (0, 7 * 86400), "started_at": (1e9, 1e11), "recording_s": (0, 7 * 86400),
+               "expected_s": (0, 7 * 86400), "played_from": (0, 7 * 86400), "played_to": (0, 7 * 86400),
+               "recoveries": (0, 10000)}
+
+
+def clean_report(rep: Any) -> Optional[dict]:
+    """The server player's report of a recording (tools/voyo_session.py) - only known fields, bounded."""
+    if not isinstance(rep, dict):
+        return None
+    out: dict = {}
+    for k, n in REPORT_KEYS.items():
+        v = rep.get(k)
+        if isinstance(v, (str, int)) and not isinstance(v, bool) and str(v).strip():
+            out[k] = "".join(ch for ch in str(v)[:n] if ch.isprintable())
+    for k, rng in REPORT_NUMS.items():
+        v = rep.get(k)
+        if rng is None:
+            if isinstance(v, bool):
+                out[k] = v
+        elif isinstance(v, (int, float)) and not isinstance(v, bool) and rng[0] <= v <= rng[1]:
+            out[k] = round(float(v), 1)
+    t = rep.get("target") if isinstance(rep.get("target"), dict) else {}
+    out["target"] = {k: str(t[k])[:120] for k in ("kind", "label", "meeting", "session_name") if isinstance(t.get(k), str)}
+    out["issues"] = [{"at": _f(i.get("at"), 0, 1e11), "text": str(i.get("text") or "")[:200]}
+                     for i in (rep.get("issues") or [])[:30] if isinstance(i, dict)]
+    return out
+
+
 def session_kind(name: Optional[str]) -> str:
     """F1 session name -> the retention key (keep_<kind>_days)."""
     n = (name or "").strip().lower()
@@ -266,8 +370,11 @@ class VoyoStreamRecorder:
         if not self._space_ok():
             raise OSError(f"less than min_free_bytes ({_human(self.min_free)}) free on {self.root}")
         pkg.mkdir(parents=True, exist_ok=True)
+        episode = getattr(sync, "episode", None)
         if existing:                                  # resumed instance: append to its package
             self.cur = existing
+            if episode and not existing.get("episode"):
+                self.cur["episode"] = episode
             self.cur.update(status="recording", closed_at=None, close_reason=None)
             self.cur.setdefault("resumes", []).append({"at": _iso(wall), "reason": reason})
             log.info("VOYO stream recording %s continued (%s)", inst.id, reason)
@@ -287,6 +394,8 @@ class VoyoStreamRecorder:
                 "sync": None, "live_data_delay": None, "stream_start_marks": 0,
                 "capture": {"enabled": self.capture_enabled, "segments": [], "bytes": 0, "deleted_at": None},
                 "closed_at": None, "close_reason": None, "updated_at": _iso(wall), "files": list(FILES)}
+            if episode:
+                self.cur["episode"] = episode            # the VOYO recording the server player selected
             log.info("VOYO stream recording %s started (%s): %s, %s -> %s", inst.id, reason,
                      "live" if inst.live else "recording", inst.title or inst.asset[:60], pkg)
         self._open_files(inst.id)
@@ -507,12 +616,16 @@ class VoyoStreamRecorder:
             fh.flush()
         _write_json(self.root / self.cur["stream_instance_id"] / "manifest.json", self.cur)
 
-    def finalize(self, reason: str) -> None:
-        """Close the open package (a new instance, server stop)."""
+    def finalize(self, reason: str, report: Optional[dict] = None) -> None:
+        """Close the open package (a new instance, server stop). ``report``: the server player's own account
+        of the recording (clean_report) - kept in the manifest and used for the completeness check."""
         if self.cur is None:
             return
         cur, self.cur = self.cur, None
         cur.update(status="closed", closed_at=_iso(self.now()), close_reason=reason, updated_at=_iso(self.now()))
+        if report:
+            cur["player_report"] = report
+        self._check(cur)
         try:
             if self.ok:
                 self._close_files()
@@ -523,6 +636,55 @@ class VoyoStreamRecorder:
                          cur["counts"]["anchors"])
         except OSError as exc:
             self._fail("finalize failed", exc)
+
+    def finalize_key(self, key: str, reason: str, report: Optional[dict] = None) -> None:
+        """Close the package ``key`` with the server player's report - the open one, or one left
+        "recording" / "interrupted" by a restart (its report then still arrives)."""
+        if self.cur is not None and self.cur.get("stream_instance_id") == key:
+            self.finalize(reason, report)
+            return
+        pkg = self.package_dir(key)
+        m = _read_json(pkg / "manifest.json") if pkg is not None else None
+        if not isinstance(m, dict):
+            return
+        if m.get("status") == "closed" and not report:
+            return
+        m.update(status="closed", closed_at=m.get("closed_at") or _iso(self.now()),
+                 close_reason=m.get("close_reason") or reason, updated_at=_iso(self.now()))
+        if report:
+            m["player_report"] = report
+        try:
+            self._check(m)
+            _write_json(pkg / "manifest.json", m)
+            self._index_put(m)
+        except OSError as exc:
+            self._fail("finalize failed", exc)
+
+    def _check(self, m: dict) -> None:
+        """The completeness check of a package's video (manifest capture.check) - at its close and again for
+        every segment that arrives later (the recording machine uploads what was left in its spool)."""
+        if not self.ok:
+            return
+        cap = m.setdefault("capture", {"segments": [], "bytes": 0})
+        if not cap.get("segments") and not m.get("player_report"):
+            cap.pop("check", None)
+            return
+        rows = []
+        try:
+            with open(self.root / m["stream_instance_id"] / "capture" / "capture.jsonl", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(r, dict):
+                        rows.append(r)
+        except OSError:
+            pass
+        cap["check"] = capture_check(rows, m.get("player_report"), bool(cap.get("deleted_at")))
+        if cap["check"]["state"] != "COMPLETE" and m.get("status") == "closed":
+            log.warning("VOYO stream recording %s: video %s - %s", m["stream_instance_id"], cap["check"]["state"],
+                        "; ".join(cap["check"]["issues"]) or "no detail")
 
     # ------------------------------------------------------------------ index
     @staticmethod
@@ -542,7 +704,11 @@ class VoyoStreamRecorder:
                 "sync": m.get("sync"), "live_data_delay": m.get("live_data_delay"),
                 "anchors": (m.get("counts") or {}).get("anchors"),
                 "capture_segments": len(cap.get("segments") or []), "capture_bytes": cap.get("bytes") or 0,
-                "capture_deleted_at": cap.get("deleted_at")}
+                "capture_deleted_at": cap.get("deleted_at"),
+                "capture_check": (cap.get("check") or {}).get("state"),
+                "capture_recorded_s": (cap.get("check") or {}).get("recorded_s"),
+                "capture_sound": (cap.get("check") or {}).get("sound"),
+                "episode_id": (m.get("episode") or {}).get("id")}
 
     def _load_index(self) -> dict:
         idx = _read_json(self.root / INDEX)
@@ -630,8 +796,12 @@ class VoyoStreamRecorder:
     def clock_reply(self) -> dict:
         """Returned to the PC's clock bridge with every sample: which package is open, whether the
         PC should run the (opt-in) window capture for it."""
+        space = self.capture_space_ok() if self.ok else False
+        blocked = None if not self.capture_enabled else (self.error or "recording off") if not self.ok else \
+            None if space else "disk full (min_free_bytes)"
         return {"channel": self.channel, "instance": self.cur["stream_instance_id"] if self.cur else None,
-                "capture": bool(self.capture_enabled and self.ok and self.cur is not None and self.capture_space_ok()),
+                "capture": bool(self.capture_enabled and self.ok and self.cur is not None and space),
+                "blocked": blocked,
                 "segment_seconds": int(self.rc.get("capture_segment_seconds", 60)),
                 "fps": int(self.rc.get("capture_fps", 30)), "crf": int(self.rc.get("capture_crf", 23))}
 
@@ -671,6 +841,8 @@ class VoyoStreamRecorder:
         if m is self.cur:
             self.write_manifest(force=True)
         else:
+            if m.get("status") == "closed":
+                self._check(m)                         # a late segment of a closed recording: check again
             _write_json(path.parent.parent / "manifest.json", m)
             self._index_put(m)
 

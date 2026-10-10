@@ -219,13 +219,19 @@ The server can open VOYO itself and record it, so your PC doesn't need to be on.
    needed) with Google Chrome signed in to **your** VOYO account. The session times come from the
    official schedule; the default window is 15 min before the start until 30 min after the end, and
    longer while the live feed says the session still runs.
-2. **It plays the stream:** it opens the F1 live page and presses play, sound on and the player's
-   own fullscreen, the same buttons you would press.
+2. **It finds and plays THE session's recording:** it reads the VOYO event page, takes the one
+   recording whose title is that session (e.g. *Sprint kvalifikacije*), opens it, checks that the
+   player really plays that recording, and only then starts recording. It presses play, sound on and
+   the player's own fullscreen, the same buttons you would press. See "Which VOYO recording is
+   recorded" below.
 3. **The F1 data side:** the read-only clock posts the video position to the dashboard server. The
    server writes it as a VOYO stream recording on the disk (`[voyo.recording] path`, channel
    `server_player`), with the F1 session and LIVE DATA DELAY attached.
 4. **The video side:** ffmpeg records that screen and its sound into the recording's `capture/` folder.
-5. **After the session** it closes VOYO. That package is complete and appears in `GET /api/voyo/recordings`.
+5. **After the session** (a finished recording: at its end; live: when the session window closes)
+   the last segment is completed and uploaded, the package is closed with the player's report and
+   the server checks the video for completeness (COMPLETE / INCOMPLETE, below). It appears in
+   `GET /api/voyo/recordings`, on `/disk` and in the `/tv` REPLAYS list.
 
 The recording is a screen recording of what Chrome displays. The tool never touches VOYO's stream,
 keys or DRM. VOYO needs Chrome's Widevine module, which Google Chrome has; if Chrome can't play the
@@ -265,7 +271,7 @@ page; the tool doesn't store it, and Chrome keeps its normal sign-in cookie in i
 ```bash
 ./server/voyo-player.sh status                # Chrome + Widevine, tools, stream page, disk, next sessions
 ./server/voyo-player.sh test --minutes 3      # open + record now, then prints the recording
-sudo cp server/systemd/f1-voyo-player.service /etc/systemd/system/
+sudo cp server/systemd/f1-voyo-player.service /etc/systemd/system/     # again after an update that changed it
 sudo systemctl daemon-reload && sudo systemctl enable --now f1-voyo-player
 journalctl -u f1-voyo-player -f
 ```
@@ -287,9 +293,183 @@ journalctl -u f1-voyo-player -f
 | `display` | :90 | |
 | `cdp_port` | 9224 | |
 | `browser` | Google Chrome | |
+| `episode_select` | auto | `auto` = find + verify the session's recording (below); `off` = record whatever `stream_url` plays |
+| `event_url` | "" | the VOYO page that lists the weekend's recordings; "" = the stream page |
+| `episode_verification` | strict | `strict` = the episode id must be seen in the player; `url` = the page address is enough |
+| `vod_from_start` | true | a finished recording is recorded from 0:00 |
+| `verify_timeout_s`, `stall_play_s`, `stall_reload_s`, `grow_restart_s`, `discover_retry_s` | 120, 20, 75, 30, 60 | health check timings |
+
+`[voyo.recording] spool_min_free_bytes` (2 GiB): the player keeps finished segments in
+`<data>/voyo_server_spool` until the dashboard server takes them. Below this much free space there it
+stops recording instead of filling the system disk.
 
 Video retention uses the same `keep_<session>_days` as the other recordings. A race at 1080p30 is
 roughly 3–6 GB.
+
+### Which VOYO recording is recorded
+
+One VOYO event page lists several recordings: the practice sessions, sprint qualifying, sprint,
+qualifying, race and studio shows. Its address does not say which one plays. Each recording is an
+episode, `/play/category/<c>/episodes/<id>`.
+
+Checked by hand in Chrome DevTools, the same id is in the episode link, in the player and in the
+manifest the player loads:
+
+| Session | Episode id | Manifest |
+|---|---|---|
+| Free Practice 1 | 63660752 | MPEG-DASH (`.mpd`) |
+| Sprint Qualifying | 63660945 | MPEG-DASH (`.mpd`) |
+| Sprint | 63661233 | HLS (`.m3u8`) |
+
+These ids are examples only: nothing is configured per event. At each session of `record_sessions`
+the player (`main/tools/voyo_session.py`, logic in `main/server/voyo_episodes.py`) goes through these
+states:
+
+1. **DISCOVERING:** opens `event_url` (signed in) and reads every link to a recording, with the words
+   a person sees on it: the link text, the image text and the card around it, plus the page's JSON-LD.
+   It scrolls once for lazy-loaded rows.
+2. **The title becomes a session kind.** Slovenian and English are understood: "1. prosti trening",
+   "Prvi prosti trening", "FP1", "Sprint kvalifikacije", "Sprint", "Kvalifikacije", "Dirka", "Race"
+   and similar. Shows *about* a session are excluded: povzetek / highlights, studio, napoved,
+   pred / po dirki, intervju, novinarska konferenca and similar.
+3. **Exactly one recording of the session's kind is taken.** Several candidates are narrowed by the
+   Grand Prix name, then the date on the card, then a LIVE label. The outcome is never a guess:
+   - none -> **NOT FOUND**; the page is read again every minute, because a live recording often
+     appears only shortly before the start;
+   - still several -> **AMBIGUOUS**; the candidates are listed on `/disk` and nothing is recorded;
+   - an unclear title, for example "Prosti trening" without a number, is not taken.
+
+   **Another session is never recorded instead.**
+4. **OPENING / VERIFYING:** the recording's page is opened. Recording starts only when the player
+   shows that episode id, either in its `mediaId` or in the path of the DASH / HLS manifest it
+   loaded, and the video moves. Only the manifest's path is read, never its query string or
+   tokens, and never the media itself.
+   - The page address alone is not proof (`episode_verification = "strict"`).
+   - Another id, or a title of another session -> **FAILED**; the player tries again after 2 min.
+   - Nothing confirmed within `verify_timeout_s` -> also **FAILED**.
+5. **RECORDING:** a finished recording is rewound to 0:00 once the recorder runs. Then, every 5 s:
+   - the video must move: if it stops, play is pressed; if it is still stopped, the recording's page
+     is opened again;
+   - still signed in: VOYO's sign-in form -> it signs in with the account from `/disk` and opens the
+     recording again;
+   - Chrome alive: if it died, it is restarted on the recording;
+   - the recorder alive and its file growing: if not, ffmpeg is restarted;
+   - sound: Chrome's stream into the `f1voyo` sink must exist, and each finished segment is checked
+     for a sound track and for silence (`volumedetect`);
+   - the player switching to another recording: it is brought back; near the end, that counts as
+     the end.
+
+   **No recovery starts a second recording.** The package id is the session's key (kind + episode
+   id + day, e.g. `sprint-63661233-20260321`), so the server appends to the same package, also after
+   a restart of either side. A finished key is remembered and never recorded twice. Only one player
+   runs at a time (a lock file); a second `test` / `record` stops at once.
+6. **FINISHING / DONE:** a finished recording ends at its end; live ends when the window closes
+   (longer while the live feed runs). The recorder completes its last segment, the segments are
+   uploaded and the package is closed with the player's report: what was selected, how it was
+   verified, how long it recorded, the recoveries and the problems.
+
+Commands:
+
+```bash
+./server/voyo-player.sh discover                    # read-only: the event page's recordings + what each kind would record
+./server/voyo-player.sh record --kind sprint        # record that session now (find, verify, record to its end)
+./server/voyo-player.sh status
+```
+
+### Is the recording complete? (COMPLETE / INCOMPLETE)
+
+Every closed package with video gets `capture.check` in its manifest, shown on `/disk` and in the `/tv`
+REPLAYS list:
+
+- **COMPLETE:** all of these hold:
+  - the segments cover ≥ 97 % of the time the player was RECORDING;
+  - no hole between segments is longer than 3 s;
+  - a finished recording was recorded from its start to its end.
+- **INCOMPLETE:** anything less. Each problem is listed, e.g. "video covers 1.0 of 60.0 min" or
+  "2 hole(s), longest 70 s".
+- **NO VIDEO:** no segment arrived.
+- **sound:** `ok` / `missing` (no sound track) / `silent` / `unknown`.
+
+Segments that arrive later (left in the spool while the server was away) are checked again. A
+one-minute file can no longer pass as a full session.
+
+### Why recordings used to be short (found and fixed)
+
+Each file in `capture/` is one segment of `capture_segment_seconds` (60 s). A recording is many of
+them; `/tv` plays them as one. Recordings that were shorter than the session came from these causes,
+reproduced with a stand-in VOYO page, the real dashboard server, Chrome, PulseAudio and ffmpeg:
+
+| Cause | Effect (measured before the fix) | Fix |
+|---|---|---|
+| After Chrome stopped (crash / killed), it was opened again on the configured stream page, not on the recording that was playing | when that page does not play the same video (an event page, a page learned for another recording, VOYO's start page) the video does not come back and the recorder stops 15 s later - measured: **one segment of ~51 s** of a 150 s test, the rest lost | the session recorder reopens exactly the recording, the same package continues |
+| ffmpeg stopped: retried only after 30 s, and the segment it was writing was never uploaded (not in its list) | 80 of 150 s, one segment left in the spool for ever | retry after 5 s; the unfinished segment's complete fragments are uploaded with their measured length |
+| The recorder only ran while the dashboard server answered (it stopped 15 s after its last answer) | server away 20 s: 140 of 150 s recorded; away 70 s: 91 of 150 s | the session recorder keeps it running; segments wait in the spool |
+| `f1-voyo-player.service` had `Requires=f1-dashboard.service` | every restart / update of the dashboard stopped the player mid-session and closed the recording | `Wants=` (re-install the unit, below) |
+| A recording was split into new packages whenever the player looked "different" (reload, preroll, a live window changing length, another media id) | several short packages for one session | one package per session key |
+| PulseAudio could keep running without its socket (the module failed) | ffmpeg could never open the sound: no video at all, "sound ok" in the log | the socket is verified; without it the picture is recorded without sound and the problem is shown |
+| A dead virtual screen's socket (`/tmp/.X11-unix/X90`) was "used" | Chrome never started, nothing recorded until the file was deleted by hand | a dead socket is detected and removed |
+| ffmpeg's error output went to a pipe nobody read | not reproduced here - but after 64 KB of messages ffmpeg would block: a file that silently stops growing | errors go to a file; a file that stops growing restarts the recorder |
+| Nothing compared the recorded video with the session | a short recording looked like a finished one | COMPLETE / INCOMPLETE check |
+
+### Troubleshooting
+
+| `/disk` says | Meaning / what to do |
+|---|---|
+| **NOT FOUND** | The session's recording is not on the event page (yet). Run `voyo-player.sh discover`: it lists every recording and how its title was read. Is `event_url` the weekend's page? Does the title name the session? |
+| **AMBIGUOUS** | Several recordings look like that session (e.g. two "Dirka" of two weekends on one page). Set `event_url` to the weekend's own page. Nothing is recorded meanwhile. |
+| **FAILED** (wrong recording / could not confirm) | The opened page plays another recording, or the player never showed the id. `episode_verification = "url"` relaxes this, but only if VOYO's player stops exposing the id. |
+| **RECORDING** + PROBLEM | The problem is shown live: stalls, sign-out, the recorder restarted, no sound. The issues end up in the package's report. |
+| **INCOMPLETE** in the list | The video does not cover the session; the reasons are in the package's `capture.check.issues`. |
+| `no sound: PulseAudio did not start` | `pulseaudio` missing or broken (`setup-voyo-player.sh`). The picture is still recorded. |
+
+### Deploying this change (and checking it)
+
+1. **Update** (waits while something is being recorded, runs the tests, restarts the dashboard, then the player):
+   ```bash
+   sudo /opt/f1-dashboard/server/update-f1dash.sh            # add --wait-idle 120 during a race weekend
+   ```
+2. **Install the changed unit once.** It now has `Wants=` instead of `Requires=`. Reloading systemd does
+   not restart anything:
+   ```bash
+   sudo cp /opt/f1-dashboard/server/systemd/f1-voyo-player.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   ```
+3. **Install `pactl` for the sound check** (`setup-voyo-player.sh` does this now):
+   ```bash
+   sudo apt install pulseaudio-utils
+   ```
+4. **The event page.** If the saved stream page is not the page that lists the weekend's recordings, set
+   it in `server/config/server.toml`: `[voyo.server_player] event_url = "https://voyo.si/…"`.
+5. **Check what would be recorded.** This is read-only. Stop the service first: only one player runs at a time.
+   ```bash
+   sudo systemctl stop f1-voyo-player
+   sudo -u f1 env F1DASH_DATA_DIR=/var/lib/f1-dashboard HOME=/var/lib/f1-dashboard /opt/f1-dashboard/server/voyo-player.sh discover
+   ```
+   Every recording of the page is listed with the session it is taken for, and every session kind with
+   SELECTED / NOT_FOUND / AMBIGUOUS.
+6. **Optional: record a finished session end to end** (e.g. last weekend's FP1, about an hour):
+   ```bash
+   sudo -u f1 env F1DASH_DATA_DIR=/var/lib/f1-dashboard HOME=/var/lib/f1-dashboard /opt/f1-dashboard/server/voyo-player.sh record --kind practice1
+   ```
+   `/disk` then shows the package with COMPLETE (or what is missing), and `/tv` REPLAYS plays it.
+7. **Start the service again** and watch the first real session on `/disk`:
+   ```bash
+   sudo systemctl start f1-voyo-player
+   journalctl -u f1-voyo-player -f
+   ```
+
+### Known limitations
+
+- The title words cover the Slovenian and English names VOYO uses today. A completely new naming
+  gives NOT FOUND (visible), never a wrong recording; `discover` shows how titles were read.
+- A live recording is identified the same way as long as VOYO lists it as an episode on the event page.
+  A live stream that is only a channel page without an episode id cannot be verified. Use
+  `episode_select = "off"` for such a page (the old behaviour: whatever `stream_url` plays).
+- This was tested with a stand-in VOYO site (the same page structure, mediaId and DASH / HLS
+  manifests), headless Chromium and real ffmpeg / PulseAudio. It was not tested against voyo.si
+  itself, its DRM (Widevine needs Google Chrome on the server) or Intel Quick Sync (no GPU in the
+  test machine). The first real weekend should be checked on `/disk`.
+- The sound check needs `pactl` (`pulseaudio-utils`); without it "no sound" is only found per segment.
 
 ## The recorder page: `https://<server-ip>/disk`
 

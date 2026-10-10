@@ -427,7 +427,7 @@ if [ "$MODE" = production ]; then
       "· $PLAYER_SERVICE: $([ "$PLAYER_ACTIVE" = 1 ] && echo running || echo not running)"
   if [ "$UPDATE" = 1 ] || [ "$NEEDS_RESTART" = 1 ]; then
     check_disk
-    wait_until_idle "updating and restarting $SERVICE (and $PLAYER_SERVICE, which depends on it)"
+    wait_until_idle "updating and restarting $SERVICE (and $PLAYER_SERVICE)"
     say "no recording running"
   fi
   # the installed unit vs the repository's (reported, never overwritten)
@@ -489,7 +489,7 @@ if [ "$DRY" = 1 ]; then
   fi
   [ "$CERT_ACTION" != none ] && plan "$CERT_ACTION the HTTPS certificate with server/make-https-cert.sh (after a backup)"
   if [ "$MODE" = production ]; then
-    if [ "$NEEDS_RESTART" = 1 ] && [ "$NO_RESTART" = 0 ]; then plan "restart $SERVICE (and $PLAYER_SERVICE with it), then verify http/https and the /tv + /disk protections"
+    if [ "$NEEDS_RESTART" = 1 ] && [ "$NO_RESTART" = 0 ]; then plan "restart $SERVICE (then $PLAYER_SERVICE if it runs), then verify http/https and the /tv + /disk protections"
     else say "[dry-run] no restart needed"; fi
   fi
   say "[dry-run] done - nothing was changed"
@@ -620,8 +620,11 @@ systemctl restart "$SERVICE" || true
 if wait_healthy && verify_service; then
   rm -f "$PENDING_FILE"; record_deploy
   if [ "${PLAYER_ACTIVE:-0}" = 1 ]; then
+    # the player unit only Wants= the dashboard (a dashboard restart no longer stops a recording): it is
+    # restarted here, explicitly, so it runs the new code too - only now, while nothing is recorded
+    systemctl restart "$PLAYER_SERVICE" || true
     sleep 3
-    if systemctl is-active --quiet "$PLAYER_SERVICE"; then say "$PLAYER_SERVICE is running again"
+    if systemctl is-active --quiet "$PLAYER_SERVICE"; then say "$PLAYER_SERVICE restarted - runs the new code"
     else warn "$PLAYER_SERVICE is not running - sudo systemctl start $PLAYER_SERVICE"; fi
   fi
   step "Done"

@@ -1276,6 +1276,21 @@ accepted from the server itself only. They get their own stream tracker and pack
 POST with `"close": true` closes its package at the end of the session window. Setup:
 `server/README.md` "Recording VOYO on the server".
 
+**Which recording:** one VOYO event page lists several recordings, so the player does not trust the page
+address. It finds the session's own recording and verifies it before recording, using these modules:
+
+| Module | What it does |
+|---|---|
+| `server/voyo_episodes.py` | Titles -> session kinds; selects exactly one recording; reads the id from the HLS / DASH manifest; redacts tokens |
+| `tools/voyo_session.py` | The state machine: discover -> verify -> record -> health checks / recovery -> finish |
+| `tools/voyo_capture.py` | The screen recorder: keeps recording while the dashboard server is away; reports its health; checks each segment's picture and sound |
+
+Samples with a `recording.key` (kind + episode id + day) all go into ONE package: the key is the
+package id, kept across reloads and restarts of either side. The close carries the player's report;
+the server then rates the video COMPLETE / INCOMPLETE (`capture.check`, `voyo_recording.capture_check`)
+and shows it on `/disk` and in the `/tv` REPLAYS list. Details, troubleshooting and the causes of the
+earlier short recordings: `server/README.md` "Which VOYO recording is recorded".
+
 ### Errors
 
 At start the path is resolved, created (if `create_path_if_missing`), write-tested and logged

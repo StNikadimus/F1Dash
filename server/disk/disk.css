@@ -146,6 +146,8 @@ table.rec td.mono { font-family: var(--mono); white-space: nowrap; }
 .badge.interrupted { color: var(--amber); border-color: #6b4c00; }
 .badge.HIGH { color: var(--green); } .badge.MEDIUM { color: var(--yellow); } .badge.LOW, .badge.UNSYNCED { color: var(--text-3); }
 .badge.MANUAL { color: var(--blue); }
+.badge.ok { color: var(--green); border-color: #155c37; margin-top: 3px; display: inline-block; }
+.badge.bad { color: var(--red); border-color: var(--red); margin-top: 3px; display: inline-block; }
 tr.detail td { background: #0a0f14; padding: 10px 14px 14px; }
 .det-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; }
 .segs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
