@@ -165,6 +165,9 @@
         <button data-tv="RACE_VIEW">VOYO<small>+ STATS</small></button>
         <button data-tv="VIDEO_FOCUS">VIDEO<small>FOCUS</small></button>
       </div>
+      <div class="g" style="margin-top:8px">
+        <button data-c="PLAYER_MENU" id="b-player">LIVE / REPLAYS<small>/tv PLAYER · ARROWS · OK · BACK</small></button>
+      </div>
     </section>
     <section>
       <h2>MODE</h2>
@@ -363,11 +366,13 @@
     for (const b of document.querySelectorAll("[data-tv]")) b.classList.toggle("active", (ui.tv_mode || "") === b.dataset.tv);
     for (const b of document.querySelectorAll("[data-mode]")) b.classList.toggle("active", md.selected_mode === b.dataset.mode);
     for (const b of document.querySelectorAll('[data-c="TOGGLE_AUTO_CYCLE"]')) b.classList.toggle("active", !!ui.auto_cycle);
+    for (const b of document.querySelectorAll('[data-c="PLAYER_MENU"]')) b.classList.toggle("active", !!ui.player_menu);
     $("modeinfo").innerHTML = md.selected_mode ? `DETECTED <b>${esc(md.detected_mode)}</b> · RUNNING <b>${esc(md.effective_mode)}</b>` +
       (md.switching ? " · switching…" : "") + (md.notice ? ` · <b style="color:var(--amber)">${esc(md.notice)}</b>` : "") : "";
     const sel = R.remote.selected;
     $("selinfo").innerHTML = sel ? `SELECTED <b style="border-left:4px solid ${esc(sel.team_color || "#444")};padding-left:6px">${esc(sel.tla || sel.num)}</b>` +
       (sel.position ? ` · P${esc(sel.position)}` : "") : "No driver selected";
+    if (ui.player_menu) $("selinfo").innerHTML = '<b>/tv PLAYER</b> · ▲▼ choose · ◀▶ seek / volume · OK select · BACK close';
     const y = R.sync || {};
     $("syncinfo").innerHTML = y.mode ? `SYNC <b>${esc(y.confidence || "—")}</b> · ${esc(y.mode)}` +
       (y.offsetDisplay !== undefined && y.offsetDisplay !== null ? ` · ${esc((y.offsetDisplayLabel || "offset").toLowerCase())} <b>${Number.isFinite(+y.offsetDisplay) ? (+y.offsetDisplay).toFixed(1) + " s" : esc(y.offsetDisplay)}</b>` : "") +

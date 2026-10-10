@@ -581,23 +581,28 @@ def session_windows(index: Optional[dict], sp: dict) -> list[dict]:
 
 
 class Schedule:
+    REFRESH_S = 1800          # a schedule that was read is read again after this long
+    RETRY_S = 60              # this season's schedule could not be read: try again this soon (a session may be due)
+
     def __init__(self, sp: dict) -> None:
         self.sp = sp
         self._index: dict[int, dict] = {}
-        self._at: dict[int, float] = {}
+        self._next: dict[int, float] = {}                  # monotonic time of the next read per season
 
     def windows(self, now: float) -> list[dict]:
         from server.mode import fetch_index
         year = datetime.fromtimestamp(now, timezone.utc).year
         out = []
         for y in (year, year + 1):
-            if time.monotonic() - self._at.get(y, -1e9) > 1800:
+            if time.monotonic() >= self._next.get(y, -1e9):
                 try:
                     self._index[y] = asyncio.run(fetch_index(y))
+                    self._next[y] = time.monotonic() + self.REFRESH_S
                 except Exception as exc:  # noqa: BLE001
+                    # the last schedule read (if any) stays in use; next season's is usually not published yet
+                    self._next[y] = time.monotonic() + (self.RETRY_S if y == year else self.REFRESH_S)
                     if y == year:
-                        log(f"F1 schedule {y} not reachable ({exc}) - retrying")
-                self._at[y] = time.monotonic()
+                        log(f"F1 schedule {y} not reachable ({exc}) - retrying in {self.RETRY_S} s")
             out += session_windows(self._index.get(y), self.sp)
         return out
 

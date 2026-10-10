@@ -73,6 +73,20 @@
   }
   function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 
+  // inside the /tv page (its iframe, same origin): the player panel lives in that page - hand it the remote's
+  // PLAYER state, and send the keys pressed on that page the remote's way (one path for every key)
+  const IN_TV = (() => {
+    try { return window.parent !== window && /^\/tv\/?$/.test(window.parent.location.pathname); } catch (e) { return false; }
+  })();
+  function toTvPage(ui) {
+    if (IN_TV) window.parent.postMessage({ type: "f1-player", player_menu: !!ui.player_menu, player_cmd: ui.player_cmd || null }, location.origin);
+  }
+  window.addEventListener("message", (e) => {
+    if (!IN_TV || e.source !== window.parent || e.origin !== location.origin) return;
+    const d = e.data || {};
+    if (d.type === "f1-key" && typeof d.key === "string" && /^KEY_[A-Z0-9_]{1,28}$/.test(d.key)) send({ type: "key", key: d.key });
+  });
+
   function handle(m) {
     switch (m.type) {
       case "hello":
@@ -138,7 +152,7 @@
       case "ui": {
         const prevNotice = S.ui.video_notice;
         const prevToast = (S.ui.toast || {}).n;
-        S.ui = m; renderUI(); renderSync();
+        S.ui = m; renderUI(); renderSync(); toTvPage(m);
         if (m.toast && m.toast.text && prevToast !== undefined && m.toast.n !== prevToast) showToast(m.toast.text, 4000);
         window.VoyoPlayer && VoyoPlayer.setUI(m);
         if (m.video_notice && m.video_notice !== prevNotice && m.tv_mode !== "FULL_DASHBOARD") showToast("VIDEO: " + m.video_notice, 6000);
@@ -165,7 +179,7 @@
     s: "KEY_S", S: "KEY_S", r: "KEY_R", R: "KEY_R", d: "KEY_D", D: "KEY_D",
     y: "KEY_Y", Y: "KEY_Y", l: "KEY_L", L: "KEY_L", c: "KEY_C", C: "KEY_C", x: "KEY_X", X: "KEY_X", k: "KEY_K", K: "KEY_K",
     o: "KEY_O", O: "KEY_O", n: "KEY_N", N: "KEY_N", g: "KEY_G", G: "KEY_G", w: "KEY_W", W: "KEY_W",
-    e: "KEY_E", E: "KEY_E", u: "KEY_U", U: "KEY_U",
+    e: "KEY_E", E: "KEY_E", u: "KEY_U", U: "KEY_U", b: "KEY_B", B: "KEY_B",
     "+": "KEY_KPPLUS", "=": "KEY_EQUAL", "-": "KEY_MINUS", "_": "KEY_MINUS",
   };
   document.addEventListener("keydown", (e) => {
@@ -1168,13 +1182,14 @@
       PITLANE_DEBUG: "Show pit lane reconstruction debug",
       CYCLE_MODE: "Mode: AUTO → LIVE → VOD", SET_MODE: "Mode", MODE_AUTO: "Mode AUTO", MODE_LIVE: "Mode LIVE",
       MODE_VOD: "Mode VOD", WEATHER_REPORT: "Weather report now", TRACK_REPORT: "Track map wrong (press twice)", SIM_EVENT: "TEST: simulated race event",
+      PLAYER_MENU: "/tv player: LIVE / REPLAYS panel",
     };
     const kb = { KEY_UP: "↑", KEY_DOWN: "↓", KEY_LEFT: "←", KEY_RIGHT: "→", KEY_ENTER: "Enter", KEY_ESC: "Esc", KEY_I: "I",
       KEY_SPACE: "Space", KEY_H: "H", KEY_1: "1", KEY_2: "2", KEY_3: "3", KEY_4: "4", KEY_5: "5", KEY_BACK: "Backspace",
       KEY_P: "P", KEY_V: "V", KEY_M: "M", KEY_F: "F", KEY_A: "A", KEY_T: "T",
       KEY_S: "S", KEY_R: "R", KEY_D: "D", KEY_EQUAL: "+", KEY_MINUS: "−",
       KEY_Y: "Y", KEY_L: "L", KEY_C: "C", KEY_X: "X", KEY_K: "K", KEY_O: "O", KEY_N: "N", KEY_G: "G", KEY_E: "E", KEY_U: "U",
-      KEY_W: "W" };
+      KEY_W: "W", KEY_B: "B" };
     const rows = [];
     for (const [k, cmd] of Object.entries(S.keymap)) {
       if (!kb[k]) continue;

@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 from urllib.parse import quote, urlparse
 from typing import Any, Optional
 
@@ -33,6 +34,7 @@ from .sync import parse_voyo_sample
 from .track import TrackProvider
 from .video import VideoMonitor
 from .voyo_recording import CAPTURE_NAME as VOYO_CAPTURE_NAME, VoyoStreamRecorder, load_package, recalibrate
+from . import replays
 from . import activity as activity_mod
 from . import recordings_admin as admin
 from .voyo_account import VoyoAccount
@@ -408,8 +410,10 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             # for server/update-f1dash.sh on this machine: is a recording running (do not restart now)?
             with contextlib.suppress(Exception):
                 rs = admin.current_state(stream_rec, player_rec, player_rec is not None, player_hb["data"], _hb_age())
+                open_pkg = any(r is not None and r.cur is not None for r in (stream_rec, player_rec))
                 out["recorder"] = {"state": rs.get("state"),
-                                   "busy": rs.get("state") in ("RECORDING", "OPENING", "WATCHING (PC)")}
+                                   "busy": rs.get("state") in ("RECORDING", "OPENING", "WATCHING (PC)")
+                                   or (rs.get("state") == "DISK FULL" and open_pkg)}   # a session still open
         return JSONResponse(out)
 
     async def api_mode(request: Request) -> Response:
@@ -1015,6 +1019,48 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                 return Response(text, media_type="application/vnd.apple.mpegurl", headers=nohdr)
             return FileResponse(path, media_type="application/vnd.apple.mpegurl", headers=nohdr)
         return FileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "private, max-age=60"})
+
+    # ---------------------------------------------------------------- /tv REPLAYS: recordings played from the disk
+    def _replay_pkg(iid: str) -> Optional[Path]:
+        return stream_rec.package_dir(iid) if replays.ID_RE.match(iid or "") else None
+
+    def _replay_seconds() -> float:
+        return float(rec_cfg.get("capture_segment_seconds", 60) or 60)
+
+    async def api_tv_replays(request: Request) -> Response:
+        """The recordings with video the /tv player can play (approved /tv page only)."""
+        if tv_auth(request) is None:
+            return _tv_denied()
+        items = await run_in_threadpool(
+            replays.listing, stream_rec.list(also=(player_rec,)), _replay_pkg, _replay_seconds())
+        return JSONResponse({"ok": True, "recordings": items, "recorder": {"ok": stream_rec.ok}},
+                            headers={"Cache-Control": "no-store"})
+
+    async def tv_replay_file(request: Request) -> Response:
+        """GET /tv/replay/<id>/index.m3u8 (the recording as one HLS playlist) or /tv/replay/<id>/<segment>.mp4
+        (byte ranges of a listed segment, read as it is) - an approved /tv page only."""
+        if tv_auth(request, allow_query=True) is None:
+            return _tv_denied()
+        iid, name = request.path_params["iid"], request.path_params["name"]
+        pkg = _replay_pkg(iid)
+        if pkg is None:
+            return JSONResponse({"ok": False, "error": "no such recording"}, status_code=404)
+        segs = await run_in_threadpool(replays.segments, pkg, _replay_seconds())
+        if name == "index.m3u8":
+            if not segs:
+                return JSONResponse({"ok": False, "error": "this recording has no video"}, status_code=404)
+            live = any(r is not None and r.cur is not None and r.cur.get("stream_instance_id") == iid
+                       for r in (stream_rec, player_rec))
+            q = request.query_params.get("p")
+            query = "?p=" + quote(q, safe="") if q and not request.headers.get("x-f1-tv-page") else ""
+            return Response(replays.playlist(segs, complete=not live, query=query),
+                            media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-cache, no-store"})
+        if not replays.SEGMENT_RE.match(name) or name not in {s["name"] for s in segs}:
+            return JSONResponse({"ok": False, "error": "no such file"}, status_code=404)
+        path = (pkg / "capture" / name).resolve()
+        if path.parent != (pkg / "capture").resolve() or not path.is_file():
+            return JSONResponse({"ok": False, "error": "no such file"}, status_code=404)
+        return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "private, max-age=3600"})
 
     async def api_tv_status(request: Request) -> Response:
         if tv_auth(request) is None:
@@ -1645,7 +1691,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/tv", tv_page),
         Route("/tv/", tv_page),
         Route("/tv/live/{name}", tv_live_file),
+        Route("/tv/replay/{iid}/{name}", tv_replay_file),
         Route("/api/tv/status", api_tv_status),
+        Route("/api/tv/replays", api_tv_replays),
         Route("/api/tv/auth/request", api_tv_auth_request, methods=["POST"]),
         Route("/api/tv/auth/status", api_tv_auth_status, methods=["POST"]),
         Route("/api/tv/logout", api_tv_logout, methods=["POST"]),

@@ -168,6 +168,10 @@ def current_state(rec: VoyoStreamRecorder, player_rec: Optional[VoyoStreamRecord
         if "no disk mounted" in err or "is missing" in err or "does not exist" in err:
             return {"state": "WAITING FOR DISK", "level": "warn", "detail": err}
         return {"state": "DISK ERROR", "level": "bad", "detail": err}
+    if st.get("space_ok") is False:
+        return {"state": "DISK FULL", "level": "bad",
+                "detail": f"less than min_free_bytes free on {st.get('path')} - no video is recorded until there is "
+                          "room again (delete old recordings on /disk)"}
     if fresh(player_rec):
         c = player_rec.cur
         sess = c.get("session") or {}

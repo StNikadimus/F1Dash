@@ -46,6 +46,8 @@ COMMANDS = {
     "SIM_EVENT",
     # LIVE / VOD mode selector (server/mode.py): AUTO detection or a manual override
     "SET_MODE", "CYCLE_MODE", "MODE_AUTO", "MODE_LIVE", "MODE_VOD",
+    # the /tv player's panel (LIVE / REPLAYS, transport, volume): open / close it and drive it
+    "PLAYER_MENU", "PLAYER_NAV", "PLAYER_OK", "PLAYER_BACK", "PLAYER_PLAY_PAUSE", "PLAYER_SEEK",
 }
 MODE_COMMANDS = {"SET_MODE": None, "CYCLE_MODE": "NEXT", "MODE_AUTO": "AUTO", "MODE_LIVE": "LIVE",
                  "MODE_VOD": "VOD"}
@@ -59,6 +61,15 @@ EVENT_ID_RE = re.compile(r"^[a-z][0-9]{9,15}$")
 EVENT_MENU_KEYS = {"KEY_UP": "SYNC_EVENT_PREV", "KEY_DOWN": "SYNC_EVENT_NEXT", "KEY_OK": "SYNC_EVENT_SET",
                    "KEY_ENTER": "SYNC_EVENT_SET", "KEY_BACK": "SYNC_EVENT_MENU:close",
                    "KEY_ESC": "SYNC_EVENT_MENU:close"}
+# while the /tv player's panel is open, the navigation keys drive it (any key layer) - BACK closes it
+PLAYER_MENU_KEYS = {"KEY_UP": "PLAYER_NAV:up", "KEY_DOWN": "PLAYER_NAV:down", "KEY_LEFT": "PLAYER_NAV:left",
+                    "KEY_RIGHT": "PLAYER_NAV:right", "KEY_OK": "PLAYER_OK", "KEY_ENTER": "PLAYER_OK",
+                    "KEY_SELECT": "PLAYER_OK", "KEY_BACK": "PLAYER_BACK", "KEY_ESC": "PLAYER_BACK",
+                    "KEY_EXIT": "PLAYER_BACK", "KEY_PLAYPAUSE": "PLAYER_PLAY_PAUSE", "KEY_PLAY": "PLAYER_PLAY_PAUSE",
+                    "KEY_PAUSE": "PLAYER_PLAY_PAUSE", "KEY_P": "PLAYER_PLAY_PAUSE", "KEY_SPACE": "PLAYER_PLAY_PAUSE",
+                    "KEY_B": "PLAYER_MENU:close", "KEY_LIST": "PLAYER_MENU:close", "KEY_EPG": "PLAYER_MENU:close",
+                    "KEY_MENU": "PLAYER_MENU:close"}
+PLAYER_NAV_ARGS = {"up", "down", "left", "right"}
 VIDEO_ACTIONS = {"VIDEO_PLAY_PAUSE": "play_pause", "VIDEO_MUTE": "mute", "VIDEO_VOLUME": "volume",
                  "VIDEO_SEEK": "seek", "VIDEO_FULLSCREEN": "fullscreen"}
 KEY_RE = re.compile(r"^[A-Z0-9_]{1,32}$")
@@ -83,6 +94,8 @@ class UIState:
     sync_events: bool = False                # its EVENT SYNC sub-menu is open (UP/DOWN/OK/BACK drive it)
     pit_debug: bool = False                  # pit-lane reconstruction debug overlay on the map
     toast: dict = field(default_factory=lambda: {"n": 0, "text": None})
+    player_menu: bool = False                # the /tv player's panel is open (the arrows / OK / BACK drive it)
+    player_cmd: dict = field(default_factory=lambda: {"n": 0, "action": None, "arg": None})
     seq: int = 0
 
 
@@ -111,6 +124,8 @@ class RemoteController:
             self.keymap.setdefault("KEY_E", "CYCLE_MODE")         # mode selector AUTO -> LIVE -> VOD
             self.keymap.setdefault("KEY_U", "WEATHER_REPORT")     # weather report popup now
             self.keymap.setdefault("KEY_MENU", "CYCLE_MODE")      # (WD TV remote MENU)
+            for k in ("KEY_B", "KEY_LIST", "KEY_EPG"):            # the /tv player: LIVE / REPLAYS panel
+                self.keymap.setdefault(k, "PLAYER_MENU")
         # active while a TV mode with video is shown (RACE_VIEW / VIDEO_FOCUS)
         self.keymap_video = _parse_keymap(cfg.get("keymap_video"), "keymap_video")
         # active while the video player has the remote focus
@@ -185,6 +200,8 @@ class RemoteController:
         mapped, layer = self._lookup(key)
         if self.ui.sync_menu and self.ui.sync_events and key in EVENT_MENU_KEYS:
             mapped, layer = EVENT_MENU_KEYS[key], "event-sync"
+        if self.ui.player_menu and key in PLAYER_MENU_KEYS:
+            mapped, layer = PLAYER_MENU_KEYS[key], "player"
         if not mapped:
             log.info("Unmapped remote key %s from %s", key, origin)
             return False
@@ -251,6 +268,9 @@ class RemoteController:
 
     def _video_cmd(self, action: str, arg: Optional[str]) -> None:
         self.ui.video_cmd = {"n": self.ui.video_cmd["n"] + 1, "action": action, "arg": arg}
+
+    def _player_cmd(self, action: str, arg: Optional[str] = None) -> None:
+        self.ui.player_cmd = {"n": self.ui.player_cmd["n"] + 1, "action": action, "arg": arg}
 
     def _apply(self, name: str, arg: Optional[str]) -> bool:
         before = asdict(self.ui)
@@ -346,6 +366,7 @@ class RemoteController:
                 self.ui.sync_events = False
             if self.ui.sync_menu:
                 self.ui.help = False
+                self.ui.player_menu = False
                 if self.ui.tv_mode == "VIDEO_FOCUS":        # the video window would cover the menu
                     self.ui.tv_mode = "RACE_VIEW"
                     self.ui.video_focus = False
@@ -361,6 +382,30 @@ class RemoteController:
                 return False
             log.info("Sync: %s", text)
             self._toast(text)
+        # ---- the /tv player (its page carries the commands out: server/tv/tv.js) ------------------
+        elif name == "PLAYER_MENU":
+            self.ui.player_menu = not self.ui.player_menu if arg not in ("open", "close") else arg == "open"
+            if self.ui.player_menu:
+                self.ui.help = False
+                self.ui.sync_menu = self.ui.sync_events = False
+            self._player_cmd("menu", "open" if self.ui.player_menu else "close")
+        elif name == "PLAYER_NAV":
+            if arg not in PLAYER_NAV_ARGS or not self.ui.player_menu:
+                return False
+            self._player_cmd("nav", arg)
+        elif name == "PLAYER_OK":
+            if not self.ui.player_menu:
+                return False
+            self._player_cmd("ok")
+        elif name == "PLAYER_BACK":
+            self.ui.player_menu = False
+            self._player_cmd("menu", "close")
+        elif name == "PLAYER_PLAY_PAUSE":
+            self._player_cmd("play_pause")
+        elif name == "PLAYER_SEEK":
+            if arg is None or not SEEK_RE.match(arg):
+                return False
+            self._player_cmd("seek", arg)
         elif name in VIDEO_ACTIONS:
             if not video_shown:
                 return False

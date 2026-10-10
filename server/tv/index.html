@@ -31,22 +31,35 @@
     <div class="oa-sub" id="oa-sub">connecting to the server…</div>
   </div>
   <button id="unmute" hidden>🔇 CLICK FOR SOUND</button>
+  <!-- which source plays (LIVE / REPLAY) + a replay's position -->
+  <div id="posd" hidden><span id="po-src" class="lv">● LIVE</span><span id="po-time"></span>
+    <div id="po-prog" hidden><i id="po-bar"></i></div></div>
 </div>
 
-<!-- controls (show on mouse move / key, hide after a few seconds) -->
+<!-- the player panel: LIVE or a recording from the disk, transport, volume - arrows / OK / BACK (remote or keys) -->
+<div id="pmenu" hidden>
+  <div class="pm-head"><span class="pm-t">PLAYER</span><span id="pm-src" class="lv">LIVE</span>
+    <span class="pm-k">▲▼ choose · ◀▶ seek / volume · OK select · BACK close</span></div>
+  <div id="pm-err"></div>
+  <div id="pm-list"></div>
+</div>
+
+<!-- controls (show on mouse move / key, hide after a few seconds): one panel, three rows -
+     1 the layout, 2 the actions, 3 the stream status (a label, not a button) -->
 <div id="ctl">
   <div class="ctl-group" id="layouts">
     <button data-l="RACE_VIEW" class="sel">RACE VIEW <kbd>1</kbd></button>
     <button data-l="VIDEO_FOCUS">VIDEO <kbd>2</kbd></button>
     <button data-l="FULL_DASHBOARD">DASHBOARD <kbd>3</kbd></button>
   </div>
-  <div class="ctl-group">
+  <div class="ctl-group" id="actions">
+    <button id="b-player">LIVE / REPLAYS <kbd>B</kbd></button>
     <button id="b-sound">SOUND <kbd>M</kbd></button>
     <button id="b-full">FULLSCREEN <kbd>F</kbd></button>
     <button id="b-tok">LOG OUT</button>
     <a href="/disk" target="_blank" class="btn">RECORDER</a>
   </div>
-  <div class="ctl-status" id="ctl-status">…</div>
+  <div class="ctl-status" id="ctl-status" role="status" aria-live="polite">…</div>
 </div>
 
 <script src="/tv-static/vendor/hls.light.min.js"></script>

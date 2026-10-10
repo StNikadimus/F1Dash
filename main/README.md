@@ -546,6 +546,8 @@ interactive): micro 150 ms, normal 300 ms, events 600-900 ms, a flag takeover up
 Everything goes through one abstraction: *input → key name → whitelisted
 command → shared UI state*, so keyboard, IR bridges, HTTP and WebSocket clients
 all behave the same and all screens stay in sync. Mapping: `[remote.keymap]`.
+**The complete list** of every key, by context (dashboard, video layers, the `/tv` page and its
+LIVE / REPLAYS panel, IR remote, `/remote`), with duplicates and conflicts: [`keybinds.md`](keybinds.md).
 
 | Key (keyboard / remote) | Command |
 |---|---|
@@ -566,7 +568,12 @@ all behave the same and all screens stay in sync. Mapping: `[remote.keymap]`.
 | `R` / GREEN | SYNC_RESYNC – force resync |
 | `D` / YELLOW | SYNC menu (same as `Y`) |
 | 1 2 3 4 5 | Overview / Telemetry / Strategy / Race Control / Weather |
-| H | help overlay |
+| PageUp / PageDown · PREVIOUS / NEXT | PREVIOUS_DRIVER / NEXT_DRIVER |
+| `V` · `M` · `F` | VIDEO_FOCUS · VIDEO_MUTE · VIDEO_FULLSCREEN (the dashboard's own video, §9a) |
+| `E` / MENU | CYCLE_MODE – data mode AUTO → LIVE → VOD |
+| `B` / LIST / EPG | PLAYER_MENU – the `/tv` player's LIVE / REPLAYS panel (`server/README.md`) |
+| `W` · `U` · `G` | track map wrong (press twice) · weather report now · pit-lane debug |
+| H / `?` / HELP | help overlay |
 | mouse click on a row | SELECT_DRIVER |
 
 ### Phone remote (`/remote`)
