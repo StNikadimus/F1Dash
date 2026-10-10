@@ -144,6 +144,10 @@ class OpenF1Client:
     async def race_control(self, session: dict) -> list[dict]:
         return await self._session_data("race_control", session)
 
+    async def team_radio(self, session: dict) -> list[dict]:
+        """Team radio recordings (a selection - OpenF1 documents limited coverage)."""
+        return await self._session_data("team_radio", session)
+
 
 # ---------------------------------------------------------------------------
 # Reference events on F1's clock

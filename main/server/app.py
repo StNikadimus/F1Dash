@@ -39,6 +39,7 @@ from .voyo_account import VoyoAccount
 from . import security as secmod
 from .security import RateLimiter, Security
 from .public_gateway import PublicGateway, config_problem as public_config_problem
+from . import team_radio
 
 log = logging.getLogger("app")
 
@@ -69,7 +70,9 @@ def build_source(cfg: dict[str, Any], tracks: TrackProvider,
         from .sources.vod import VodSource
         vod = cfg.get("vod") or {}
         client = OpenF1Client(DATA_DIR / "openf1_cache", str(vod.get("openf1_url") or "https://api.openf1.org/v1"))
-        return VodSource(vod, client, DATA_DIR / "archive_cache"), False
+        src = VodSource(vod, client, DATA_DIR / "archive_cache")
+        src.radio_fallback = bool((cfg.get("team_radio") or {}).get("openf1_fallback", True))
+        return src, False
     from .sources.f1_live import F1LiveSource
     recorder = Recorder(DATA_DIR / "recordings") if cfg["live"].get("record") else None
     src = F1LiveSource(cfg["live"], recorder, auth=auth if auth is not None else make_auth(cfg))
@@ -80,7 +83,8 @@ def build_source(cfg: dict[str, Any], tracks: TrackProvider,
 # the auth pages themselves, the phone remote (own token), the PC launcher's machine endpoints (token /
 # local only), static code (no data) - everything else needs a session
 GATE_OPEN = ("/tv", "/api/tv/", "/disk", "/api/disk/", "/disk-static/", "/tv-static/", "/static/", "/remote",
-             "/api/remote/", "/api/sync/voyo", "/api/voyo/player/", "/api/health", "/f1tv/", "/ws")
+             "/api/remote/", "/api/sync/voyo", "/api/voyo/player/", "/api/health", "/f1tv/", "/ws",
+             "/api/radio/clips", "/api/radio/transcript")
 
 
 class OriginGuard:
@@ -280,6 +284,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             "pulse_period_ms": int(dash.get("pulse_period_ms", 2400)),
             "reorder_ms": int(dash.get("reorder_ms", 450)),
             "remote_enabled": remote.enabled,
+            "team_radio": bool((cfg.get("team_radio") or {}).get("enabled", True)),
             "sync_enabled": bool((cfg.get("sync") or {}).get("enabled", True)),
         },
         "keymap": remote.keymap,
@@ -590,6 +595,80 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                     "resync": None, "select_session": "session_key", "clock": "clock", "marker": "marker",
                     "stream_start": None, "stream_reset": None,
                     "event_set": "id", "event_remove": "id", "event_clear": None}
+
+    # ---------------------------------------------------------------- TEAM RADIO (server/team_radio.py)
+    radio_cfg = cfg.get("team_radio") or {}
+    radio_on = bool(radio_cfg.get("enabled", True))
+    radio_audio = team_radio.RadioAudio(str(radio_cfg.get("archive_base") or team_radio.DEFAULT_ARCHIVE),
+                                        cache_mb=float(radio_cfg.get("audio_cache_mb", 12)),
+                                        max_clip_mb=float(radio_cfg.get("max_clip_mb", 8)),
+                                        timeout_s=float(radio_cfg.get("fetch_timeout_s", 10)))
+    team_radio.transcripts = (team_radio.TranscriptStore(DATA_DIR / "radio_transcripts.json")
+                              if radio_on and radio_cfg.get("transcripts", True) else None)
+
+    def _radio_clip(cid: str) -> tuple[Optional[dict], Optional[str]]:
+        """A clip of the session shown NOW (state) - the only thing the audio endpoint plays."""
+        st = hub.state or {}
+        sp = team_radio.valid_session_path((st.get("session") or {}).get("path"))
+        clip = next((c for c in st.get("radio") or [] if isinstance(c, dict) and c.get("id") == cid), None)
+        return clip, sp
+
+    async def api_radio_audio(request: Request) -> Response:
+        """The MP3 of one clip, fetched from the F1 archive on request (never an URL from the browser)."""
+        cid = request.path_params["cid"]
+        if not radio_on or not team_radio.CLIP_ID_RE.match(cid):
+            return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+        clip, sp = _radio_clip(cid)
+        file = (clip or {}).get("file")
+        if clip is None or not clip.get("playable") or sp is None or not isinstance(file, str) \
+                or not team_radio.CLIP_PATH_RE.match("TeamRadio/" + file):
+            return JSONResponse({"ok": False, "error": "this recording is not part of the session shown now"},
+                                status_code=404, headers={"Cache-Control": "no-store"})
+        try:
+            data = await radio_audio.get(radio_audio.url(sp, file))
+        except team_radio.RadioAudioError as exc:
+            log.info("Team radio %s: %s", cid, exc.message)
+            return JSONResponse({"ok": False, "error": exc.message}, status_code=exc.status,
+                                headers={"Cache-Control": "no-store"})
+        headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600"}
+        try:
+            rng = team_radio.byte_range(request.headers.get("range"), len(data))
+        except ValueError:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{len(data)}"})
+        if rng is None:
+            return Response(data, media_type="audio/mpeg", headers=headers)
+        a, b = rng
+        return Response(data[a:b + 1], status_code=206, media_type="audio/mpeg",
+                        headers={**headers, "Content-Range": f"bytes {a}-{b}/{len(data)}"})
+
+    def _machine_ok(request: Request) -> bool:
+        """Tools on another computer (main/tools/transcribe_radio.py): the remote token; without one, only
+        this machine."""
+        return remote.check_token(_token(request)) if remote.token else _ip(request) in LOOPBACK
+
+    async def api_radio_clips(request: Request) -> Response:
+        if not radio_on or team_radio.transcripts is None:
+            return JSONResponse({"ok": False, "error": "team radio transcripts are off"}, status_code=404)
+        if not _machine_ok(request):
+            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        clips = [{"id": c.get("id"), "driver": c.get("driver"), "utc": c.get("utc"),
+                  "has_transcript": bool(c.get("transcript"))}
+                 for c in (hub.state or {}).get("radio") or [] if isinstance(c, dict) and c.get("playable")]
+        return JSONResponse({"ok": True, "clips": clips}, headers={"Cache-Control": "no-store"})
+
+    async def api_radio_transcript(request: Request) -> Response:
+        """An AI transcript of one clip from the optional tool - stored as AI text, shown as such."""
+        if not radio_on or team_radio.transcripts is None:
+            return JSONResponse({"ok": False, "error": "team radio transcripts are off"}, status_code=404)
+        if not _machine_ok(request):
+            return JSONResponse({"ok": False, "error": "bad token"}, status_code=401)
+        body = await _json(request, limit=8192)
+        try:
+            rec = team_radio.transcripts.put(str(body.get("id") or ""), body.get("text"), body.get("model"),
+                                            body.get("lang"), body.get("confidence"))
+        except (ValueError, TypeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "transcript": rec})
 
     async def api_media_catalog(request: Request) -> Response:
         """SELECT SESSION: Grands Prix + sessions of a season (public data, read-only)."""
@@ -1583,6 +1662,9 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/api/voyo/recordings/{iid}/files/{name:path}", api_voyo_recording_file),
         Route("/api/sync/session", api_sync_session, methods=["POST"]),
         Route("/api/media/catalog", api_media_catalog),
+        Route("/api/radio/audio/{cid}", api_radio_audio),
+        Route("/api/radio/clips", api_radio_clips),
+        Route("/api/radio/transcript", api_radio_transcript, methods=["POST"]),
         Route("/api/sync/{action}", api_sync_action, methods=["POST"]),
         WebSocketRoute("/ws", ws_endpoint),
         Mount("/static", StaticFiles(directory=str(DASHBOARD_DIR)), name="static"),

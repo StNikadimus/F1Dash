@@ -207,13 +207,6 @@ class RaceControlMessage:
 
 
 @dataclass(slots=True)
-class TeamRadioEntry:
-    utc: Optional[str]
-    driver: Optional[str]
-    url: Optional[str]
-
-
-@dataclass(slots=True)
 class Availability:
     positions: bool = False                # Position.z data received this session
     car_data: bool = False                 # CarData.z data received this session

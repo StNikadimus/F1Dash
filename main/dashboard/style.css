@@ -173,6 +173,10 @@ html, body {
 #detail-panel { flex: 1 1 auto; min-height: 0; }
 #board { flex: 1 1 auto; min-height: 0; }
 #rc-panel { flex: 0 0 190px; }
+#rc-row { display: flex; gap: 10px; flex: 0 0 214px; min-height: 0; }
+#rc-row > #rc-panel { flex: 1 1 0; min-width: 0; }
+#rc-row > #radio-panel { flex: 1 1 0; min-width: 0; }
+#stage.no-radio #radio-panel { display: none; }
 
 #stage.view-telemetry #map-panel { flex-basis: 400px; }
 #stage.view-strategy #map-panel, #stage.view-strategy #detail-panel,
@@ -828,3 +832,48 @@ div.sm-keys { margin-top: 8px; }
 .ld-chip.ld-bad { color: var(--orange); }
 .ld-chip.ld-bad .sync-dot { background: var(--red); }
 #fb-sync .ld-chip { font-size: 18px; }
+
+/* ------------------------------------------------------------------ TEAM RADIO (components/team_radio.js) */
+#radio-panel { display: flex; flex-direction: column; }
+#radio-panel .panel-title { gap: 10px; }
+.rd-badge { margin-left: auto; font-size: 11px; letter-spacing: .1em; padding: 1px 6px; border-radius: 3px; border: 1px solid var(--line-2); color: var(--text-3); }
+.rd-badge:empty { display: none; }
+.rd-badge.live { color: var(--red); border-color: rgba(255,45,61,.55); }
+.rd-badge.arch { color: var(--text-2); }
+.rd-badge.test { color: var(--orange); border-color: rgba(255,122,26,.5); }
+.rd-filters { display: flex; gap: 6px; padding: 5px 10px; border-bottom: 1px solid var(--line); }
+.rd-filters select, .rd-filters input { min-width: 0; flex: 1 1 0; background: var(--panel-2); color: var(--text); border: 1px solid var(--line-2);
+  border-radius: 4px; font: 700 13px var(--font); letter-spacing: .04em; padding: 3px 6px; }
+.rd-filters input::placeholder { color: var(--text-3); }
+#radio-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1 1 auto; min-height: 0; scrollbar-width: thin; }
+.rd-item { display: grid; grid-template-columns: 4px 72px 86px minmax(0, 1fr) 24px auto; align-items: center; column-gap: 8px;
+  padding: 3px 10px 3px 0; font-size: 15px; border-bottom: 1px solid rgba(31,42,54,.6); cursor: pointer; }
+.rd-item:hover { background: rgba(255,255,255,.03); }
+.rd-item.sel { background: rgba(61,139,255,.13); }
+.rd-item.na { cursor: default; opacity: .62; }
+.rd-bar { align-self: stretch; border-radius: 0 2px 2px 0; }
+.rd-t { font-family: var(--mono); color: var(--text-2); font-size: 14px; }
+.rd-drv b { font-weight: 800; } .rd-drv small { color: var(--text-3); font-weight: 700; }
+.rd-team { color: var(--text-2); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rd-st { text-align: center; color: var(--text-2); font-weight: 800; }
+.rd-item.playing .rd-st { color: var(--green); }
+.rd-item.err .rd-st { color: var(--red); }
+.rd-kind { font-size: 10px; font-weight: 800; letter-spacing: .08em; padding: 1px 5px; border-radius: 3px; border: 1px solid var(--line-2); white-space: nowrap; }
+.rd-kind.live { color: var(--red); border-color: rgba(255,45,61,.5); }
+.rd-kind.arch { color: var(--text-3); }
+.rd-tx, .rd-err { grid-column: 2 / -1; font-size: 13px; line-height: 1.3; color: var(--text-2); padding: 1px 0 2px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.rd-tx em { font-style: normal; font-size: 10px; font-weight: 800; letter-spacing: .08em; color: var(--purple); border: 1px solid rgba(178,92,255,.5); border-radius: 3px; padding: 0 4px; }
+.rd-tx small { color: var(--text-3); }
+.rd-err { color: var(--red); }
+.rd-empty { padding: 10px 14px; color: var(--text-3); font-size: 14px; line-height: 1.4; }
+.rd-new { position: absolute; right: 14px; top: 76px; z-index: 2; font: 800 12px var(--font); letter-spacing: .08em; color: #111;
+  background: var(--amber); border: 0; border-radius: 10px; padding: 2px 10px; cursor: pointer; }
+.rd-player { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 4px 10px; border-top: 1px solid var(--line); }
+.rd-play { width: 34px; height: 28px; border-radius: 4px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text); font-size: 14px; cursor: pointer; }
+.rd-play:disabled { opacity: .4; cursor: default; }
+.rd-now { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+#radio-now { font-size: 13px; font-weight: 700; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#radio-seek { width: 100%; height: 12px; margin: 0; accent-color: var(--blue); }
+.rd-time { font-family: var(--mono); font-size: 13px; color: var(--text-3); }
+#stage.portrait #rc-row { flex-basis: 260px; }

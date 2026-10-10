@@ -24,6 +24,10 @@ DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 DEFAULTS: dict[str, Any] = {
     "security": {"tv_page_hours": 12, "disk_session_hours": 12, "reauth_minutes": 10, "tv_request_seconds": 120,
                  "login_max_failures": 5, "lockout_minutes": 5, "protect_dashboard": False},
+    # the TEAM RADIO panel (server/team_radio.py, main/README.md "Team radio")
+    "team_radio": {"enabled": True, "openf1_fallback": True, "audio_cache_mb": 12, "max_clip_mb": 8,
+                   "fetch_timeout_s": 10, "transcripts": True,
+                   "archive_base": "https://livetiming.formula1.com/static/"},
     # the public gateway for Tailscale Funnel (server/public_gateway.py): off unless configured
     "public": {"enabled": False, "hostname": "", "port": 8090},
     "server": {"host": "0.0.0.0", "port": 8080, "log_level": "INFO", "https_port": 0,

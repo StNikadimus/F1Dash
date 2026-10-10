@@ -192,6 +192,7 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual((r.status_code, r.headers["location"]), (303, "/tv?next=/"))
         self.assertEqual(tv.get("/api/track/layouts").status_code, 401)
         self.assertEqual(tv.get("/api/media/catalog?year=2026").status_code, 401)
+        self.assertEqual(tv.get("/api/radio/audio/0123456789abcdef").status_code, 401)   # team radio playback
 
     # 2 3 stale cookie, forged / reused challenge and page secret --------------------------------------
     def test_02_03_stale_cookie_forged_and_reused_secrets(self):
@@ -304,11 +305,13 @@ class GatewayTest(unittest.TestCase):
                 "/api/voyo/recordings", "/api/voyo/recordings/abcd1234", "/api/voyo/recordings/abcd1234/files/manifest.json",
                 "/api/health", "/api/diagnostics", "/api/state", "/api/sync", "/api/ui", "/api/mode", "/api/remote/info",
                 "/f1tv/login", "/f1tv/status", "/tv/", "/static/remote.html", "/static/index.html", "/tv-static/index.html",
-                "/tv-static/auth.html", "/tv-static/vendor/hls.js-LICENSE", "/api/remote/key", "/favicon.ico", "/robots.txt"]
+                "/tv-static/auth.html", "/tv-static/vendor/hls.js-LICENSE", "/api/remote/key", "/favicon.ico", "/robots.txt",
+                "/api/radio/clips", "/api/radio/audio/0123456789ABCDEF", "/api/radio/audio/../clips"]
         posts = ["/api/disk/auth/login", "/api/disk/auth/setup", "/api/disk/security/decide", "/api/disk/security/trust",
                  "/api/disk/settings", "/api/disk/voyo", "/api/mode", "/api/remote/key", "/api/remote/command", "/api/sync/voyo",
                  "/api/voyo/player/status", "/api/voyo/player/log", "/api/track/choice", "/api/sync/session", "/api/sync/clear",
-                 "/f1tv/callback", "/api/disk/auth/logout"]
+                 "/f1tv/callback", "/api/disk/auth/logout",
+                 "/api/radio/transcript", "/api/radio/audio/0123456789abcdef"]
         for c in (anon, admin_pub):
             for path in gets:
                 self.assertEqual(c.get(path).status_code, 404, path)
