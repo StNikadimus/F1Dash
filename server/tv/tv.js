@@ -192,16 +192,26 @@ function showOff(main, sub, cls) {
   $("oa-main").textContent = main; $("oa-main").className = "oa-main " + (cls || "");
   $("oa-sub").textContent = sub || "";
 }
-video.addEventListener("playing", () => { playing = true; streamErr = ""; $("offair").hidden = true; $("unmute").hidden = !video.muted; renderOsd(); });
+video.addEventListener("playing", () => { playing = true; streamErr = ""; $("offair").hidden = true; $("unmute").hidden = !video.muted;
+  if (P.loading) { P.loading = false; if (P.open) renderPanel(); }
+  renderOsd(); });
+video.addEventListener("loadeddata", () => { if (P.loading) { P.loading = false; if (P.open) renderPanel(); } });   // paused: loaded anyway
+video.addEventListener("error", () => {                  // Safari's native HLS (hls.js reports its own errors)
+  if (P.replay && !P.rhls && video.error) replayFailed(`the recording cannot be played (media error ${video.error.code})`);
+});
 for (const ev of ["waiting", "emptied", "error", "pause"]) video.addEventListener(ev, () => { playing = false; });
 
 /* ------------------------------------------------------------------ the player: LIVE / REPLAYS
    One <video>: the live stream (above) or a recording from the disk (/tv/replay/<id>/index.m3u8 - the
    recorded segments as they are, server/replays.py). The panel (LIVE, the recordings, transport, volume)
-   is opened and driven by the remote like everything else: keys -> server (remote.py, its PLAYER layer)
-   -> the dashboard in the iframe -> postMessage here. Keys pressed on this page go the same way. */
-const P = { replay: null, rhls: null, open: false, cursor: 0, recs: [], recsAt: 0, recsErr: "", lastCmd: null,
-  osdTimer: null, err: "", scrolled: -1, recovered: false };
+   is opened and driven
+   * on THIS page (its LIVE / REPLAYS button, B, arrows, OK, BACK, mouse / touch): here, no server round trip -
+     so it works wherever the page is approved, also through the public gateway, whose dashboard socket only
+     listens (server/app.py);
+   * by the remote (phone, IR): keys -> server (remote.py, its PLAYER layer) -> the dashboard in the iframe ->
+     postMessage here. */
+const P = { replay: null, rhls: null, open: false, cursor: 0, recs: [], recsAt: 0, recsErr: "", recsLoading: false,
+  hidden: null, lastCmd: null, srvMenu: false, osdTimer: null, err: "", loading: false, scrolled: -1, recovered: false };
 const pmenu = $("pmenu"), posd = $("posd");
 function hms(s) {
   if (!isFinite(s) || s < 0) return "--:--";
@@ -225,21 +235,35 @@ function rows() {                                   // what the panel shows, in 
   out.push({ kind: "volume", sel: true });
   out.push({ kind: "live", sel: true });
   out.push({ kind: "head" });
-  if (!P.recs.length) out.push({ kind: "empty" });
+  if (!P.recs.length) out.push({ kind: P.recsLoading ? "loading" : P.recsErr ? "error" : "empty" });
   for (const r of P.recs) out.push({ kind: "rec", sel: true, rec: r });
   return out;
 }
 async function loadRecs(force) {
-  if (!force && Date.now() - P.recsAt < 30000) return;
-  P.recsAt = Date.now();
+  if (P.recsLoading || (!force && Date.now() - P.recsAt < 30000)) return;
+  P.recsAt = Date.now(); P.recsLoading = true;
+  renderPanel();
   try {
     const r = await tvFetch("/api/tv/replays");
     if (r.status === 401) { ended(); return; }
-    const b = await r.json();
-    P.recs = Array.isArray(b.recordings) ? b.recordings : [];
-    P.recsErr = b.recorder && b.recorder.ok === false ? "the recording disk is not available" : "";
-  } catch (e) { P.recsErr = "recordings not reachable"; }
+    let b = null;
+    try { b = await r.json(); } catch (e) { /* not JSON: a proxy's error page */ }
+    if (!r.ok || !b || !Array.isArray(b.recordings)) {
+      P.recsErr = "the recordings could not be loaded" + (b && b.error ? ": " + b.error : ` (HTTP ${r.status})`);
+    } else {
+      P.recs = b.recordings; P.hidden = b.hidden || null;
+      P.recsErr = b.recorder && b.recorder.ok === false ? "the recording disk is not available" : "";
+    }
+  } catch (e) { P.recsErr = "the server could not be reached - the recordings could not be loaded"; }
+  P.recsLoading = false;
   renderPanel();
+}
+function emptyText() {                              // why the list is empty: what the disk has that cannot play
+  const h = P.hidden || {}, why = [];
+  if (h.no_video) why.push(`${h.no_video} without video (timing / sync data only)`);
+  if (h.unplayable) why.push(`${h.unplayable} with video files this player cannot read`);
+  if (h.deleted) why.push(`${h.deleted} whose video was deleted (retention)`);
+  return "No recordings with playable video on the disk" + (why.length ? ". On the disk: " + why.join(", ") + "." : " yet.");
 }
 function selRows() { return rows().map((r, i) => (r.sel ? i : -1)).filter((i) => i >= 0); }
 function moveCursor(step) {
@@ -282,8 +306,11 @@ function renderPanel() {
         `<span class="pt">LIVE</span><span class="pd">${on ? "on air" + (sess ? " · " + esc(sess) : "") : "no live stream now"}</span>` +
         `${act ? '<span class="pa">PLAYING</span>' : ""}</div>`;
     }
-    if (r.kind === "head") return `<div class="phd">REPLAYS · RECORDINGS ON THE DISK${P.recsErr ? " · " + esc(P.recsErr) : ""}</div>`;
-    if (r.kind === "empty") return `<div class="pe">No recordings with video yet.</div>`;
+    if (r.kind === "head") return `<div class="phd">REPLAYS · RECORDINGS ON THE DISK${P.recsLoading ? " · LOADING…" : ""}` +
+      `${P.recsErr && P.recs.length ? ` · <span class="pe-err">${esc(P.recsErr)}</span>` : ""}</div>`;
+    if (r.kind === "loading") return `<div class="pe">Loading the recordings…</div>`;
+    if (r.kind === "error") return `<div class="pe pe-err">${esc(P.recsErr)}</div>`;
+    if (r.kind === "empty") return `<div class="pe">${esc(emptyText())}</div>`;
     const x = r.rec, act = P.replay && P.replay.id === x.id ? " act" : "";
     return `<div class="pr rec${cur}${act}" data-i="${i}"><span class="pi">▶</span>` +
       `<span class="pt">${esc(recLabel(x))}</span><span class="pd">${esc(recWhen(x))}${x.duration_s ? " · " + esc(hms(x.duration_s)) : ""}</span>` +
@@ -293,7 +320,8 @@ function renderPanel() {
   $("pm-list").innerHTML = html;
   $("pm-src").textContent = P.replay ? "REPLAY · " + recLabel(P.replay) : "LIVE";
   $("pm-src").className = P.replay ? "rp" : "lv";
-  $("pm-err").textContent = P.err || "";
+  $("pm-err").textContent = P.err || (P.loading ? "loading the recording…" : "");
+  $("pm-err").className = P.err ? "" : "note";
   const c = $("pm-list").querySelector(".cur");
   if (c && P.scrolled !== P.cursor) { P.scrolled = P.cursor; c.scrollIntoView({ block: "nearest" }); }
   placePanel();
@@ -332,7 +360,7 @@ function playReplay(rec) {
   if (layout === "FULL_DASHBOARD") setLayout("RACE_VIEW");          // the video needs its window
   detach();                                                         // the live stream goes out
   stopReplay();
-  P.replay = rec; P.err = "";
+  P.replay = rec; P.err = ""; P.loading = true;
   $("offair").hidden = true;
   const url = `/tv/replay/${encodeURIComponent(rec.id)}/index.m3u8`;
   if (window.Hls && Hls.isSupported()) {
@@ -340,14 +368,16 @@ function playReplay(rec) {
       xhrSetup: (xhr) => { xhr.withCredentials = true; xhr.setRequestHeader("X-F1-TV-Page", PAGE || ""); } });
     P.rhls = h;
     h.on(Hls.Events.ERROR, (_e, d) => {
-      if (d.response && d.response.code === 401) { ended(); return; }
-      if (!d.fatal) return;
+      const code = d.response && d.response.code;
+      if (code === 401) { ended(); return; }
+      if (!d.fatal || P.rhls !== h) return;
       if (d.type === Hls.ErrorTypes.MEDIA_ERROR && !/codec|buffer(Add|Append)/i.test(d.details || "") && !P.recovered) {
         P.recovered = true; h.recoverMediaError(); return;
       }
-      P.err = /codec|buffer(Add|Append)/i.test(d.details || "") ? "this browser cannot decode the recording (H.264) - use Chrome, Edge, Firefox or Safari"
-        : `the recording cannot be played (${d.details || d.type})`;
-      renderPanel(); flashOsd();
+      replayFailed(code === 404 ? "this recording is no longer on the disk (or its video was removed)"
+        : /codec|buffer(Add|Append)/i.test(d.details || "") ? "this browser cannot decode the recording (H.264) - use Chrome, Edge, Firefox or Safari"
+        : d.type === Hls.ErrorTypes.NETWORK_ERROR ? `the recording could not be loaded (${d.details}${code ? ", HTTP " + code : ""})`
+        : `the recording cannot be played (${d.details || d.type})`);
     });
     h.loadSource(url);
     h.attachMedia(video);
@@ -361,8 +391,14 @@ function playReplay(rec) {
   cursorTo("transport");
   renderPanel(); flashOsd();
 }
+function replayFailed(msg) {                          // shown in the panel (opened for it) - choose another or LIVE
+  P.err = msg; P.loading = false;
+  if (P.rhls) { P.rhls.destroy(); P.rhls = null; }
+  setPanel(true); loadRecs(true);
+  renderPanel(); flashOsd();
+}
 function goLive() {
-  stopReplay(); P.err = "";
+  stopReplay(); P.err = ""; P.loading = false;
   if (layout === "FULL_DASHBOARD") setLayout("RACE_VIEW");
   cursorTo("live");
   renderPanel(); flashOsd();
@@ -391,11 +427,15 @@ function activate(r) {
   else if (r.kind === "live") goLive();
   else if (r.kind === "rec") playReplay(r.rec);
 }
-function playerCmd(c) {                                // one command of the remote's PLAYER layer
+function playerCmd(c) {                                // one command of the PLAYER layer (remote or this page)
   const a = c.action, rs = rows();
   if (a === "menu") {
+    const was = P.open;
     P.open = c.arg === "open";
-    if (P.open) { P.scrolled = -1; loadRecs(true); cursorTo(P.replay ? "transport" : "live"); }
+    if (P.open && !was) {
+      P.scrolled = -1; loadRecs(true); cursorTo(P.replay ? "transport" : "live");
+      try { pmenu.focus({ preventScroll: true }); } catch (e) { /* keys then still reach this page */ }
+    }
   } else if (a === "nav" && P.open) {
     const r = rs[P.cursor] || {};
     if (c.arg === "up") moveCursor(-1);
@@ -408,20 +448,35 @@ function playerCmd(c) {                                // one command of the rem
   else if (a === "seek") seekBy(parseInt(c.arg, 10) || 0);
   renderPanel();
 }
-// the dashboard in the iframe hands over the remote's player state (same origin, that frame only)
+function tellDash(msg) {
+  try { dash.contentWindow.postMessage(msg, location.origin); } catch (e) { /* not loaded yet */ }
+}
+// the panel opened / closed on THIS page - at once, here. The remote's panel state follows (so the phone can
+// drive it too); a socket that only listens (the public gateway) drops that, and the panel works anyway
+function setPanel(open) {
+  if (open === P.open) return;
+  playerCmd({ action: "menu", arg: open ? "open" : "close" });
+  if (open || P.srvMenu) tellDash({ type: "f1-cmd", command: "PLAYER_MENU", arg: open ? "open" : "close" });
+}
+// the dashboard in the iframe hands over the remote's player state (same origin, that frame only), and B
+// pressed inside the dashboard (it opens THIS page's panel)
 window.addEventListener("message", (e) => {
   if (e.origin !== location.origin || e.source !== dash.contentWindow || !PAGE) return;
   const d = e.data || {};
+  if (d.type === "f1-tv-key") { if (d.key === "KEY_B") setPanel(!P.open); return; }
   if (d.type !== "f1-player") return;
-  const c = d.player_cmd || {};
+  const c = d.player_cmd || {}, srv = !!d.player_menu;
   if (P.lastCmd === null) {                                        // never replay an old command after a (re)load
-    P.lastCmd = c.n || 0;
-    if (!!d.player_menu !== P.open) playerCmd({ action: "menu", arg: d.player_menu ? "open" : "close" });
+    P.lastCmd = c.n || 0; P.srvMenu = srv;
+    if (srv && !P.open) playerCmd({ action: "menu", arg: "open" });
     return;
   }
+  const changed = srv !== P.srvMenu;                               // the remote opened / closed it: follow that
+  P.srvMenu = srv;                                                 // (the page's own open / close stays as it is)
   if (c.n && c.n !== P.lastCmd) { P.lastCmd = c.n; playerCmd(c); }
-  else if (!!d.player_menu !== P.open) playerCmd({ action: "menu", arg: d.player_menu ? "open" : "close" });
+  else if (changed && srv !== P.open) playerCmd({ action: "menu", arg: srv ? "open" : "close" });
 });
+$("pm-close").addEventListener("click", () => setPanel(false));
 dash.addEventListener("load", () => { P.lastCmd = null; });       // a new dashboard connection: a new baseline
 $("pm-list").addEventListener("click", (e) => {
   const el = e.target.closest("[data-i]");
@@ -499,18 +554,25 @@ $("b-tok").addEventListener("click", async () => {
   await fetch("/api/tv/logout", { method: "POST", credentials: "same-origin", headers: { "X-F1-TV-Page": PAGE || "" } }).catch(() => {});
   ended();
 });
-// keys pressed on this page (not inside the dashboard): arrows / OK / BACK / B / P go the remote's way - the
-// dashboard's connection to the server, which decides (player panel open: the player; else the dashboard)
+// keys pressed on this page (not inside the dashboard): B opens / closes the player panel HERE; while it is open
+// the arrows / OK / BACK drive it here. Otherwise arrows / OK / BACK go the remote's way - the dashboard's
+// connection to the server, which decides (the dashboard; the remote's player panel when that is open)
 const FWD = { ArrowUp: "KEY_UP", ArrowDown: "KEY_DOWN", ArrowLeft: "KEY_LEFT", ArrowRight: "KEY_RIGHT", Enter: "KEY_ENTER",
-  Escape: "KEY_ESC", Backspace: "KEY_BACK", BrowserBack: "KEY_BACK", b: "KEY_B", B: "KEY_B", ContextMenu: "KEY_B" };
+  Escape: "KEY_ESC", Backspace: "KEY_BACK", BrowserBack: "KEY_BACK" };
+const PANEL_TOGGLE = new Set(["b", "B", "ContextMenu"]);
+const PANEL_KEYS = { ArrowUp: ["nav", "up"], ArrowDown: ["nav", "down"], ArrowLeft: ["nav", "left"], ArrowRight: ["nav", "right"],
+  Enter: ["ok"] };
+const PANEL_CLOSE = new Set(["Escape", "Backspace", "BrowserBack"]);
 // play / pause of THIS page's video stays here (the remote's Space would switch every screen's TV mode)
 const LOCAL_PLAY = new Set([" ", "p", "P", "MediaPlayPause"]);
-function sendKey(key) {
-  try { dash.contentWindow.postMessage({ type: "f1-key", key }, location.origin); } catch (e) { /* not loaded yet */ }
-}
+function sendKey(key) { tellDash({ type: "f1-key", key }); }
 document.addEventListener("keydown", (e) => {
   if (!PAGE || e.target.tagName === "INPUT") return;
-  if (FWD[e.key] && !e.altKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); sendKey(FWD[e.key]); return; }
+  const plain = !e.altKey && !e.ctrlKey && !e.metaKey;
+  if (plain && PANEL_TOGGLE.has(e.key)) { e.preventDefault(); setPanel(!P.open); return; }
+  if (plain && P.open && PANEL_KEYS[e.key]) { e.preventDefault(); const [a, arg] = PANEL_KEYS[e.key]; playerCmd({ action: a, arg }); return; }
+  if (plain && P.open && PANEL_CLOSE.has(e.key)) { e.preventDefault(); setPanel(false); return; }
+  if (FWD[e.key] && plain) { e.preventDefault(); sendKey(FWD[e.key]); return; }
   if (LOCAL_PLAY.has(e.key) && !e.altKey && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
     if (P.replay || loaded) { playPause(); if (P.open) renderPanel(); }
@@ -521,7 +583,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "m") toggleSound(); else if (k === "f") toggleFull(); else return;
   showCtl();
 });
-$("b-player").addEventListener("click", () => sendKey("KEY_B"));
+$("b-player").addEventListener("click", () => setPanel(!P.open));
 
 /* ------------------------------------------------------------------ start: only after THIS load was approved */
 function start() {

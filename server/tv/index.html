@@ -37,9 +37,10 @@
 </div>
 
 <!-- the player panel: LIVE or a recording from the disk, transport, volume - arrows / OK / BACK (remote or keys) -->
-<div id="pmenu" hidden>
+<div id="pmenu" hidden tabindex="-1">
   <div class="pm-head"><span class="pm-t">PLAYER</span><span id="pm-src" class="lv">LIVE</span>
-    <span class="pm-k">▲▼ choose · ◀▶ seek / volume · OK select · BACK close</span></div>
+    <span class="pm-k">▲▼ choose · ◀▶ seek / volume · OK select · BACK close</span>
+    <button id="pm-close" aria-label="Close the player panel">✕</button></div>
   <div id="pm-err"></div>
   <div id="pm-list"></div>
 </div>

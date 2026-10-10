@@ -375,11 +375,19 @@ slot**. You don't need a PC or a VOYO window.
   - the **recordings on the disk that have video**, newest first, with Grand Prix, session, date and
     time, length and status (COMPLETE / RECORDING NOW / INTERRUPTED). **OK** plays one from the start.
 
-  **▲ ▼** move, **BACK / Esc** closes the panel. While it is open, the arrows, OK and BACK drive the
-  player; once it is closed they drive the dashboard again. The video shows which source plays
-  (`● LIVE` or `▶ REPLAY · <GP> · <session>`); the replay keeps playing behind the closed panel. The
-  keys go the remote's usual way (key → server → screens), so the phone and a keyboard on the TV do
-  the same thing.
+  **▲ ▼** move, **BACK / Esc** (or ✕) closes the panel; the rows can also be clicked / tapped. While it is
+  open, the arrows, OK and BACK drive the player; once it is closed they drive the dashboard again. The
+  video shows which source plays (`● LIVE` or `▶ REPLAY · <GP> · <session>`); the replay keeps playing
+  behind the closed panel. The `/tv` page opens and drives the panel itself, so it works the same through
+  Tailscale Funnel (whose dashboard connection only listens); the trusted phone's LIVE / REPLAYS and
+  arrows drive the same panel through the server.
+
+  Only recordings whose video the player can actually read are listed. When there is none, the panel
+  says what the disk has instead: recordings without video (timing / sync data only), with video it
+  cannot read, or whose video was deleted. To see on the server which recordings are playable and why
+  the others are not (read-only, writes nothing):
+  `cd /opt/f1-dashboard/main && sudo -u f1 ../.venv/bin/python -m server.replays /mnt/f1disk/voyo_streams`
+  (use your `[voyo.recording] path`).
 - **How replays play:** the recorded segments (`<path>/<id>/capture/*.mp4`, fragmented MP4) are
   played as they are, through one HLS playlist built on request (`/tv/replay/<id>/index.m3u8`, byte
   ranges of the files - no remux, no copy, nothing written; `main/server/replays.py`). Only segments

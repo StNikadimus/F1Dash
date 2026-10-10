@@ -12,6 +12,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -141,6 +142,121 @@ class Mp4AndPlaylistTest(unittest.TestCase):
         self.assertEqual(items[1]["status"], "interrupted")
 
 
+class DiscoveryTest(unittest.TestCase):
+    """What counts as a playable recording: decided by the files on the disk, not by a folder or the index."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def summary(self, iid, **kw):
+        return {"stream_instance_id": iid, "capture_segments": 3, "capture_deleted_at": None, "meeting": "Singapore Grand Prix",
+                "session_name": "Race", "session_kind": "race", "status": "closed", "detected_at": "2026-10-11T12:00:05Z", **kw}
+
+    def pkg_dir(self, iid):
+        return self.d / iid if (self.d / iid / "manifest.json").exists() else None
+
+    def test_empty_recordings_folder(self):
+        hidden = {}
+        self.assertEqual(replays.listing([], self.pkg_dir, hidden=hidden), [])
+        self.assertEqual(hidden, {"no_video": 0, "unplayable": 0, "deleted": 0})
+
+    def test_valid_invalid_and_incomplete_packages(self):
+        make_pkg(self.d, "aaaa11112222")                                                     # valid
+        make_pkg(self.d, "bbbb33334444", segs=0)                                             # capture/ but no video
+        shutil.rmtree(make_pkg(self.d, "cccc55556666") / "capture")                         # no capture/ at all
+        plain = make_pkg(self.d, "dddd77778888", segs=0)                                     # video, not fragmented
+        (plain / "capture" / "run20261011-140000_seg_00000.mp4").write_bytes(
+            box(b"ftyp", b"isom") + box(b"moov", b"\0" * 8) + box(b"mdat", b"x" * 50))
+        mkv = make_pkg(self.d, "eeee99990000", segs=0)                                       # another format
+        (mkv / "capture" / "run20261011-140000_seg_00000.mkv").write_bytes(b"\x1aE\xdf\xa3" + b"\0" * 64)
+        part = make_pkg(self.d, "ffff11112222", segs=0)                                      # upload not finished
+        (part / "capture" / "run20261011-140000_seg_00000.mp4.part").write_bytes(fmp4())
+        make_pkg(self.d, "gggg33334444", deleted=True)                                       # video deleted (retention)
+        (self.d / "hhhh55556666" / "capture").mkdir(parents=True)                           # a folder, no package
+        (self.d / "hhhh55556666" / "capture" / "run20261011-140000_seg_00000.mp4").write_bytes(fmp4())
+        idx0 = make_pkg(self.d, "iiii77778888")                                              # index says 0, disk has video
+        ids = ["aaaa11112222", "bbbb33334444", "cccc55556666", "dddd77778888", "eeee99990000", "ffff11112222",
+               "gggg33334444", "hhhh55556666", "iiii77778888"]
+        summaries = [self.summary(i, capture_deleted_at="x" if i.startswith("g") else None,
+                                  capture_segments=0 if i.startswith("i") else 3) for i in ids]
+        hidden = {}
+        items = replays.listing(summaries, self.pkg_dir, hidden=hidden)
+        self.assertEqual([x["id"] for x in items], ["aaaa11112222", "iiii77778888"])
+        self.assertEqual(hidden, {"no_video": 3, "unplayable": 2, "deleted": 1})
+        self.assertTrue(idx0.exists())
+        self.assertEqual(items[0]["skipped_segments"], 0)
+
+    def test_a_segment_cut_short_plays_up_to_its_last_complete_fragment(self):
+        pkg = make_pkg(self.d, "aaaa11112222", segs=2)
+        last = pkg / "capture" / "run20261011-140000_seg_00001.mp4"
+        whole = fmp4(fragments=2)
+        cut = whole[:-50]                                                     # power loss inside the last mdat
+        last.write_bytes(cut)
+        one_fragment_end = init_len() + len(box(b"moof", b"\1" * 24) + box(b"mdat", b"\0" * 200))
+        self.assertEqual(replays.layout(last), (init_len(), one_fragment_end))
+        segs = replays.segments(pkg)
+        self.assertEqual(segs[1]["end"], one_fragment_end)
+        self.assertIn(f"#EXT-X-BYTERANGE:{one_fragment_end - init_len()}@{init_len()}", replays.playlist(segs, True))
+        last.write_bytes(whole[:init_len() + 20])                             # not one complete fragment: left out
+        st = {}
+        self.assertEqual([s["name"] for s in replays.segments(pkg, stats=st)], ["run20261011-140000_seg_00000.mp4"])
+        self.assertEqual(st, {"files": 2, "bad": 1})
+        hidden = {}
+        items = replays.listing([self.summary("aaaa11112222")], self.pkg_dir, hidden=hidden)
+        self.assertEqual((items[0]["segments"], items[0]["skipped_segments"]), (1, 1))
+
+    def test_trailing_index_box_is_not_played(self):
+        pkg = make_pkg(self.d, "aaaa11112222", segs=1)
+        f = pkg / "capture" / "run20261011-140000_seg_00000.mp4"
+        f.write_bytes(fmp4() + box(b"mfra", b"\0" * 16))                    # ffmpeg ends a segment with mfra
+        self.assertEqual(replays.layout(f), (init_len(), len(fmp4())))
+
+    def test_check_command_reads_only(self):
+        import contextlib
+        import io
+        make_pkg(self.d, "aaaa11112222")
+        make_pkg(self.d, "bbbb33334444", segs=0)
+        before = sorted((p, p.stat().st_mtime_ns) for p in self.d.rglob("*"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(replays.main([str(self.d)]), 0)
+        text = out.getvalue()
+        self.assertIn("aaaa11112222", text)
+        self.assertIn("PLAYABLE", text)
+        self.assertIn("no video files", text)
+        self.assertIn("1 playable recording(s)", text)
+        self.assertEqual(sorted((p, p.stat().st_mtime_ns) for p in self.d.rglob("*")), before)    # nothing written
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
+    def test_real_ffmpeg_capture_segments(self):
+        """Segments written exactly like tools/voyo_capture.py (segment muxer, fragmented MP4, H.264 + AAC) are
+        listed, and the playlist built over them decodes from start to end."""
+        import subprocess
+        enc = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+        if "libx264" not in enc:
+            self.skipTest("ffmpeg without libx264")
+        pkg = make_pkg(self.d, "aaaa11112222", segs=0)
+        cap = pkg / "capture"
+        r = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=15", "-f", "lavfi",
+                            "-i", "sine=frequency=440", "-t", "6", "-c:v", "libx264", "-preset", "veryfast",
+                            "-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac",
+                            "-f", "segment", "-segment_time", "2", "-reset_timestamps", "1", "-segment_format", "mp4",
+                            "-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof",
+                            str(cap / "run20261011-140000_seg_%05d.mp4")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        segs = replays.segments(pkg, default_s=2.0)
+        self.assertGreaterEqual(len(segs), 3)
+        items = replays.listing([self.summary("aaaa11112222")], self.pkg_dir)
+        self.assertEqual(items[0]["segments"], len(segs))
+        (cap / "index.m3u8").write_text(replays.playlist(segs, True))
+        r = subprocess.run(["ffmpeg", "-v", "error", "-allowed_extensions", "ALL", "-i", str(cap / "index.m3u8"),
+                            "-f", "null", "-"], capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stderr.strip()), (0, ""))
+
+
 class TvReplayEndpointTest(unittest.TestCase):
     """The /tv endpoints on the real app: an approved /tv page only, listed segments only, ranges."""
 
@@ -191,6 +307,37 @@ class TvReplayEndpointTest(unittest.TestCase):
         r = self.tv.get(seg, headers={**self.H, "Range": f"bytes=0-{n - 1}"})
         self.assertEqual((r.status_code, r.content), (206, fmp4()[:n]))
         self.assertEqual(self.tv.get(seg, headers=self.H).content, fmp4())
+
+    def test_response_shape(self):
+        b = self.tv.get("/api/tv/replays", headers=self.H).json()
+        self.assertEqual(set(b), {"ok", "recordings", "hidden", "recorder"})
+        self.assertEqual((b["ok"], b["recorder"]), (True, {"ok": True}))
+        self.assertEqual(b["hidden"], {"no_video": 0, "unplayable": 0, "deleted": 0})
+        x = b["recordings"][0]
+        self.assertEqual(set(x), {"id", "meeting", "session_name", "session_kind", "title", "start", "status", "channel",
+                                  "duration_s", "segments", "skipped_segments"})
+        self.assertNotIn(str(self.d), json.dumps(b))                             # no disk paths to the TV
+
+    def test_missing_segments_and_a_recording_that_went_away(self):
+        seg = "/tv/replay/aaaa11112222/run20261011-140000_seg_00002.mp4"
+        (self.pkg / "capture" / "run20261011-140000_seg_00002.mp4").unlink()        # gone after it was listed
+        self.assertEqual(self.tv.get(seg, headers=self.H).status_code, 404)
+        self.assertNotIn("seg_00002", self.tv.get("/tv/replay/aaaa11112222/index.m3u8", headers=self.H).text)
+        shutil.rmtree(self.pkg / "capture")                                             # all video gone
+        self.assertEqual(self.tv.get("/tv/replay/aaaa11112222/index.m3u8", headers=self.H).status_code, 404)
+        b = self.tv.get("/api/tv/replays", headers=self.H).json()
+        self.assertEqual([x["id"] for x in b["recordings"]], ["bbbb33334444"])
+        self.assertEqual(b["hidden"]["no_video"], 1)
+
+    def test_live_stream_still_works_and_still_needs_the_page(self):
+        live = self.d / "live"
+        live.mkdir(exist_ok=True)
+        (live / "index.m3u8").write_text("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nlive_00001.ts\n")
+        (live / "live_00001.ts").write_bytes(b"\x47" * 188)
+        self.assertEqual(self.tv.get("/tv/live/index.m3u8", headers=self.H).status_code, 200)
+        self.assertEqual(self.tv.get("/tv/live/live_00001.ts", headers=self.H).status_code, 200)
+        self.assertEqual(self.tv.get("/tv/live/index.m3u8").status_code, 401)
+        self.assertEqual(self.s.browser().get("/tv/live/live_00001.ts", headers=self.H).status_code, 401)
 
     def test_safari_page_secret_in_the_urls(self):
         r = self.tv.get("/tv/replay/aaaa11112222/index.m3u8", params={"p": self.page})
@@ -286,6 +433,33 @@ class GatewayReplayTest(unittest.TestCase):
                                  400)                                      # an unknown query parameter: refused
                 self.assertEqual(tv.get("/tv/replay/aaaa11112222/manifest.json", headers=page).status_code, 404)
                 self.assertEqual(tv.post("/api/tv/replays", headers=page).status_code, 404)
+                # why the /tv page opens its panel itself: its dashboard socket through Funnel only listens -
+                # a key sent there (B = LIVE / REPLAYS) never reaches the remote, by design
+                from server.remote import RemoteController
+                calls = []
+                orig_key, orig_cmd = RemoteController.handle_key, RemoteController.handle_command
+
+                async def spy_key(self_, key, origin):
+                    calls.append(key)
+                    return await orig_key(self_, key, origin)
+
+                async def spy_cmd(self_, name, arg=None, origin="?", log_it=True):
+                    calls.append(name)
+                    return await orig_cmd(self_, name, arg, origin, log_it)
+                with mock.patch.object(RemoteController, "handle_key", spy_key), \
+                        mock.patch.object(RemoteController, "handle_command", spy_cmd):
+                    with tv.websocket_connect("/ws") as ws:
+                        self.assertEqual(json.loads(ws.receive_text())["type"], "hello")
+                        ws.send_text(json.dumps({"type": "key", "key": "KEY_B"}))
+                        ws.send_text(json.dumps({"type": "command", "command": "PLAYER_MENU", "arg": "open"}))
+                        time.sleep(0.3)
+                    self.assertEqual(calls, [])
+                    lan = t.e.lan()                                # the same command on the LAN does arrive
+                    with lan.websocket_connect("/ws") as ws:
+                        ws.receive_text()
+                        ws.send_text(json.dumps({"type": "command", "command": "PLAYER_MENU", "arg": "open"}))
+                        time.sleep(0.3)
+                    self.assertEqual(calls, ["PLAYER_MENU"])
             finally:
                 t.e.close()
         finally:

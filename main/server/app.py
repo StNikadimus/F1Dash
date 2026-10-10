@@ -1031,9 +1031,16 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         """The recordings with video the /tv player can play (approved /tv page only)."""
         if tv_auth(request) is None:
             return _tv_denied()
-        items = await run_in_threadpool(
-            replays.listing, stream_rec.list(also=(player_rec,)), _replay_pkg, _replay_seconds())
-        return JSONResponse({"ok": True, "recordings": items, "recorder": {"ok": stream_rec.ok}},
+        hidden: dict = {}
+        try:
+            items = await run_in_threadpool(
+                replays.listing, stream_rec.list(also=(player_rec,)), _replay_pkg, _replay_seconds(), 200, hidden)
+        except OSError as exc:                         # the disk went away while it was read
+            log.warning("/tv replays: the recordings folder could not be read: %s", exc)
+            return JSONResponse({"ok": False, "error": "the recording disk could not be read", "recordings": [],
+                                 "recorder": {"ok": False}}, status_code=503, headers={"Cache-Control": "no-store"})
+        # hidden: how many packages are not listed and why (no video / unreadable video / video deleted)
+        return JSONResponse({"ok": True, "recordings": items, "hidden": hidden, "recorder": {"ok": stream_rec.ok}},
                             headers={"Cache-Control": "no-store"})
 
     async def tv_replay_file(request: Request) -> Response:
