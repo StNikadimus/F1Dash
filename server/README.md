@@ -248,10 +248,14 @@ sudo -u f1 env F1DASH_DATA_DIR=/var/lib/f1-dashboard HOME=/var/lib/f1-dashboard 
 
 1. On your PC, run `ssh -L 5900:127.0.0.1:5900 <user>@<server>`.
 2. Open a VNC viewer (e.g. RealVNC Viewer or TigerVNC) to `127.0.0.1:5900`.
-3. Sign in to VOYO and open the **F1 live stream page** you want recorded.
+3. Sign in to VOYO, open the **F1 live stream page** you want recorded and start the video. The
+   terminal shows the open page and its player state: `video player ready` once a visible video
+   element can play (`readyState` ≥ 2, paused or playing). It never reads the media address.
 4. Press Ctrl+C in the `login` terminal. The page that is open becomes the stream page, saved in
-   `voyo_server_player.json`. Instead of steps 3–4 you can set `[voyo.server_player] stream_url` in
-   `server/config/server.toml`.
+   `voyo_server_player.json`, **only if a usable player was seen on it**. Otherwise it warns and asks;
+   without a yes nothing changes and an earlier stream page stays. `login --save-unverified` saves
+   it anyway. Instead of steps 3–4 you can set `[voyo.server_player] stream_url` in
+   `server/config/server.toml`; login then never changes the stream page.
 
 VNC listens only on 127.0.0.1 and only while `login` runs. Your password is typed into VOYO's own
 page; the tool doesn't store it, and Chrome keeps its normal sign-in cookie in its profile

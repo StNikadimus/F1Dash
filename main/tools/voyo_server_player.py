@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """SERVER VOYO PLAYER - the server opens VOYO itself and records it (no PC needed).
 
-    python tools/voyo_server_player.py login     # once: sign in to VOYO (VNC through an SSH tunnel)
+    python tools/voyo_server_player.py login     # once: sign in to VOYO (VNC through an SSH tunnel);
+                                                 # Ctrl+C saves the open page if it has a usable player
+                                                 # (--save-unverified: save it even without one)
     python tools/voyo_server_player.py run       # the service: open + record around every F1 session
     python tools/voyo_server_player.py test [--minutes 5] [--url URL]   # open + record now
     python tools/voyo_server_player.py status    # what is installed / configured, next sessions
@@ -71,6 +73,49 @@ PLAY_JS = r"""(() => {
   return {video: true, paused: v.paused, t: v.currentTime, ready: v.readyState, url: location.href,
           title: document.title, did};
 })()"""
+
+# login / setup: what the open page offers - read only (no play, no unmute). The page address and the
+# player's state; never the media address (the stream itself stays the player's business).
+INSPECT_JS = r"""(() => {
+  const all = [...document.querySelectorAll('video')];
+  const area = (v) => v.clientWidth * v.clientHeight;
+  const base = {url: location.href, title: document.title, videos: all.length};
+  if (!all.length) return Object.assign(base, {video: false});
+  const v = all.sort((a, b) => area(b) - area(a))[0];
+  return Object.assign(base, {video: true, visible: area(v) > 0, w: v.clientWidth, h: v.clientHeight,
+    paused: v.paused, ended: v.ended, ready: v.readyState, t: v.currentTime,
+    duration: isFinite(v.duration) ? v.duration : null, live: v.duration === Infinity, muted: v.muted,
+    error: v.error ? v.error.code : null});
+})()"""
+READY_STATES = {0: "HAVE_NOTHING", 1: "HAVE_METADATA", 2: "HAVE_CURRENT_DATA", 3: "HAVE_FUTURE_DATA",
+                4: "HAVE_ENOUGH_DATA"}
+
+
+def player_check(st: Optional[dict]) -> tuple[bool, str]:
+    """INSPECT_JS's answer -> (a usable player?, what it is in words). Usable = a visible video element
+    that can play now (readyState >= 2 = HAVE_CURRENT_DATA), paused or playing, without a media error.
+    It is what the recording needs: the player shows a picture that the screen capture can record."""
+    if not st:
+        return False, "page not reachable (loading / navigating?)"
+    if not st.get("video"):
+        return False, "no video element on the page"
+    ready = int(st.get("ready") or 0)
+    rs = f"readyState {ready} {READY_STATES.get(ready, '')}".strip()
+    if st.get("error"):
+        return False, f"video element with a media error (code {st['error']}, {rs})"
+    if not st.get("visible"):
+        return False, f"video element not visible on the screen ({rs})"
+    if ready < 2:
+        return False, f"video element not ready to play yet ({rs})"
+    pos = float(st.get("t") or 0)
+    what = "ended" if st.get("ended") else "paused" if st.get("paused") else "playing"
+    return True, f"video player ready - {what} at {pos:.0f} s ({rs}, {st.get('w')}x{st.get('h')}" \
+                 f"{', live' if st.get('live') else ''}{', muted' if st.get('muted') else ''})"
+
+
+def _same_page(a: Optional[str], b: Optional[str]) -> bool:
+    """The same page address (the #fragment does not count)."""
+    return bool(a and b) and a.split("#", 1)[0] == b.split("#", 1)[0]
 
 
 _FORWARD = {"server": None, "token": "", "off_until": 0.0}
@@ -335,6 +380,15 @@ class Player:
         res = self.cdp([("Runtime.evaluate", {"expression": expr, "returnByValue": True, "userGesture": True,
                                               "awaitPromise": False})])
         return ((res[0] or {}).get("result") or {}).get("value") if res else None
+
+    def inspect_page(self) -> Optional[dict]:
+        """The open page and its video player (INSPECT_JS); None while it cannot be read (navigating, Chrome
+        not up yet). Read only."""
+        try:
+            st = self.evaluate(INSPECT_JS)
+        except Exception:  # noqa: BLE001 - DevTools socket closed / timed out mid-navigation
+            return None
+        return st if isinstance(st, dict) else None
 
     # ------------------------------------------------------------------ VOYO sign-in (credentials from /disk)
     def auto_login(self, why: str) -> dict:
@@ -646,11 +700,109 @@ def cmd_test(player: Player, minutes: float, url: Optional[str]) -> None:
         log("dashboard server not reachable - is it running? (the recordings are written by it)")
 
 
-def cmd_login(player: Player) -> None:
+class LoginWatch:
+    """What "login" has seen: the open page and whether it had a usable video player (player_check)."""
+
+    def __init__(self) -> None:
+        self.page: Optional[str] = None                 # the VOYO page open now (its address, never a media URL)
+        self.title = ""
+        self.ok = False                                 # the page open now has a usable player (last check)
+        self.info = "the page could not be read"        # the last check in words
+        self.verified: Optional[str] = None             # the last page on which a usable player was seen
+        self.verified_info = ""
+        self.said = None
+
+    def update(self, st: Optional[dict], fallback_url: Optional[str] = None) -> Optional[str]:
+        """One look at the page -> a line to print when something changed (else None)."""
+        if st is None and (not fallback_url or _same_page(fallback_url, self.page)):
+            return None                                 # unreadable for a moment (navigating): keep the last state
+        url = (st or {}).get("url") or fallback_url
+        if url and not str(url).startswith("http"):
+            url = None                                  # about:blank, chrome-error:// ...: not a VOYO page
+        ok, info = player_check(st) if url else (False, "no web page open")
+        self.page, self.title, self.ok, self.info = url, str((st or {}).get("title") or "")[:120], ok, info
+        if ok:
+            self.verified, self.verified_info = url, info
+        key = (url, self.title, ok, info.split(" - ")[0] if ok else info)
+        if key == self.said:
+            return None
+        self.said = key
+        if not url:
+            return f"  page: {info}"
+        return f"  page: {url}" + (f"  \"{self.title}\"" if self.title else "") + \
+               f"\n    player: {info}" + ("" if ok else " - not usable yet")
+
+
+def login_decision(watch: LoginWatch, state: dict, config_url: str, force: bool,
+                   confirm, say=None) -> tuple[Optional[dict], list[str]]:
+    """After Ctrl+C: what to save. -> (the new state to write or None = leave it as it is, the lines said).
+    A page counts as set up only when a usable player was seen on it; anything else needs an explicit
+    yes (``confirm(question)``) or ``--save-unverified``. A configured stream_url is never touched.
+    ``say`` prints each line as it comes (the warning before the question)."""
+    class _Out(list):
+        def append(self, line: str) -> None:
+            super().append(line)
+            if say:
+                say(line)
+    out = _Out()
+    page = watch.page
+    if config_url:
+        out.append(f"[voyo.server_player] stream_url is set ({config_url}) - it stays the stream page; this "
+                   "login only refreshed the VOYO sign-in in Chrome's profile. Nothing saved.")
+        if page:
+            out.append(f"  (open at the end: {page} - {'usable player' if watch.ok else 'no usable player confirmed'})")
+        return None, list(out)
+    if not page:
+        out.append("No VOYO page was open - nothing saved" +
+                   (f"; the stream page stays {state['last_url']}." if state.get("last_url") else "."))
+        return None, list(out)
+    old = state.get("last_url")
+    verified = watch.ok or _same_page(page, watch.verified)
+    if verified:
+        info = watch.verified_info if _same_page(page, watch.verified) else ""
+        new = dict(state, last_url=page, learned_at=datetime.now(timezone.utc).isoformat(), last_url_verified=True)
+        out.append(f"Saved as the stream page: {page}" + (f"\n  ({info})" if info else ""))
+    else:
+        out.append(f"WARNING: no usable video player was confirmed on {page}\n  (last check: {watch.info})")
+        if watch.verified and not _same_page(watch.verified, page):
+            out.append(f"  A usable player was seen earlier on {watch.verified} - open that page again and wait "
+                       "for the video before Ctrl+C.")
+        replace = f" It would replace the saved stream page {old}." if old and not _same_page(old, page) else ""
+        if force:
+            ok = True
+            out.append("--save-unverified: saving it anyway." + replace)
+        else:
+            ok = bool(confirm(f"Save {page} as the stream page anyway?{replace} [y/N] "))
+        if not ok:
+            out.append("Nothing saved" + (f" - the stream page stays {old}." if old else ".") +
+                       " Run login again, open the F1 stream page and wait until the video shows (READY / playing) "
+                       "before Ctrl+C - or run: voyo-player.sh login --save-unverified")
+            return None, list(out)
+        new = dict(state, last_url=page, learned_at=datetime.now(timezone.utc).isoformat(), last_url_verified=False)
+        out.append(f"Saved (UNVERIFIED - no player was confirmed) as the stream page: {page}")
+    if state.get("page_url"):
+        out.append(f"Note: the stream page set on the /disk page ({state['page_url']}) still comes first.")
+    return new, list(out)
+
+
+def _ask_tty(question: str) -> bool:
+    """An explicit yes on the terminal; no terminal, Ctrl+C or EOF = no."""
+    if not sys.stdin or not sys.stdin.isatty():
+        print(question + "(no terminal to answer - not saved)", flush=True)
+        return False
+    try:
+        return input(question).strip().lower() in ("y", "yes", "j", "ja", "d", "da")
+    except (EOFError, KeyboardInterrupt):
+        print(flush=True)
+        return False
+
+
+def cmd_login(player: Player, save_unverified: bool = False, confirm=_ask_tty, poll_s: float = 3.0) -> None:
     """Chrome on the virtual screen + VNC (127.0.0.1 only) so you can sign in to VOYO once."""
     if not shutil.which("x11vnc"):
         raise SystemExit("x11vnc is not installed (server/setup-voyo-player.sh)")
-    url = str(player.sp.get("stream_url") or "") or load_state().get("last_url") or "https://voyo.si/"
+    config_url = str(player.sp.get("stream_url") or "")
+    url = config_url or load_state().get("last_url") or "https://voyo.si/"
     player.start_display()
     player.start_audio()
     player.start_chrome(url)
@@ -662,30 +814,39 @@ def cmd_login(player: Player) -> None:
 VOYO sign-in on the server's virtual screen
   1. on your PC:   ssh -L {port}:127.0.0.1:{port} <user>@<server>
   2. VNC viewer (e.g. RealVNC Viewer / TigerVNC) -> 127.0.0.1:{port}   password: {pw}
-  3. sign in to VOYO, open the F1 live stream page (the one you want recorded) - it may play
-  4. press Ctrl+C here: the page that is open then becomes the stream page (unless
-     [voyo.server_player] stream_url is set)
+  3. sign in to VOYO, open the F1 live stream page (the one you want recorded) and start the video -
+     wait until this terminal says "player: video player ready" (paused is fine)
+  4. press Ctrl+C here: that page becomes the stream page (unless [voyo.server_player] stream_url is
+     set). A page without a usable player is NOT saved unless you confirm it (or --save-unverified).
 """, flush=True)
-    last = None
+    watch = LoginWatch()
     try:
-        while True:
-            u = player.page_url()
-            if u and u.startswith("http") and u != last:
-                last = u
-                print(f"  open page: {u}", flush=True)
-            time.sleep(3)
-    except KeyboardInterrupt:
-        pass
+        try:
+            while True:
+                line = watch.update(player.inspect_page(), player.page_url())
+                if line:
+                    print(line, flush=True)
+                time.sleep(poll_s)
+        except KeyboardInterrupt:
+            print(flush=True)
+        # Chrome, the screen and VNC still run here (their own process groups - Ctrl+C does not reach them):
+        # one last look at the page, decide, save - and only then close them
+        line = watch.update(player.inspect_page(), player.page_url())
+        if line:
+            print(line, flush=True)
+        new, _lines = login_decision(watch, load_state(), config_url, save_unverified, confirm,
+                                     say=lambda ln: print(ln, flush=True))
+        if new is not None:
+            try:
+                save_state(new)
+            except OSError as exc:
+                print(f"ERROR: could not write {STATE} ({exc}) - nothing was saved", flush=True)
+                raise
     finally:
         player.vnc.stop()
         player.chrome.stop()
         player.pulse.stop()
         player.xvfb.stop()
-    if last:
-        st = load_state()
-        st.update(last_url=last, learned_at=datetime.now(timezone.utc).isoformat())
-        save_state(st)
-        print(f"Saved as the stream page: {last}")
 
 
 def cmd_status(player: Player) -> None:
@@ -716,12 +877,14 @@ def main() -> None:
     ap.add_argument("command", choices=["run", "login", "test", "status"])
     ap.add_argument("--minutes", type=float, default=5.0, help="test: how long")
     ap.add_argument("--url", help="test: this page instead of stream_url")
+    ap.add_argument("--save-unverified", action="store_true",
+                    help="login: save the open page even if no usable video player was confirmed on it")
     args = ap.parse_args()
     player = Player(load_config())
     if args.command == "run":
         cmd_run(player)
     elif args.command == "login":
-        cmd_login(player)
+        cmd_login(player, save_unverified=args.save_unverified)
     elif args.command == "test":
         cmd_test(player, args.minutes, args.url)
     else:
