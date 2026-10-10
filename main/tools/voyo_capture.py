@@ -21,7 +21,9 @@ For your own use - check VOYO's terms of service.
 from __future__ import annotations
 
 import csv
+import json
 import platform
+import re
 import shutil
 import subprocess
 import threading
@@ -110,7 +112,13 @@ def ffmpeg_cmd(ffmpeg: str, spec: dict, out_dir: Path, run: str, fps: int = 30, 
 class VoyoWindowCapture:
     def __init__(self, server: str, token: str, rc: dict, spool: Path,
                  window: Callable[[], Optional[dict]], log: Callable[[str], None] = print,
-                 live_dir: Optional[Path] = None) -> None:
+                 live_dir: Optional[Path] = None,
+                 override: Optional[Callable[[], Optional[dict]]] = None) -> None:
+        """``override``: the server VOYO player's session recorder decides itself (tools/voyo_session.py):
+        it returns {"instance": package key, ...} while its recording runs (None = not). Then the capture does
+        NOT stop when the dashboard server is briefly unreachable (a restart / update of it) - the segments
+        wait in the spool and are uploaded when it is back. Only a FRESH server answer that blocks the
+        capture (disk full, recording off) stops it."""
         self.server = server.rstrip("/").replace("://localhost", "://127.0.0.1")
         self.token = token
         self.rc = rc or {}
@@ -134,6 +142,18 @@ class VoyoWindowCapture:
         self.encoder = str(self.rc.get("capture_encoder") or "x264").lower()
         self.live_dir = live_dir                       # server VOYO player: also a live HLS stream (/tv)
         self.vaapi_failed = False
+        self.override = override
+        self.retry_s = 5.0 if override else 30.0       # supervised: every second of a session counts
+        self.spool_min_free = int(self.rc.get("spool_min_free_bytes", 2 * 1024 ** 3))
+        self.err_log: Optional[Path] = None
+        self.last_error = ""
+        self._grow = (None, 0, 0.0)                    # (file, size, monotonic time it last grew)
+        self.uploads_ok = 0
+        self.uploads_failed = 0
+        self.last_segment: Optional[dict] = None       # the newest finished segment's check (streams, sound)
+        self.audio_failed = 0                          # ffmpeg could not open the sound this often in a row
+        self._checked: dict[str, dict] = {}            # segment name -> check_segment result (until uploaded)
+        self.failures = 0                              # how often ffmpeg stopped by itself
 
     def _once(self, key: str, text: str) -> None:
         if key not in self._said:
@@ -148,9 +168,66 @@ class VoyoWindowCapture:
     def wanted(self) -> Optional[dict]:
         with self._lock:
             rec, at = self._reply
-        if rec is None or not rec.get("capture") or not rec.get("instance") or time.monotonic() - at > 15:
+        fresh = rec is not None and time.monotonic() - at <= 15
+        if self.override is not None:
+            want = self.override()
+            if not want:
+                return None
+            if fresh and rec.get("blocked"):           # the server says no (disk full / recording off)
+                self._once(f"blocked:{rec['blocked']}", f"  VOYO capture: the server does not take video now "
+                                                         f"({rec['blocked']}) - stopped")
+                return None
+            self._said = {k for k in self._said if not k.startswith("blocked:")}
+            return {**(rec if fresh else {}), **want, "capture": True}
+        if not fresh or not rec.get("capture") or not rec.get("instance"):
             return None
         return rec
+
+    def health(self) -> dict:
+        """The recorder now (the session recorder's checks, /disk): running, the file growing, uploads."""
+        alive = self.proc is not None and self.proc.poll() is None
+        f, size, grew = self._grow
+        return {"alive": alive, "instance": self.instance, "run": self.run_id,
+                "grew_age_s": round(time.monotonic() - grew, 1) if alive and grew else None,
+                "file_bytes": size if alive else None, "uploads_ok": self.uploads_ok,
+                "uploads_failed": self.uploads_failed, "pending": self._pending_count(),
+                "encoder": self.used_encoder, "last_error": self.last_error or None, "failures": self.failures,
+                "last_segment": self.last_segment}
+
+    def restart(self, why: str = "") -> None:
+        """Stop a recorder that hangs (its file does not grow); the next step starts a new run at once."""
+        if self.proc is not None:
+            self.log(f"  VOYO capture: restarting the recorder{' (' + why + ')' if why else ''}")
+            self._stop_ffmpeg()
+            self._retry_at = 0.0
+
+    def _pending_count(self) -> int:
+        try:
+            return sum(1 for _ in self.spool.glob("*/*_seg_*.mp4")) if self.spool.exists() else 0
+        except OSError:
+            return 0
+
+    def _track_growth(self) -> None:
+        """The newest segment file of the running recorder: when did it last grow?"""
+        if self.proc is None or self.instance is None or not self.run_id:
+            return
+        d = self.spool / self.instance
+        try:
+            files = sorted(d.glob(f"{self.run_id}_seg_*.mp4"))
+            f = files[-1] if files else None
+            size = f.stat().st_size if f else 0
+        except OSError:
+            return
+        old_f, old_size, at = self._grow
+        if f != old_f or size != old_size or not at:
+            self._grow = (f, size, time.monotonic())
+
+    def _spool_free(self) -> Optional[int]:
+        try:
+            self.spool.mkdir(parents=True, exist_ok=True)
+            return shutil.disk_usage(self.spool).free
+        except OSError:
+            return None
 
     # ------------------------------------------------------------------
     def start(self) -> "VoyoWindowCapture":
@@ -171,20 +248,52 @@ class VoyoWindowCapture:
     def step(self) -> None:
         want = self.wanted()
         iid = want.get("instance") if want else None
+        free = self._spool_free() if iid else None
+        if iid and free is not None and free < self.spool_min_free:
+            self._once("spoolfull", f"  VOYO capture: less than {self.spool_min_free / 1e9:.0f} GB free for the spool "
+                                    f"({self.spool}) - not recording until the segments are uploaded")
+            self.last_error = "spool disk full"
+            iid = None
+        else:
+            self._said.discard("spoolfull")
         if self.proc is not None and (iid != self.instance or self.proc.poll() is not None):
             if self.proc.poll() is not None and iid == self.instance:
-                err = (self.proc.stderr.read() if self.proc.stderr else b"")[-400:].decode(errors="replace")
-                if self.used_encoder == "vaapi" and time.time() - self.run_start < 20:
+                err = self._err_tail()
+                self.last_error = f"ffmpeg stopped ({self.proc.returncode}) {err}".strip()[:300]
+                self.failures += 1
+                sound = bool(re.search(r"monitor|pulse|dshow|audio", err, re.I)) and time.time() - self.run_start < 20
+                if sound:
+                    self.audio_failed += 1             # the sound input does not open: after 2 tries, video only
+                    if self.audio_failed == 2:
+                        self.log("  VOYO capture: the sound cannot be recorded - recording the picture WITHOUT sound")
+                if self.used_encoder == "vaapi" and not sound and time.time() - self.run_start < 20:
                     self.vaapi_failed = True        # e.g. no permission on /dev/dri, driver missing
-                    self.log(f"  VOYO capture: Intel Quick Sync (vaapi) failed: {err.strip()} - recording with x264 "
+                    self.log(f"  VOYO capture: Intel Quick Sync (vaapi) failed: {err} - recording with x264 "
                              "(CPU) instead")
                 else:
-                    self.log(f"  VOYO capture: ffmpeg stopped ({self.proc.returncode}) {err.strip()} - retrying in 30 s")
-                    self._retry_at = time.monotonic() + 30
+                    # supervised: a recorder that ran for a while (> 10 s) is started again at once (each second is video);
+                    # one that keeps failing right away waits longer each time (5, 10, 20, 30 s)
+                    ran = time.time() - self.run_start
+                    if self.override is not None:
+                        self._quick_fails = 0 if ran > 10 else getattr(self, "_quick_fails", 0) + 1
+                        wait = (1.0, 5.0, 10.0, 30.0)[min(self._quick_fails, 3)]
+                    else:
+                        wait = self.retry_s
+                    self.log(f"  VOYO capture: ffmpeg stopped ({self.proc.returncode}) {err} - retrying in {wait:.0f} s")
+                    self._retry_at = time.monotonic() + wait
             self._stop_ffmpeg()
         if iid and self.proc is None and time.monotonic() >= self._retry_at:
             self._start_ffmpeg(iid, want)
+        self._track_growth()
         self.upload_pending()
+
+    def _err_tail(self) -> str:
+        """The end of ffmpeg's own error output (a file, not a pipe: a pipe nobody reads fills up after
+        64 KB and then BLOCKS ffmpeg - the recording would silently stop growing)."""
+        try:
+            return self.err_log.read_bytes()[-400:].decode(errors="replace").strip() if self.err_log else ""
+        except OSError:
+            return ""
 
     def _start_ffmpeg(self, iid: str, want: dict) -> None:
         if not self.ffmpeg:
@@ -193,6 +302,8 @@ class VoyoWindowCapture:
                                    "and/or set [voyo.recording] ffmpeg = \"C:/ffmpeg/bin/ffmpeg.exe\"")
             return
         spec = self.window()
+        if spec and self.audio_failed >= 2:
+            spec = {**spec, "audio": ""}
         if not spec:
             self._once("nowin", "  VOYO capture: VOYO window not found yet - waiting")
             return
@@ -217,8 +328,11 @@ class VoyoWindowCapture:
                          live_dir=self._live_reset())
         flags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
         self.run_start = time.time()
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                     creationflags=flags)
+        self.err_log = out / f"{self.run_id}_ffmpeg.log"
+        with open(self.err_log, "ab") as errf:
+            self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=errf,
+                                         creationflags=flags)
+        self._grow = (None, 0, time.monotonic())
         self.instance = iid
         self.log(f"  VOYO capture: recording the VOYO window for stream {iid} (opt-in window capture, "
                  f"{'Intel Quick Sync ' + dev if enc == 'vaapi' else 'x264 CPU'}) -> {self.server}")
@@ -254,24 +368,44 @@ class VoyoWindowCapture:
 
     # ------------------------------------------------------------------ upload
     def _finished(self, d: Path) -> list[tuple[Path, float, float]]:
-        """Segments ffmpeg has finished (listed in a <run>_list.csv), with their PC start / end epoch."""
+        """Segments ffmpeg has finished (listed in a <run>_list.csv), with their PC start / end epoch - and the
+        last segment of a run that ended without finishing it (ffmpeg killed / crashed / the machine stopped):
+        its complete fragments are video too (up to a whole segment), uploaded with its measured length."""
         out = []
+        ends: dict[str, float] = {}
         for lst in d.glob("*_list.csv"):
             run = lst.name[:-len("_list.csv")]
-            try:
-                t0 = time.mktime(time.strptime(run, "run%Y%m%d-%H%M%S"))
-            except ValueError:
-                t0 = 0.0
+            t0 = run_epoch(run)
+            ends.setdefault(run, t0)
             try:
                 rows = list(csv.reader(lst.read_text(encoding="utf-8").splitlines()))
             except OSError:
                 continue
             for row in rows:
-                if len(row) >= 3 and (d / row[0]).exists():
-                    try:
-                        out.append((d / row[0], t0 + float(row[1]), t0 + float(row[2])))
-                    except ValueError:
-                        continue
+                if len(row) < 3:
+                    continue
+                try:
+                    a, b = t0 + float(row[1]), t0 + float(row[2])
+                except ValueError:
+                    continue
+                ends[run] = max(ends[run], b)               # also of segments already uploaded (and deleted)
+                if (d / row[0]).exists():
+                    out.append((d / row[0], a, b))
+        listed = {p.name for p, _a, _b in out}
+        running = self.proc is not None and self.proc.poll() is None and self.instance == d.name
+        for f in sorted(d.glob("*_seg_*.mp4")):
+            run = f.name.split("_seg_")[0]
+            if f.name in listed or (running and run == self.run_id):
+                continue
+            chk = self._checked.get(f.name) or check_segment(f, self.ffmpeg)
+            self._checked[f.name] = chk
+            if not chk.get("duration"):
+                if f.stat().st_size < 4096:                 # nothing in it (killed at once): no video to keep
+                    f.unlink(missing_ok=True)
+                continue
+            start = ends.get(run, run_epoch(run))
+            out.append((f, start, start + float(chk["duration"])))
+            ends[run] = start + float(chk["duration"])
         return out
 
     def upload_pending(self, deadline: Optional[float] = None) -> None:
@@ -283,7 +417,7 @@ class VoyoWindowCapture:
                     return
                 self._upload(d.name, seg, t0, t1)
             if not any(d.glob("*.mp4")) and (self.proc is None or self.instance != d.name):
-                for f in d.glob("*_list.csv"):
+                for f in [*d.glob("*_list.csv"), *d.glob("*_ffmpeg.log")]:
                     f.unlink(missing_ok=True)
                 try:
                     d.rmdir()
@@ -292,29 +426,87 @@ class VoyoWindowCapture:
 
     def _upload(self, iid: str, seg: Path, t0: float, t1: float) -> bool:
         size = seg.stat().st_size
+        chk = self._checked.get(seg.name)
+        if chk is None:
+            chk = check_segment(seg, self.ffmpeg)
+            self._checked[seg.name] = chk
+            self.last_segment = {"name": seg.name, **chk}
+            if chk.get("audio") is False or chk.get("silent"):
+                self.log(f"  VOYO capture: {seg.name} has {'no sound track' if chk.get('audio') is False else 'only silence'}")
+        extra = {"X-Capture-Duration": f"{chk['duration']:.3f}" if chk.get("duration") is not None else None,
+                 "X-Capture-Audio": None if chk.get("audio") is None else ("1" if chk["audio"] else "0"),
+                 "X-Capture-Video": None if chk.get("video") is None else ("1" if chk["video"] else "0"),
+                 "X-Capture-Audio-Max-Db": f"{chk['max_db']:.1f}" if chk.get("max_db") is not None else None}
         req = urllib.request.Request(f"{self.server}/api/voyo/recordings/{iid}/capture/{seg.name}", method="PUT",
                                      data=open(seg, "rb"), headers={
                                          "Content-Type": "video/mp4", "Content-Length": str(size),
                                          "X-Capture-Start": f"{t0:.3f}", "X-Capture-End": f"{t1:.3f}",
-                                         "X-PC-Now": f"{time.time():.3f}"})
+                                         "X-PC-Now": f"{time.time():.3f}",
+                                         **{k: v for k, v in extra.items() if v is not None}})
         if self.token:
             req.add_header("X-Remote-Token", self.token)
         try:
             with urllib.request.urlopen(req, timeout=max(30, size / 2e6)) as r:
                 r.read()
         except urllib.error.HTTPError as exc:
+            self.uploads_failed += 1
             self._once(f"http{exc.code}:{iid}", f"  VOYO capture: upload of {seg.name} refused ({exc.code}: "
                                                 f"{exc.read()[:120]!r}) - kept in {seg.parent}")
             return False
         except OSError as exc:
+            self.uploads_failed += 1
             self._once(f"net:{iid}", f"  VOYO capture: server not reachable for uploads ({exc}) - retrying")
             return False
         finally:
             req.data.close()
         seg.unlink(missing_ok=True)
+        self.uploads_ok += 1
+        self._checked.pop(seg.name, None)
         return True
 
     def stop(self) -> None:
         self.stop_ev.set()
         if self.thread is not None:
             self.thread.join(50)
+
+
+SILENT_DB = -70.0          # a segment whose loudest sample is below this has no real sound
+
+
+def run_epoch(run: str) -> float:
+    """run20261010-124539 -> its local start time (epoch s); 0 when the name is not one."""
+    try:
+        return time.mktime(time.strptime(run, "run%Y%m%d-%H%M%S"))
+    except ValueError:
+        return 0.0
+
+
+def check_segment(seg: Path, ffmpeg: Optional[str]) -> dict:
+    """A finished segment: its length, whether it has a picture and a sound track, and whether the sound is
+    silence (ffprobe + ffmpeg volumedetect on the sound only - a fraction of a second for a minute).
+    -> {"duration", "video", "audio", "max_db", "silent"} - None where it could not be told."""
+    out: dict = {"duration": None, "video": None, "audio": None, "max_db": None, "silent": None}
+    probe = shutil.which("ffprobe")
+    if not probe and ffmpeg and Path(ffmpeg).with_name("ffprobe").exists():
+        probe = str(Path(ffmpeg).with_name("ffprobe"))
+    if probe:
+        try:
+            r = subprocess.run([probe, "-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json",
+                                str(seg)], capture_output=True, text=True, timeout=30)
+            j = json.loads(r.stdout or "{}")
+            types = {s.get("codec_type") for s in j.get("streams") or []}
+            out["video"], out["audio"] = "video" in types, "audio" in types
+            out["duration"] = float((j.get("format") or {}).get("duration") or 0) or None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    if ffmpeg and out["audio"]:
+        try:
+            r = subprocess.run([ffmpeg, "-hide_banner", "-nostats", "-i", str(seg), "-map", "0:a:0", "-af", "volumedetect",
+                                "-f", "null", "-"], capture_output=True, text=True, timeout=60)
+            m = re.search(r"max_volume:\s*(-?[0-9.]+|-inf) dB", r.stderr or "")
+            if m:
+                out["max_db"] = -200.0 if m.group(1) == "-inf" else float(m.group(1))
+                out["silent"] = out["max_db"] < SILENT_DB
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return out

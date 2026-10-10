@@ -8,8 +8,10 @@
 [Unit]
 Description=F1 dashboard - server VOYO player (records VOYO around F1 sessions)
 After=f1-dashboard.service network-online.target
-Wants=network-online.target
-Requires=f1-dashboard.service
+# Wants, not Requires: with Requires= every restart of f1-dashboard (an update, a config change) also
+# stopped this player in the middle of a session and closed its recording. The player keeps recording
+# while the dashboard server is briefly away (the video waits in its spool and is uploaded after).
+Wants=network-online.target f1-dashboard.service
 #RequiresMountsFor=/mnt/f1disk
 
 [Service]

@@ -127,8 +127,33 @@ function renderNow(st, player) {
     hb && ["CHROME", hb.browser ? (hb.widevine ? '<span class="ok-t">ok, DRM (Widevine) ok</span>' : '<span class="bad-t">no Widevine - VOYO will not play</span>') : '<span class="bad-t">not installed</span>'],
     hb && ["VOYO PAGE", hb.stream_url_set ? '<span class="ok-t">set</span>' : '<span class="warn-t">not set - voyo-player.sh login</span>'],
     hb && hb.note && ["PAGE", esc(hb.note)],
+    ...sessionRows(hb && hb.recording, hb && hb.capture),
     nxt && ["NEXT", `${esc(nxt.meeting)} ${esc(nxt.session_name)} · ${esc(when(nxt.start))} · recording opens ${esc(when(new Date(nxt.open_from * 1000).toISOString()))}`],
   ]);
+}
+// the server player's session recorder: which session, which VOYO recording, verified how, how it goes
+const SS_LEVEL = { RECORDING: "ok-t", DONE: "ok-t", NOT_FOUND: "bad-t", AMBIGUOUS: "bad-t", FAILED: "bad-t" };
+function sessionRows(rs, cap) {
+  if (!rs) return [];
+  const t = rs.target || {};
+  const rows = [["SESSION", `${esc(t.label || t.kind || "")} · <span class="${SS_LEVEL[rs.state] || "warn-t"}">${esc(rs.state)}</span>`]];
+  if (rs.episode_id) rows.push(["VOYO RECORDING", `episode ${esc(rs.episode_id)} · ${esc(rs.episode_title || "")}${rs.format ? " · " + esc(String(rs.format).toUpperCase()) : ""}${rs.live ? " · LIVE" : ""}`]);
+  else if (rs.selection) rows.push(["VOYO RECORDING", esc(rs.selection)]);
+  if (rs.verified) rows.push(["VERIFIED", esc(rs.verified)]);
+  if (rs.candidates && rs.candidates.length) rows.push(["CANDIDATES", rs.candidates.map((c) => `${esc(c.id)} “${esc(c.title || "")}”`).join(" · ")]);
+  if (rs.started_at) rows.push(["RECORDED", `${dur(rs.recording_s || 0)}${rs.position ? " · video at " + dur(rs.position) : ""}${rs.duration ? " of " + dur(rs.duration) : ""}${rs.recoveries ? ` · ${rs.recoveries} recovery(s)` : ""}`]);
+  if (cap) rows.push(["RECORDER", cap.alive ? `<span class="ok-t">running</span>${cap.grew_age_s != null ? " · file grew " + Math.round(cap.grew_age_s) + " s ago" : ""} · ${cap.uploads_ok || 0} segment(s) stored${cap.pending ? ` · ${cap.pending} waiting` : ""}`
+    : `<span class="${rs.state === "RECORDING" ? "bad-t" : "warn-t"}">not running</span>${cap.last_error ? " · " + esc(cap.last_error) : ""}`]);
+  if (rs.problem) rows.push(["PROBLEM", `<span class="bad-t">${esc(rs.problem)}</span>`]);
+  if (rs.end_reason) rows.push(["ENDED", esc(rs.end_reason)]);
+  if (rs.issues && rs.issues.length) rows.push(["LAST PROBLEMS", rs.issues.slice(-3).map((i) => esc(i.text)).join("<br>")]);
+  return rows;
+}
+function checkBadge(r) {
+  if (!r.capture_check) return "";
+  const cls = r.capture_check === "COMPLETE" ? "ok" : "bad";
+  const snd = r.capture_sound && r.capture_sound !== "ok" && r.capture_sound !== "unknown" ? ` · SOUND ${esc(r.capture_sound.toUpperCase())}` : "";
+  return `<div><span class="badge ${cls}" title="${r.capture_recorded_s != null ? esc(dur(r.capture_recorded_s)) + " of video" : ""}">${esc(r.capture_check)}${snd}</span></div>`;
 }
 let retDirty = false;
 function renderRetention(rows, cfg) {
@@ -249,7 +274,7 @@ function renderRecordings() {
       <td><div class="sess">${esc(sess)}</div><div class="sub">${esc(r.title && r.title !== sess ? r.title : "")} ${esc(r.stream_instance_id)}</div></td>
       <td>${src}${r.live ? ' <span class="badge">LIVE</span>' : ""}</td>
       <td class="r mono">${esc(dur(r.watched_seconds))}</td>
-      <td class="r mono">${r.video_bytes ? bytes(r.video_bytes) + `<div class="sub">${r.segments} seg</div>` : "–"}</td>
+      <td class="r mono">${r.video_bytes ? bytes(r.video_bytes) + `<div class="sub">${r.segments} seg</div>` : "–"}${checkBadge(r)}</td>
       <td class="r mono">${esc(keptUntil(r))}</td><td>${sync}</td><td>${stat}</td></tr>`;
     return row + (openId === r.stream_instance_id ? `<tr class="detail"><td colspan="8" id="det-${esc(r.stream_instance_id)}">${detailHtml(r)}</td></tr>` : "");
   }).join("");

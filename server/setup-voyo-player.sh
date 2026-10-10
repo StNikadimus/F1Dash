@@ -18,6 +18,8 @@ if command -v pipewire-pulse >/dev/null 2>&1 && ! command -v pulseaudio >/dev/nu
 else
   apt-get install -y pulseaudio
 fi
+# pactl: the recorder checks that Chrome's sound really reaches the f1voyo sink (missing sound is shown)
+apt-get install -y pulseaudio-utils || true
 if ! command -v google-chrome >/dev/null 2>&1; then
   install -d -m 0755 /etc/apt/keyrings
   wget -qO- https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg

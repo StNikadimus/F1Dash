@@ -315,7 +315,7 @@ class TvReplayEndpointTest(unittest.TestCase):
         self.assertEqual(b["hidden"], {"no_video": 0, "unplayable": 0, "deleted": 0})
         x = b["recordings"][0]
         self.assertEqual(set(x), {"id", "meeting", "session_name", "session_kind", "title", "start", "status", "channel",
-                                  "duration_s", "segments", "skipped_segments"})
+                                  "duration_s", "segments", "skipped_segments", "check", "sound"})
         self.assertNotIn(str(self.d), json.dumps(b))                             # no disk paths to the TV
 
     def test_missing_segments_and_a_recording_that_went_away(self):

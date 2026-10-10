@@ -196,6 +196,30 @@ class StreamTracker:
         self._touch(s, wall)
         return reason
 
+    def observe_keyed(self, s, key: str, wall: float, reason: str) -> Optional[str]:
+        """The server VOYO player names what it records (its session recorder's ``key`` = session kind +
+        episode id + day): the key IS the instance - one session, one package, whatever the video does in
+        between (a reload, a preroll, a live window changing length, a restart of either side). -> the reason
+        when this sample starts / resumes it, else None."""
+        fp = sample_fingerprint(s)
+        cur = self.current
+        if cur is not None and cur.id == key:
+            self._refine(cur, fp)
+            self._touch(s, wall)
+            return None
+        d = (self.store.get("instances") or {}).get(key)
+        if d:
+            keys = StreamInstance.__dataclass_fields__.keys()
+            inst = StreamInstance(**{k: d.get(k) for k in keys if k in d})
+            inst.resumed, why = True, "resumed"
+        else:
+            inst = self._new(s, fp, wall, reason)
+            inst.id, why = key, reason
+        inst.load_id = fp["load_id"]
+        self.current = inst
+        self._touch(s, wall)
+        return why
+
     @staticmethod
     def _refine(cur: StreamInstance, fp: dict) -> None:
         """Metadata that arrives after the first samples (the length loads later; a live DVR

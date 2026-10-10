@@ -464,7 +464,7 @@ class StatusReachabilityTest(unittest.TestCase):
         from types import SimpleNamespace
         return SimpleNamespace(sp={"enabled": True, "when": "schedule"}, server=server, stream_url=lambda: "https://voyo.si/x",
                                profile=Path(tempfile.gettempdir()), open=lambda *a: None, tick=lambda: None,
-                               close=lambda *a: None)
+                               close=lambda *a: None, episode_mode=lambda: True, event_url=lambda: "https://voyo.si/x")
 
     def status(self, server):
         import io
@@ -588,3 +588,77 @@ class HealthRecorderEndToEndTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EpisodeRunTest(unittest.TestCase):
+    """cmd_run in episode mode: a session window opens the session recorder with the window's session; a
+    finished session is not opened again in the same window; a running recording outlives its window
+    (live: until the recorder ends it); stopping the service closes it."""
+
+    def run_loop(self, windows, ticks, session_states, feed_live=False):
+        import tools.voyo_server_player as vsp
+        from tools.voyo_session import Target
+        opened, closed = [], []
+        player = mock.Mock()
+        player.sp = {"enabled": True, "when": "schedule", "record_sessions": ["sprint"]}
+        player.session = None
+        player.is_open = False
+        player.episode_mode.return_value = True
+        player.event_url.return_value = "https://voyo.si/f1/vn-kitajske"
+        player.stream_url.return_value = "https://voyo.si/f1/vn-kitajske"
+        player.feed_live.return_value = feed_live
+        player._flushed, player.done_window = -1e9, None
+        states = iter(session_states)
+
+        def open_session(target, url):
+            self.assertIsInstance(target, Target)
+            opened.append((target.kind, target.meeting, url))
+            player.session = mock.Mock(state="DISCOVERING", target=target, end_reason="")
+
+        def session_tick():
+            player.session.state = next(states, player.session.state)
+            if player.session.state == "DONE":
+                player.session.end_reason = "the recording ended"
+
+        def close_session(why):
+            closed.append(why)
+            player.session = None
+        player.open_session.side_effect = open_session
+        player.session_tick.side_effect = session_tick
+        player.close_session.side_effect = close_session
+        player.flush_pending.return_value = None
+        win_iter = iter(windows)
+        loops = {"n": 0}
+
+        def fake_sleep(_s):
+            pass
+
+        def current(_now):
+            loops["n"] += 1
+            if loops["n"] > ticks:
+                raise KeyboardInterrupt
+            return next(win_iter, None)
+        with mock.patch.object(vsp, "Schedule") as S, mock.patch.object(vsp, "heartbeat", return_value=[]), \
+                mock.patch.object(vsp.time, "sleep", fake_sleep), mock.patch.object(vsp, "find_browser", return_value="chrome"), \
+                mock.patch.object(vsp.signal, "signal"):
+            S.return_value.windows.return_value = []
+            S.return_value.current.side_effect = current
+            vsp.cmd_run(player)
+        return opened, closed
+
+    WIN = {"kind": "sprint", "meeting": "Chinese Grand Prix", "session_name": "Sprint",
+           "start": "2026-03-21T03:00:00+00:00", "open_until": 1e12}
+
+    def test_window_opens_the_sessions_recorder_once(self):
+        opened, closed = self.run_loop([self.WIN] * 8, 8, ["RECORDING", "RECORDING", "DONE"])
+        self.assertEqual(opened, [("sprint", "Chinese Grand Prix", "https://voyo.si/f1/vn-kitajske")])
+        self.assertEqual(closed, ["the recording ended"])           # DONE in the window: not opened again
+
+    def test_recording_outlives_its_window_and_service_stop_closes_it(self):
+        opened, closed = self.run_loop([self.WIN, None, None, None], 4, ["RECORDING"] * 10)
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(closed, ["the server VOYO player was stopped"])
+
+    def test_no_window_no_session(self):
+        opened, closed = self.run_loop([None] * 3, 3, [])
+        self.assertEqual((opened, closed), ([], []))

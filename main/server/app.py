@@ -33,7 +33,7 @@ from .sources.base import Source
 from .sync import parse_voyo_sample
 from .track import TrackProvider
 from .video import VideoMonitor
-from .voyo_recording import CAPTURE_NAME as VOYO_CAPTURE_NAME, VoyoStreamRecorder, load_package, recalibrate
+from .voyo_recording import CAPTURE_NAME as VOYO_CAPTURE_NAME, VoyoStreamRecorder, clean_report, load_package, recalibrate
 from . import replays
 from . import activity as activity_mod
 from . import recordings_admin as admin
@@ -761,6 +761,25 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             self.vod = not (inst is not None and inst.live)
             self.live_delay = eng.sync.live_delay if live_eng else None
             self.auto_state, self.mapping, self.K, self.page = {}, None, None, None
+            self.episode = None
+
+    SP_KEY_RE = re.compile(r"^[a-z0-9_]{2,24}-[0-9]{5,12}-[0-9]{8}$")
+
+    def _sp_recording(body: dict) -> Optional[dict]:
+        """The session recorder's identity of what it records (tools/voyo_session.py): its key + the VOYO
+        recording it selected and verified. Only known fields, bounded."""
+        r = body.get("recording")
+        if not isinstance(r, dict) or not isinstance(r.get("key"), str) or not SP_KEY_RE.match(r["key"]):
+            return None
+        out = {"key": r["key"]}
+        for k, n in (("episode_id", 16), ("title", 160), ("kind", 24), ("format", 8), ("verified", 300),
+                     ("meeting", 120), ("session_name", 120)):
+            v = r.get(k)
+            if isinstance(v, (str, int)) and not isinstance(v, bool) and str(v).strip():
+                out[k] = "".join(ch for ch in str(v)[:n] if ch.isprintable())
+        if isinstance(r.get("live"), bool):
+            out["live"] = r["live"]
+        return out
 
     def server_player_sample(request: Request, body: dict, sample) -> Response:
         if player_rec is None:
@@ -769,12 +788,23 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         if host not in LOOPBACK:
             return JSONResponse({"ok": False, "error": "the server player runs on this server only"},
                                 status_code=403)
+        rec_id = _sp_recording(body)
         if body.get("close"):
-            # the player closed the stream (session window over): its package is complete
-            player_rec.finalize(str(body.get("why") or "server player closed the stream")[:80])
-            player_tracker.current = None
+            # the player closed the stream (session window over / the recording ended): close its package
+            # with the player's report - the completeness check of the video uses it
+            why = str(body.get("why") or "server player closed the stream")[:80]
+            if rec_id:      # exactly that package - also when it is not the open one (the server restarted)
+                player_rec.finalize_key(rec_id["key"], why, clean_report(body.get("report")))
+            else:
+                player_rec.finalize(why)
+            if not rec_id or (player_tracker.current is not None and player_tracker.current.id == rec_id["key"]):
+                player_tracker.current = None
             return JSONResponse({"ok": True, "recording": player_rec.clock_reply()})
-        reason = player_tracker.observe(sample, {}, time.time())
+        if rec_id:
+            label = f"server player: {rec_id.get('kind') or 'session'} recording {rec_id.get('episode_id') or ''}".strip()
+            reason = player_tracker.observe_keyed(sample, rec_id["key"], time.time(), label)
+        else:
+            reason = player_tracker.observe(sample, {}, time.time())
         inst = player_tracker.current
         if reason and inst is not None:
             player_tracker.store.setdefault("instances", {})[inst.id] = inst.to_json()
@@ -784,8 +814,13 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         hint = body.get("session_hint") if isinstance(body.get("session_hint"), dict) else {}
         hint = {k: str(v)[:120] for k, v in hint.items()
                 if k in ("meeting", "session_name", "start", "end") and v not in (None, "")}
+        view = PlayerView(inst, hint)
+        if rec_id:
+            view.episode = {k: rec_id[k] for k in ("episode_id", "title", "kind", "format", "verified", "live")
+                            if k in rec_id}
+            view.episode["id"] = view.episode.pop("episode_id", None)
         try:
-            player_rec.observe(sample, inst, reason, PlayerView(inst, hint))
+            player_rec.observe(sample, inst, reason, view)
         except Exception:  # noqa: BLE001
             log.exception("VOYO server player recording failed")
         return JSONResponse({"ok": True, "recording": player_rec.clock_reply()})
@@ -799,7 +834,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         if not _loopback(request):
             return JSONResponse({"ok": False, "error": "local only"}, status_code=403)
         try:
-            body = json.loads((await request.body())[:8192] or b"{}")
+            # the session recorder's state (selection, candidates, problems) makes it bigger than it was
+            body = json.loads((await request.body())[:65536] or b"{}")
         except ValueError:
             return JSONResponse({"ok": False, "error": "json"}, status_code=400)
         if isinstance(body, dict):
@@ -1548,6 +1584,15 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                      ("x-pc-now", "pc_now_epoch")):
             with contextlib.suppress(TypeError, ValueError):
                 info[k] = float(request.headers.get(h))
+        # the recording machine's check of the segment (ffprobe / volumedetect): its length, picture, sound
+        for h, k, lo, hi in (("x-capture-duration", "duration", 0, 86400), ("x-capture-audio-max-db", "max_db", -500, 50)):
+            with contextlib.suppress(TypeError, ValueError):
+                v = float(request.headers.get(h))
+                if lo <= v <= hi:
+                    info[k] = round(v, 3)
+        for h, k in (("x-capture-audio", "audio"), ("x-capture-video", "video")):
+            if request.headers.get(h) in ("0", "1"):
+                info[k] = request.headers.get(h) == "1"
         if "pc_now_epoch" in info:              # PC clock - server clock (upload time ignored): for alignment
             info["pc_clock_minus_server_s"] = round(info["pc_now_epoch"] - time.time(), 3)
         try:

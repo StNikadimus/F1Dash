@@ -26,7 +26,8 @@ echo "$*" >> "$FAKE_LOG"
 case "$1" in
   cat) [ "$2" = "f1-dashboard.service" ] && [ -f "$FAKE_UNIT" ] && { echo "# $FAKE_UNIT"; cat "$FAKE_UNIT"; exit 0; }; exit 1 ;;
   is-active) shift; [ "$1" = --quiet ] && shift
-    if [ "$1" = "f1-dashboard.service" ]; then [ -f "$FAKE_DOWN" ] && exit 3; exit 0; fi; exit 3 ;;
+    if [ "$1" = "f1-dashboard.service" ]; then [ -f "$FAKE_DOWN" ] && exit 3; exit 0; fi
+    if [ "$1" = "f1-voyo-player.service" ] && [ -n "${FAKE_PLAYER:-}" ]; then exit 0; fi; exit 3 ;;
   restart) if [ -n "${FAKE_BREAK:-}" ]; then
              if [ -f "$FAKE_BROKE_ONCE" ]; then rm -f "$FAKE_DOWN"; else touch "$FAKE_DOWN" "$FAKE_BROKE_ONCE"; fi
            fi; exit 0 ;;
@@ -277,6 +278,14 @@ class UpdateScriptTest(unittest.TestCase):
         self.assertEqual(len(self.restarts()), 1)
         self.assertEqual(len(self.snapshots()), 1)
         self.assertEqual(hashlib.sha256((self.data / "auth" / "security.json").read_bytes()).hexdigest(), self.sec_hash)
+
+    def test_a_running_player_is_restarted_after_the_dashboard(self):
+        # the player unit only Wants= the dashboard now: the update restarts it itself, after the dashboard
+        self.push({"main/server/extra.py": "X = 1\n"})
+        r = self.run_script(FAKE_PLAYER="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.restarts(), ["restart f1-dashboard.service", "restart f1-voyo-player.service"])
+        self.assertIn("f1-voyo-player.service restarted - runs the new code", r.stdout)
 
     def test_rollback_goes_back_to_the_previous_deploy(self):
         new = self.push({"main/server/extra.py": "X = 1\n"})

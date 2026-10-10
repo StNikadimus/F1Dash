@@ -59,6 +59,9 @@ class VoyoClockBridge:
         # recorded as their own stream instances, never used for the dashboard's sync
         self.channel = channel
         self.extra: Callable[[], dict] = lambda: {}
+        # the server player's session recorder posts samples only while it records (no package is opened
+        # for the event page or for a recording that is still being checked)
+        self.gate: Callable[[], bool] = lambda: True
 
     @property
     def typing(self) -> bool:
@@ -207,7 +210,9 @@ class VoyoClockBridge:
                    value.get("ready_state"), value.get("seeking"))
             now = time.monotonic()
             # playing: every poll (the video clock moves); paused: on change or 1 s keep-alive
-            if moving or value.get("events") or key != self._last_sent or now - self._last_post >= 1.0:
+            if not self.gate():
+                self._last_sent = None
+            elif moving or value.get("events") or key != self._last_sent or now - self._last_post >= 1.0:
                 try:
                     self._post(value)
                     self._last_post, self._last_sent = now, key

@@ -315,6 +315,7 @@ function renderPanel() {
     return `<div class="pr rec${cur}${act}" data-i="${i}"><span class="pi">▶</span>` +
       `<span class="pt">${esc(recLabel(x))}</span><span class="pd">${esc(recWhen(x))}${x.duration_s ? " · " + esc(hms(x.duration_s)) : ""}</span>` +
       `<span class="ps s-${esc(x.status || "")}">${esc(STATUS_TXT[x.status] || (x.status || "").toUpperCase())}</span>` +
+      (x.check && x.check !== "COMPLETE" ? `<span class="ps s-interrupted" title="the recorded video does not cover the whole session">${esc(x.check)}</span>` : "") +
       `${act ? '<span class="pa">PLAYING</span>' : ""}</div>`;
   }).join("");
   $("pm-list").innerHTML = html;
@@ -516,7 +517,10 @@ async function poll() {
     const sess = status.session ? [status.session.meeting, status.session.session_name].filter(Boolean).join(" · ") : "";
     let lag = "";
     if (hls && hls.playingDate) lag = ` · picture ${((Date.now() + serverOffset - hls.playingDate.getTime()) / 1000).toFixed(0)} s behind the capture`;
-    setCtl("● ON AIR", "on", sess + lag);
+    // the server player's recording: which VOYO episode, for how long, a problem if there is one
+    const rec = st.state === "RECORDING" ? [st.episode_id ? "episode " + st.episode_id : "",
+      st.elapsed_s ? "recording " + dur(st.elapsed_s) : "", st.problem ? "PROBLEM: " + st.problem : ""].filter(Boolean).join(" · ") : "";
+    setCtl("● ON AIR", st.problem ? "rp" : "on", [sess + lag, rec].filter(Boolean).join(" · "));
     if (!playing) showOff(streamErr ? "STREAM PROBLEM" : "STARTING THE STREAM…", streamErr || sess, streamErr ? "warn" : "rec");
   } else {
     if (loaded) detach();
@@ -529,7 +533,8 @@ async function poll() {
     const main = st.state === "RECORDING" ? "RECORDING - LIVE STREAM STARTING" :
       st.state === "OPENING" ? "VOYO IS OPENING…" : "NO LIVE STREAM";
     showOff(main, sub, st.state === "RECORDING" || st.state === "OPENING" ? "rec" : st.level === "warn" || st.level === "bad" ? "warn" : "");
-    setCtl("● OFF AIR", "off", st.state || "");
+    setCtl("● OFF AIR", "off", [st.state, ["NOT FOUND", "AMBIGUOUS", "FAILED"].includes(st.state) ? st.detail : ""]
+      .filter(Boolean).join(" · "));
   }
 }
 // the status row (a label): the stream state as a badge + what it means / the session

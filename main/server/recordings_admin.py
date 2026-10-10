@@ -23,6 +23,16 @@ KIND_LABELS = {"practice1": "Practice 1", "practice2": "Practice 2", "practice3"
                "race": "Grand Prix (race)", "other": "Other / not identified"}
 EDITABLE = tuple(f"keep_{k}_days" for k in KINDS) + ("min_free_bytes",)
 SIZE_CACHE_S = 30.0
+# the server player's session recorder (tools/voyo_session.py) -> what /disk and /tv show
+SESSION_STATES = {
+    "DISCOVERING": ("OPENING", "ok", "looking for its recording on the VOYO event page"),
+    "OPENING": ("OPENING", "ok", "opening its recording"),
+    "VERIFYING": ("OPENING", "ok", "checking that the player plays that recording"),
+    "NOT_FOUND": ("NOT FOUND", "bad", "its recording is not on the VOYO event page (looking again every minute)"),
+    "AMBIGUOUS": ("AMBIGUOUS", "bad", "several recordings could be it - none is recorded (looking again)"),
+    "FAILED": ("FAILED", "bad", "the recording could not be confirmed (trying again)"),
+    "RECORDING": ("RECORDING", "warn", "recording"),
+}
 SAMPLE_FRESH_S = 30.0          # a stream counts as being recorded while samples are this recent
 HEARTBEAT_STALE_S = 90.0       # the server player posts its state every 15 s
 
@@ -172,16 +182,35 @@ def current_state(rec: VoyoStreamRecorder, player_rec: Optional[VoyoStreamRecord
         return {"state": "DISK FULL", "level": "bad",
                 "detail": f"less than min_free_bytes free on {st.get('path')} - no video is recorded until there is "
                           "room again (delete old recordings on /disk)"}
+    hb_fresh = hb_age is not None and hb_age < HEARTBEAT_STALE_S
+    rs = (heartbeat or {}).get("recording") if hb_fresh and player_enabled else None
+    rs = rs if isinstance(rs, dict) else None
     if fresh(player_rec):
         c = player_rec.cur
         sess = c.get("session") or {}
         cap = c.get("capture") or {}
-        return {"state": "RECORDING", "level": "rec",
-                "detail": f"{sess.get('meeting') or ''} {sess.get('session_name') or ''}".strip() or (c.get("title") or ""),
+        ep = c.get("episode") or {}
+        label = (rs or {}).get("target", {}).get("label") if rs else None
+        detail = label or f"{sess.get('meeting') or ''} {sess.get('session_name') or ''}".strip() or (c.get("title") or "")
+        if ep.get("id"):
+            detail += f" · VOYO episode {ep['id']}" + (f" ({str(ep.get('format')).upper()})" if ep.get("format") else "")
+        problem = (rs or {}).get("problem")
+        return {"state": "RECORDING", "level": "warn" if problem else "rec",
+                "detail": detail + (f" · PROBLEM: {problem}" if problem else ""),
                 "instance": c["stream_instance_id"], "since": c.get("detected_at"),
                 "elapsed_s": round(now - float(c.get("detected_at_epoch") or now)),
                 "segments": len(cap.get("segments") or []), "video_bytes": cap.get("bytes") or 0,
-                "channel": "server_player"}
+                "channel": "server_player", "episode_id": ep.get("id"), "problem": problem,
+                "recording_s": (rs or {}).get("recording_s"), "recoveries": (rs or {}).get("recoveries")}
+    if rs and rs.get("state") in SESSION_STATES:
+        name, level, text = SESSION_STATES[rs["state"]]
+        tgt = (rs.get("target") or {}).get("label") or "the session"
+        why = rs.get("problem") or rs.get("selection") or rs.get("verified") or ""
+        if rs["state"] == "RECORDING":           # the player records, but no sample reached this server lately
+            why = "no video position from the player for over 30 s" + (f" - {rs['problem']}" if rs.get("problem") else "")
+        return {"state": name, "level": level, "detail": f"{tgt}: {text}" + (f" - {why}" if why else ""),
+                "episode_id": rs.get("episode_id"), "candidates": rs.get("candidates") or [],
+                "problem": rs.get("problem"), "channel": "server_player"}
     if fresh(rec):
         c = rec.cur
         return {"state": "WATCHING (PC)", "level": "ok",

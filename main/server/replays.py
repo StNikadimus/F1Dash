@@ -211,7 +211,9 @@ def listing(summaries: Iterable[dict], package_dir, default_s: float = 60.0, lim
             "start": r.get("stream_start_wall_time") or r.get("detected_at"),
             "status": r.get("status"), "channel": r.get("channel") or "viewer",
             "duration_s": round(sum(s["duration"] for s in segs), 1), "segments": len(segs),
-            "skipped_segments": st.get("bad", 0)})
+            "skipped_segments": st.get("bad", 0),
+            # the recording's own completeness check (COMPLETE / INCOMPLETE) - a short file is said as such
+            "check": r.get("capture_check"), "sound": r.get("capture_sound")})
         if len(out) >= limit:
             break
     return out
