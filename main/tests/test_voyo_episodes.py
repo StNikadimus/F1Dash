@@ -16,8 +16,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from server import voyo_episodes as ve  # noqa: E402
 
-FP1, SQ, SPRINT = "63660752", "63660945", "63661233"
+FP1, SQ, SPRINT, QUALI = "63660752", "63660945", "63661233", "63661274"
 EP = "/play/category/2102/episodes/"
+EVENT = "https://voyo.si/vsebina/vn-singapurja"
+
+
+def card(eid, title, date, uniq="plain", handler="onPlayClick"):
+    """An item as EPISODES_JS reads VOYO's real event-page card: <a class="episode"> whose href is the EVENT page,
+    the id in data-uniq ("<id>" / "media/<id>") and in the inline play handler."""
+    onclick = (f'return onPlayClick("{eid}"),!1' if handler == "onPlayClick" else
+               f'return playEpisode("{eid}","{EP}{eid}"),!1' if handler == "playEpisode" else "")
+    return {"href": EVENT, "data_uniq": eid if uniq == "plain" else f"media/{eid}" if uniq == "media" else "",
+            "onclick": onclick, "text": f"{title} {date}", "label": "", "title": "", "alt": title,
+            "card": f"{title} {date}"}
+
+
+def singapore():
+    """The VN Singapurja page as seen in production (2026-10): every card twice - a plain onPlayClick card and a
+    media/<id> playEpisode one - next to links that are no recordings."""
+    shown = ((FP1, "F1 prosti trening", "9. 10. 2026"), (SQ, "F1 sprint kvalifikacije", "9. 10. 2026"),
+             (SPRINT, "F1 sprint dirka", "10. 10. 2026"), (QUALI, "F1 kvalifikacije", "10. 10. 2026"))
+    return ([card(i, t, d) for i, t, d in shown] + [card(i, t, d, uniq="media", handler="playEpisode") for i, t, d in shown] +
+            [{"href": EVENT, "text": "VN Singapurja", "card": "VN Singapurja"},                      # the page itself
+             {"href": "https://voyo.si/vsebina/f1", "data_uniq": "", "onclick": "", "text": "Formula 1"},
+             card("1234", "F1 napovednik", "8. 10. 2026"),                                       # too short an id
+             {**card(QUALI, "F1 kvalifikacije", ""), "data_uniq": "media/abc"},               # not digits
+             {**card("63669999", "F1 dirka", ""), "data_uniq": "63669998"}])                  # sources disagree
 
 
 def page(*cards):
@@ -132,6 +156,69 @@ class EventPageTest(unittest.TestCase):
         self.assertEqual(ve.select_episode(eps, "practice2").state, "NOT_FOUND")
         self.assertEqual(ve.select_episode([], "race").state, "NOT_FOUND")
         self.assertEqual(ve.select_episode(eps, "warmup").state, "NOT_FOUND")
+
+
+class ProductionEventPageTest(unittest.TestCase):
+    """The real VOYO DOM: cards link to the event page, the id is in data-uniq / onclick only. The old reading
+    (/episodes/<id> in the href) found NOTHING there - every session NOT_FOUND, zero recordings."""
+
+    def test_old_reading_found_nothing(self):
+        self.assertEqual({ve.episode_id(it.get("href")) for it in singapore()}, {None})
+
+    def test_ids_from_data_uniq_and_the_play_handler(self):
+        self.assertEqual(ve.item_episode(card(QUALI, "F1 kvalifikacije", "", handler="")), (QUALI, None))
+        self.assertEqual(ve.item_episode(card(QUALI, "F1 kvalifikacije", "", uniq="media", handler="")), (QUALI, None))
+        self.assertEqual(ve.item_episode(card(QUALI, "F1 kvalifikacije", "", uniq="", handler="onPlayClick")),
+                         (QUALI, None))
+        self.assertEqual(ve.item_episode(card(QUALI, "F1 kvalifikacije", "", uniq="", handler="playEpisode")),
+                         (QUALI, EP + QUALI))
+        self.assertEqual(ve.item_episode({"href": "https://voyo.si" + EP + QUALI}), (QUALI, EP + QUALI))  # old pages
+        for bad in ({"href": EVENT}, {"data_uniq": "media/"}, {"data_uniq": "1234"}, {"data_uniq": "1234567890123"},
+                    {"data_uniq": "media/6366127x"}, {"data_uniq": "63661274; x"}, {"onclick": "onPlayClick(63661274)"},
+                    {"onclick": 'evil("63661274")'}, {"data_uniq": "63661274", "onclick": 'onPlayClick("63661233")'},
+                    {"href": "https://voyo.si" + EP + SQ, "data_uniq": QUALI}, {"href": "http://[::1"}, {}):
+            self.assertEqual(ve.item_episode(bad), (None, None), bad)
+        # a playEpisode path that is not that recording's own episode address is not used
+        self.assertEqual(ve.item_episode({"onclick": f'playEpisode("{QUALI}","/play/category/2102/episodes/{SQ}")'}),
+                         (QUALI, None))
+        self.assertEqual(ve.item_episode({"onclick": f'playEpisode("{QUALI}","javascript:alert(1)")'}), (QUALI, None))
+
+    def test_the_singapore_page_yields_its_four_sessions(self):
+        eps = ve.episodes_from_page(singapore())
+        self.assertEqual(len(eps), 4)                                  # deduplicated by id, junk ignored
+        by = {e.id: e for e in eps}
+        self.assertEqual({i: (e.kind, e.confidence) for i, e in by.items()},
+                         {FP1: ("practice1", "high"), SQ: ("sprint_qualifying", "high"),
+                          SPRINT: ("sprint", "high"), QUALI: ("qualifying", "high")})
+        self.assertEqual({i: e.path for i, e in by.items()}, {i: EP + i for i in by})   # the playEpisode twin's path
+        self.assertEqual({i: e.date for i, e in by.items()},
+                         {FP1: "2026-10-09", SQ: "2026-10-09", SPRINT: "2026-10-10", QUALI: "2026-10-10"})
+        self.assertEqual(by[QUALI].title, "F1 kvalifikacije 10. 10. 2026")
+        for kind, want in (("practice1", FP1), ("sprint_qualifying", SQ), ("sprint", SPRINT), ("qualifying", QUALI)):
+            s = ve.select_episode(eps, kind, "Singapore Grand Prix VN Singapurja")
+            self.assertEqual((s.state, s.episode.id), ("SELECTED", want), kind)
+        self.assertEqual(ve.select_episode(eps, "race").state, "NOT_FOUND")   # not on the page yet
+
+    def test_the_twin_order_does_not_matter(self):
+        items = singapore()
+        for order in (items, list(reversed(items))):
+            eps = ve.episodes_from_page(order)
+            self.assertEqual(sorted((e.id, e.path) for e in eps), sorted((i, EP + i) for i in (FP1, SQ, SPRINT, QUALI)))
+
+    def test_cards_without_an_address_are_found_but_have_no_path(self):
+        eps = ve.episodes_from_page([card(QUALI, "F1 kvalifikacije", "10. 10. 2026")])
+        self.assertEqual([(e.id, e.kind, e.path) for e in eps], [(QUALI, "qualifying", None)])
+
+    def test_an_unnumbered_practice_is_practice_1_only_on_a_sprint_weekend(self):
+        normal = ve.episodes_from_page([card(FP1, "F1 prosti trening", ""), card(QUALI, "F1 kvalifikacije", "")])
+        self.assertEqual({e.id: e.kind for e in normal}, {FP1: None, QUALI: "qualifying"})
+        self.assertEqual(ve.select_episode(normal, "practice1").state, "NOT_FOUND")
+        two = ve.episodes_from_page([card(FP1, "F1 prosti trening", ""), card("63660753", "F1 prosti trening", ""),
+                                     card(SPRINT, "F1 sprint dirka", "")])
+        self.assertEqual(ve.select_episode(two, "practice1").state, "NOT_FOUND")          # which one? never guessed
+        numbered = ve.episodes_from_page([card(FP1, "F1 1. prosti trening", ""), card("63660753", "F1 prosti trening", ""),
+                                          card(SPRINT, "F1 sprint dirka", "")])
+        self.assertEqual({e.id: e.kind for e in numbered}["63660753"], None)
 
 
 class ManifestAndVerificationTest(unittest.TestCase):

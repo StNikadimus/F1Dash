@@ -64,25 +64,34 @@ PAGE_JS = r"""(() => {
     media_title: typeof v.title === 'string' && v.title ? v.title : null});
 })()"""
 
-# the event page: every link to a recording (/episodes/<id>) with the texts a person sees around it, and the
-# recordings the page describes in JSON-LD. Scrolls once to the end first (lazy-loaded rows). Read-only.
+# the event page: every recording card with the texts a person sees around it, and the recordings the page
+# describes in JSON-LD. VOYO's own cards are <a class="episode" data-uniq="media/<id>" onclick="playEpisode(..)">
+# whose href is the event page itself; older pages linked /episodes/<id>. The attributes are only READ - nothing
+# is clicked and no handler is called (the ids are parsed in server/voyo_episodes.py). Scrolls to the end first
+# (lazy-loaded rows). Read-only.
 EPISODES_JS = r"""(async () => {
   for (let i = 0; i < 4; i++) { window.scrollTo(0, document.body.scrollHeight); await new Promise((r) => setTimeout(r, 400)); }
   window.scrollTo(0, 0);
   const out = [];
+  const SEL = 'a[href*="/episode"], a.episode, a[data-uniq]';
   const txt = (e) => (e && (e.innerText || e.textContent) || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  const attr = (e, n) => (e.getAttribute(n) || '').slice(0, 400);
   const eid = (h) => { const m = /\/episodes?\/(\d{5,12})/.exec(h || ''); return m ? m[1] : null; };
-  for (const a of document.querySelectorAll('a[href*="/episode"]')) {
-    // the card of THIS recording: climb while the parent holds links to this recording only (never up to
+  const cardId = (a) => { const u = /^\s*(?:media\/)?(\d{5,12})\s*$/.exec(attr(a, 'data-uniq'));
+    const h = /(?:playEpisode|onPlayClick)\(\s*["'](\d{5,12})["']/.exec(attr(a, 'onclick'));
+    return (u && u[1]) || (h && h[1]) || eid(a.href); };
+  for (const a of new Set(document.querySelectorAll(SEL))) {
+    // the card of THIS recording: climb while the parent holds cards of this recording only (never up to
     // a row / list that also holds the other recordings - their titles would mix in)
-    const id = eid(a.href);
+    const id = cardId(a);
     let card = a, k = 0;
-    while (card.parentElement && k < 5 && txt(card.parentElement).length < 600 &&
-           [...card.parentElement.querySelectorAll('a[href*="/episode"]')].every((x) => eid(x.href) === id)) {
+    while (id && card.parentElement && k < 5 && txt(card.parentElement).length < 600 &&
+           [...card.parentElement.querySelectorAll(SEL)].every((x) => cardId(x) === id)) {
       card = card.parentElement; k++;
     }
     const img = a.querySelector('img');
-    out.push({href: a.href, text: txt(a), label: a.getAttribute('aria-label') || '', title: a.getAttribute('title') || '',
+    out.push({href: a.href, data_uniq: attr(a, 'data-uniq'), onclick: attr(a, 'onclick'), text: txt(a),
+              label: a.getAttribute('aria-label') || '', title: a.getAttribute('title') || '',
               alt: img ? img.getAttribute('alt') || '' : '', card: txt(card)});
   }
   for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
@@ -247,6 +256,12 @@ class SessionRecorder:
             self._goto(sel.state, now)
             self._next_try = now + self.limits.discover_retry_s
             self._issue(now, f"{self.target.label()}: {sel.reason}")
+            return []
+        if not sel.episode.path:                                  # named by the page, but nowhere to open it
+            self._goto("FAILED", now)
+            self._next_try = now + self.limits.retry_after_fail_s
+            self._issue(now, f"{self.target.label()}: the event page shows recording {sel.episode.id} but not the "
+                             "address that opens it - not opened")
             return []
         origin = str(page.get("origin") or "")
         url = urljoin(origin + "/", sel.episode.path)

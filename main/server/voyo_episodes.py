@@ -112,7 +112,7 @@ def classify_title(title: Optional[str]) -> Classification:
 class Episode:
     id: str
     title: str
-    path: str                            # /play/category/<c>/episodes/<id> (path only)
+    path: Optional[str]                  # /play/category/<c>/episodes/<id> (path only; None = not on the page)
     kind: Optional[str]
     confidence: str
     excluded: bool = False
@@ -130,8 +130,43 @@ class Episode:
 
 
 def episode_id(href: Optional[str]) -> Optional[str]:
-    m = EPISODE_PATH_RE.search(urlsplit(str(href or "")).path or "")
+    try:
+        m = EPISODE_PATH_RE.search(urlsplit(str(href or "")).path or "")
+    except ValueError:
+        return None
     return m.group(1) if m else None
+
+
+# VOYO's own event page: the cards are <a class="episode"> whose href is the event page itself; the recording
+# is named by data-uniq ("63661274" or "media/63661274") and by the inline play handler
+# (onPlayClick("63661274") / playEpisode("63661274", "/play/category/2102/episodes/63661274")).
+UNIQ_RE = re.compile(r"^\s*(?:media/)?([0-9]{5,12})\s*$")
+HANDLER_RE = re.compile(r"\b(?:playEpisode|onPlayClick)\(\s*([\"'])([0-9]{5,12})\1(?:\s*,\s*([\"'])([^\"']{1,200})\3)?")
+
+
+def item_episode(it: dict) -> tuple[Optional[str], Optional[str]]:
+    """One discovered card -> (episode id, the path that opens it). The id comes from data-uniq, the inline play
+    handler or a genuine /episodes/<id> link - only digits of a sane length; sources that disagree make the
+    card unusable (None). The path is a genuine episode link of that id, else playEpisode's own path for that
+    id, else None (the card names the recording but not where to open it). Nothing is clicked or called."""
+    ids, path = [], None
+    m = UNIQ_RE.match(str(it.get("data_uniq") or ""))
+    if m:
+        ids.append(m.group(1))
+    h = HANDLER_RE.search(str(it.get("onclick") or "")[:400])
+    if h:
+        ids.append(h.group(2))
+    hid = episode_id(it.get("href"))
+    if hid:
+        ids.append(hid)
+    if not ids or len(set(ids)) != 1:
+        return None, None
+    eid = ids[0]
+    if hid == eid:
+        path = urlsplit(str(it.get("href"))).path[:200]
+    elif h and h.group(4) and episode_id(h.group(4)) == eid:
+        path = urlsplit(h.group(4)).path[:200]
+    return eid, path
 
 
 DATE_RE = re.compile(r"\b(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{4})?")
@@ -156,10 +191,11 @@ def episodes_from_page(items: Iterable[dict], year: Optional[int] = None) -> lis
     for it in items or []:
         if not isinstance(it, dict):
             continue
-        eid = episode_id(it.get("href"))
+        eid, path = item_episode(it)
         if not eid:
             continue
-        d = by_id.setdefault(eid, {"path": urlsplit(str(it.get("href"))).path[:200], "texts": [], "card": ""})
+        d = by_id.setdefault(eid, {"path": None, "texts": [], "card": ""})
+        d["path"] = d["path"] or path                  # the same card is often on the page twice
         for k in ("ld_name", "label", "text", "alt", "title"):
             v = str(it.get(k) or "").strip()
             if v and v not in d["texts"]:
@@ -189,7 +225,22 @@ def episodes_from_page(items: Iterable[dict], year: Optional[int] = None) -> lis
         out.append(Episode(id=eid, title=title[:160], path=d["path"], kind=c.kind, confidence=c.confidence,
                            excluded=c.excluded, why=c.why, date=_card_date(d["card"], year),
                            live=True if LIVE_RE.search(card_n) else None, texts=d["texts"], card=d["card"]))
+    _sprint_weekend_practice(out)
     return out
+
+
+def _sprint_weekend_practice(eps: list) -> None:
+    """VOYO names it "F1 prosti trening" without a number. A sprint weekend has ONE practice session, so on a
+    page with a sprint / sprint qualifying recording the only unnumbered practice (and no numbered one) is
+    Practice 1. Anything else (two unnumbered, a normal weekend) stays unclear - never guessed."""
+    if not any(e.kind in ("sprint", "sprint_qualifying") for e in eps):
+        return
+    if any(e.kind in ("practice1", "practice2", "practice3") for e in eps):
+        return
+    bare = [e for e in eps if e.kind is None and not e.excluded and e.why == "a practice session without its number"]
+    if len(bare) == 1:
+        bare[0].kind, bare[0].confidence = "practice1", "high"
+        bare[0].why = "the only practice session of a sprint weekend"
 
 
 # ---------------------------------------------------------------------------------------------
