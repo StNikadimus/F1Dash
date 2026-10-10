@@ -588,9 +588,14 @@ It prints a VNC **password**. Then:
    ```
 2. **On your PC**, open the VNC viewer, connect to **`127.0.0.1:5900`**, and enter the password.
 3. You now see the server's (invisible) screen with Chrome. Sign in to **VOYO**, then open the
-   **F1 live channel / stream page**, the same one you open on the PC to watch F1.
-4. Back in the server SSH window, press **Ctrl+C**. It prints `Saved as the stream page: https://...`.
-   From now on, that page is opened for every session.
+   **F1 live channel / stream page**, the same one you open on the PC to watch F1, and start the
+   video. The SSH window shows the open page and its player, e.g.
+   `player: video player ready - playing at 12 s (readyState 4 ...)`. Paused is fine; a content page
+   with only a description and a play button says `no video element on the page`.
+4. Once it says `video player ready`, press **Ctrl+C** in the server SSH window. It prints
+   `Saved as the stream page: https://...`. From now on, that page is opened for every session.
+   If no usable player was confirmed, it warns and asks before saving. Without a yes nothing changes
+   and an earlier stream page stays. `voyo-player.sh login --save-unverified` saves the page anyway.
 
 Close the VNC viewer and the tunnel window.
 
