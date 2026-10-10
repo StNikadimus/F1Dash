@@ -129,13 +129,18 @@ What ← / → do depends on the row the cursor is on:
 | `M` | sound on / off for the `/tv` video | locally |
 | `F` | browser full screen | locally |
 | Space, `P`, media Play/Pause | play / pause the `/tv` video (live or replay) | locally (**changed**, see §6) |
-| ↑ ↓ ← →, Enter, Esc, Backspace, browser Back | sent to the server as the remote keys (`KEY_UP`, …, `KEY_ENTER`, `KEY_ESC`, `KEY_BACK`); the PLAYER layer when the panel is open, else the dashboard | through the dashboard frame's connection |
-| `B`, ContextMenu key | `KEY_B`: open / close the LIVE / REPLAYS panel | through the dashboard frame's connection |
+| `B`, ContextMenu key | open / close the LIVE / REPLAYS panel | locally (**changed**, see §8); the remote's panel state follows on the LAN |
+| ↑ ↓ ← →, Enter, Esc, Backspace, browser Back, **panel open** | ↑ ↓ move, ← → seek / volume / page, Enter plays the row, Esc / Backspace / Back close the panel | locally |
+| ↑ ↓ ← →, Enter, Esc, Backspace, browser Back, panel closed | sent to the server as the remote keys (`KEY_UP`, …, `KEY_ENTER`, `KEY_ESC`, `KEY_BACK`): the dashboard | through the dashboard frame's connection (LAN only - see below) |
 
 Mouse or touch on `/tv` shows the controls for 4 seconds:
 - **row 1:** RACE VIEW `1`, VIDEO `2`, DASHBOARD `3`;
 - **row 2:** LIVE / REPLAYS `B`, SOUND `M`, FULLSCREEN `F`, LOG OUT, RECORDER;
 - **row 3:** a status label (ON AIR / OFF AIR / REPLAY / NO CONNECTION) that cannot be clicked.
+
+`B` pressed inside the dashboard frame of `/tv` also opens the `/tv` page's panel. The panel's rows can be clicked or tapped, and its ✕ closes it.
+
+Through the public gateway (Tailscale Funnel) the dashboard frame's connection only listens: keys sent the remote's way do nothing there, by design. Everything the `/tv` page handles locally, including the whole LIVE / REPLAYS panel, works the same on the LAN and through Funnel.
 
 Before the TV is approved (the approval screen), no key does anything.
 
@@ -235,7 +240,7 @@ scancodes there: ▲ ▼ ◀ ▶ OK BACK. Every other remote button works only a
 | OK / BACK with video | The video layers follow the **server's** TV mode, not a single screen's layout. A `/tv` page in VIDEO layout while the server is in FULL_DASHBOARD gets the base meaning: OK opens telemetry. |
 | MENU | `CYCLE_MODE` normally, but closes the LIVE / REPLAYS panel while it is open. |
 | Esc in EVENT SYNC | Keyboard Esc closes the whole SYNC menu; BACK, Backspace and the remote's Esc close only the EVENT SYNC sub-menu. |
-| PLAYER panel | Its open state is shared, like every remote state. While it is open, the arrows / OK / BACK / Space / `P` of **all** inputs drive the panel, even on a PC that shows no `/tv` page. Close it with `B` or BACK. |
+| PLAYER panel | Its open state on the server is shared, like every remote state. While it is open there, the arrows / OK / BACK / Space / `P` of **all** remote inputs drive the panel, even on a PC that shows no `/tv` page. Close it with `B` or BACK. A `/tv` page opens and drives its own panel locally; on the LAN it also opens the shared state, so the phone can drive it too. |
 | SYNC menu and PLAYER panel | Never open at the same time: opening one closes the other. |
 
 **Broken or missing bindings found:**
@@ -255,5 +260,6 @@ scancodes there: ▲ ▼ ◀ ▶ OK BACK. Every other remote button works only a
 - **New:** `B` (keyboard), LIST / EPG (IR remote), the `/remote` LIVE / REPLAYS button and the `/tv` LIVE / REPLAYS button open the `/tv` player panel. The PLAYER layer (§3) is new with it.
 - **New:** on the `/tv` page the arrows, Enter, Esc, Backspace, browser Back, `B` and ContextMenu are sent the remote's way (§4). Before, the `/tv` page handled only `1` `2` `3` `M` `F`.
 - **Changed:** on the `/tv` page, Space, `P` and media Play/Pause play / pause **that page's** video. They are not sent to the server, so Space on the TV no longer switches the TV mode of every other screen. In the dashboard, Space and `P` are unchanged.
+- **Changed:** on the `/tv` page, `B`, ContextMenu and the LIVE / REPLAYS button open the panel on the page itself. While the panel is open, the arrows, Enter, Esc, Backspace and browser Back drive it there. Before, they went through the server and did nothing through the public gateway, so recordings could not be chosen on a `/tv` opened through Funnel.
 - **Help overlay:** now also lists `B` (LIVE / REPLAYS panel).
 - No existing shortcut was removed.

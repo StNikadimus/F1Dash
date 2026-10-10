@@ -85,6 +85,10 @@
     if (!IN_TV || e.source !== window.parent || e.origin !== location.origin) return;
     const d = e.data || {};
     if (d.type === "f1-key" && typeof d.key === "string" && /^KEY_[A-Z0-9_]{1,28}$/.test(d.key)) send({ type: "key", key: d.key });
+    // the /tv page opened / closed its panel itself: the remote's panel state follows (only this one command)
+    else if (d.type === "f1-cmd" && d.command === "PLAYER_MENU" && (d.arg === "open" || d.arg === "close")) {
+      send({ type: "command", command: "PLAYER_MENU", arg: d.arg });
+    }
   });
 
   function handle(m) {
@@ -204,6 +208,10 @@
     const k = KEYS[e.key];
     if (!k) return;
     e.preventDefault();
+    if (IN_TV && k === "KEY_B") {                    // inside /tv: B opens THAT page's player panel (no server needed)
+      window.parent.postMessage({ type: "f1-tv-key", key: k }, location.origin);
+      return;
+    }
     send({ type: "key", key: k });
   });
 

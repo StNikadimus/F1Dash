@@ -7,7 +7,7 @@ as one HLS playlist built from those files AS THEY ARE - no remux, no copy, noth
 
     #EXT-X-MAP:URI="<segment>",BYTERANGE="<init size>@0"      the segment's own init part
     #EXTINF:<seconds>,
-    #EXT-X-BYTERANGE:<rest>@<init size>                        its fragments
+    #EXT-X-BYTERANGE:<fragments>@<init size>                   its complete fragments
     <segment>
     #EXT-X-DISCONTINUITY                                       next segment (timestamps start at 0 again)
 
@@ -26,14 +26,17 @@ from typing import Iterable, Optional
 
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
 SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}\.mp4$")
+VIDEO_RE = re.compile(r"\.(mp4|mkv|webm|ts)$")          # what a capture can upload (voyo_recording.CAPTURE_NAME)
 MAX_SEGMENTS = 2000                       # 60 s pieces: ~33 h - far more than any session
-_init_cache: dict[tuple, Optional[int]] = {}
+_init_cache: dict[tuple, Optional[tuple[int, int]]] = {}
 _lock = threading.Lock()
 
 
-def init_size(path: Path) -> Optional[int]:
-    """Bytes of the init part (everything before the first ``moof``) of a fragmented MP4, or None when the
-    file is not one (plain MP4, still being written, damaged). Reads only the box headers."""
+def layout(path: Path) -> Optional[tuple[int, int]]:
+    """(init, end) of a fragmented MP4: ``init`` = bytes before the first ``moof`` (ftyp + moov), ``end`` = the
+    end of its last COMPLETE fragment (``moof`` + its whole ``mdat``) - a segment cut short (power loss, a full
+    disk) plays up to there. None when the file is not one (plain MP4, still being written, damaged, no
+    complete fragment). Reads only the box headers."""
     try:
         st = path.stat()
     except OSError:
@@ -42,12 +45,14 @@ def init_size(path: Path) -> Optional[int]:
     with _lock:
         if key in _init_cache:
             return _init_cache[key]
-    found: Optional[int] = None
-    seen_moov = False
+    found: Optional[tuple[int, int]] = None
+    init: Optional[int] = None
+    end = 0
+    seen_moov = in_frag = False
     try:
         with open(path, "rb") as fh:
             pos = 0
-            for _ in range(64):                               # ftyp, moov (+ free / sidx) come first
+            for _ in range(200_000):                          # ftyp, moov (+ free / sidx), then moof + mdat pairs
                 head = fh.read(8)
                 if len(head) < 8:
                     break
@@ -57,24 +62,39 @@ def init_size(path: Path) -> Optional[int]:
                     if len(ext) < 8:
                         break
                     size = struct.unpack(">Q", ext)[0]
-                if size < 8 or pos + size > st.st_size:
+                if size < 8 or pos + size > st.st_size:       # the file ends inside this box: cut short here
                     break
                 if typ == b"moov":
                     seen_moov = True
                 elif typ == b"moof":
-                    found = pos if seen_moov and pos > 0 else None
-                    break
-                elif typ == b"mdat":                          # media before any fragment: not fragmented
-                    break
+                    if init is None:
+                        if not seen_moov or pos == 0:
+                            break
+                        init = pos
+                    in_frag = True
+                elif typ == b"mdat":
+                    if init is None:                          # media before any fragment: not fragmented
+                        break
+                    if in_frag:
+                        end, in_frag = pos + size, False
                 pos += size
                 fh.seek(pos)
     except OSError:
-        found = None
+        init = None
+    if init is not None and end > init:
+        found = (init, end)
     with _lock:
         if len(_init_cache) > 4096:
             _init_cache.clear()
         _init_cache[key] = found
     return found
+
+
+def init_size(path: Path) -> Optional[int]:
+    """Bytes of the init part (everything before the first ``moof``) of a fragmented MP4, or None when the
+    file is not a playable one (see ``layout``)."""
+    lay = layout(path)
+    return lay[0] if lay else None
 
 
 def _capture_log(pkg: Path) -> dict[str, dict]:
@@ -94,30 +114,43 @@ def _capture_log(pkg: Path) -> dict[str, dict]:
     return out
 
 
-def segments(pkg: Path, default_s: float = 60.0) -> list[dict]:
-    """The playable segments of a package, oldest first: [{name, bytes, init, duration, start}].
-    Durations come from the capture log (ffmpeg's own segment times); missing ones use ``default_s``."""
+def segments(pkg: Path, default_s: float = 60.0, stats: Optional[dict] = None) -> list[dict]:
+    """The playable segments of a package, oldest first: [{name, bytes, init, end, duration, start}].
+    Durations come from the capture log (ffmpeg's own segment times); missing ones use ``default_s``.
+    ``stats``: filled with what was found - ``files`` (video files in capture/), ``bad`` (not playable)."""
     cap = pkg / "capture"
-    if not cap.is_dir():
+    if stats is not None:
+        stats.update(files=0, bad=0)
+    if not cap.is_dir() or cap.is_symlink():
         return []
     info = _capture_log(pkg)
     real = cap.resolve()
     out = []
     for f in sorted(cap.iterdir())[: MAX_SEGMENTS * 2]:
+        if not VIDEO_RE.search(f.name):
+            continue
         # only the package's own files: no links (out of the folder, or anywhere else)
         if not SEGMENT_RE.match(f.name) or f.is_symlink() or not f.is_file() or f.resolve().parent != real:
+            if stats is not None and not f.is_symlink():
+                stats["files"] += 1
+                stats["bad"] += 1
             continue
+        if stats is not None:
+            stats["files"] += 1
         size = f.stat().st_size
-        init = init_size(f)
-        if not init or init >= size:
+        lay = layout(f)
+        if not lay:
+            if stats is not None:
+                stats["bad"] += 1
             continue
+        init, end = lay
         rec = info.get(f.name) or {}
         try:
             t0, t1 = float(rec.get("pc_start_epoch")), float(rec.get("pc_end_epoch"))
             dur = t1 - t0 if 0 < t1 - t0 < 4 * 3600 else default_s
         except (TypeError, ValueError):
             t0, dur = None, default_s
-        out.append({"name": f.name, "bytes": size, "init": init, "duration": round(dur, 3), "start": t0})
+        out.append({"name": f.name, "bytes": size, "init": init, "end": end, "duration": round(dur, 3), "start": t0})
         if len(out) >= MAX_SEGMENTS:
             break
     out.sort(key=lambda s: (s["start"] is None, s["start"] or 0, s["name"]))
@@ -136,32 +169,87 @@ def playlist(segs: list[dict], complete: bool, query: str = "") -> str:
             lines.append("#EXT-X-DISCONTINUITY")
         lines.append(f'#EXT-X-MAP:URI="{uri}",BYTERANGE="{s["init"]}@0"')
         lines.append(f"#EXTINF:{s['duration']:.3f},")
-        lines.append(f"#EXT-X-BYTERANGE:{s['bytes'] - s['init']}@{s['init']}")
+        lines.append(f"#EXT-X-BYTERANGE:{s.get('end', s['bytes']) - s['init']}@{s['init']}")
         lines.append(uri)
     if complete:
         lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
 
 
-def listing(summaries: Iterable[dict], package_dir, default_s: float = 60.0, limit: int = 200) -> list[dict]:
-    """The recordings the /tv player can play (video on the disk), newest first, with what the TV shows."""
+def listing(summaries: Iterable[dict], package_dir, default_s: float = 60.0, limit: int = 200,
+            hidden: Optional[dict] = None) -> list[dict]:
+    """The recordings the /tv player can play (video on the disk that it can read), newest first, with what
+    the TV shows. Decided by the files on the disk, not by the index alone. ``hidden``: counts of the packages
+    left out - ``no_video`` (timing / sync data only), ``unplayable`` (video files the player cannot read:
+    another format, damaged, still being written), ``deleted`` (the video was removed by retention)."""
+    if hidden is not None:
+        hidden.update(no_video=0, unplayable=0, deleted=0)
+
+    def skip(why: str) -> None:
+        if hidden is not None:
+            hidden[why] += 1
+
     out = []
     for r in summaries:
         iid = str(r.get("stream_instance_id") or "")
-        if not ID_RE.match(iid) or not r.get("capture_segments") or r.get("capture_deleted_at"):
+        if not ID_RE.match(iid):
+            continue
+        if r.get("capture_deleted_at"):
+            skip("deleted")
             continue
         pkg = package_dir(iid)
         if pkg is None:
             continue
-        segs = segments(pkg, default_s)
+        st: dict = {}
+        segs = segments(pkg, default_s, st)
         if not segs:
+            skip("unplayable" if st.get("files") else "no_video")
             continue
         out.append({
             "id": iid, "meeting": r.get("meeting"), "session_name": r.get("session_name"),
             "session_kind": r.get("session_kind") or "other", "title": r.get("title"),
             "start": r.get("stream_start_wall_time") or r.get("detected_at"),
             "status": r.get("status"), "channel": r.get("channel") or "viewer",
-            "duration_s": round(sum(s["duration"] for s in segs), 1), "segments": len(segs)})
+            "duration_s": round(sum(s["duration"] for s in segs), 1), "segments": len(segs),
+            "skipped_segments": st.get("bad", 0)})
         if len(out) >= limit:
             break
     return out
+
+
+def main(argv: Optional[list] = None) -> int:
+    """Read-only check of a recordings folder: which packages the /tv player lists, and why the others not.
+        python -m server.replays /mnt/f1disk/voyo_streams        (the [voyo.recording] path; nothing is written)"""
+    import sys
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 1:
+        print("usage: python -m server.replays <[voyo.recording] path>")
+        return 2
+    root = Path(args[0])
+    if not root.is_dir():
+        print(f"{root}: not a folder")
+        return 1
+    n = 0
+    for mf in sorted(root.glob("*/manifest.json")):
+        try:
+            m = json.loads(mf.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            print(f"{mf.parent.name:<24} manifest.json unreadable - not listed")
+            continue
+        sess = m.get("session") or {}
+        cap = m.get("capture") or {}
+        st: dict = {}
+        segs = [] if cap.get("deleted_at") else segments(mf.parent, stats=st)
+        why = ("PLAYABLE" if segs else "video deleted (retention)" if cap.get("deleted_at")
+               else "no video files (timing / sync data only)" if not st.get("files")
+               else "video files the player cannot read (not fragmented MP4 / damaged / another format)")
+        n += bool(segs)
+        label = " · ".join(str(x) for x in (sess.get("meeting"), sess.get("session_name")) if x) or m.get("title") or ""
+        print(f"{mf.parent.name:<24} {str(m.get('status')):<12} {why:<40} "
+              f"{len(segs)}/{st.get('files', 0)} segments, {sum(s['duration'] for s in segs) / 60:.1f} min  {label}")
+    print(f"{n} playable recording(s) in {root}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
