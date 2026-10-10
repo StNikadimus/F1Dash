@@ -190,6 +190,23 @@ class SelectionTest(unittest.TestCase):
         self.assertIn(("play",), acts)
         self.assertIn(("unmute",), acts)
 
+    def test_a_double_slash_link_never_leaves_voyo(self):
+        # https://voyo.si//voyo.si.evil.com/... used to open https://voyo.si.evil.com/... (a prefix check)
+        page = {"origin": ORIGIN, "items": [{"href": ORIGIN + "//voyo.si.evil.com" + EP + SPRINT, "text": "Sprint"}]}
+        d = Driver("sprint", page=page)
+        acts = d.tick()
+        self.assertEqual(d.s.state, "FAILED")
+        self.assertIsNone(d.s.episode_url)
+        self.assertFalse(any(a[0] == "navigate" for a in acts))
+
+    def test_an_event_page_on_another_site_is_not_used(self):
+        page = {"origin": "https://voyo.si.evil.com", "items": [{"href": "https://voyo.si.evil.com" + EP + SPRINT, "text": "Sprint"}]}
+        d = Driver("sprint", page=page)
+        d.tick()
+        self.assertEqual(d.s.state, "FAILED")
+        self.assertIn("leads off the VOYO site", d.s.problem)
+        self.assertIsNone(d.s.episode_url)
+
     def test_a_link_to_another_site_is_opened_on_voyo_only(self):
         page = {"origin": ORIGIN, "items": [{"href": "https://evil.example" + EP + SPRINT, "text": "Sprint"}]}
         d = Driver("sprint", page=page)

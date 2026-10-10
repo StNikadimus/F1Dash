@@ -358,7 +358,10 @@ states:
      date.
 
    **Another session is never recorded instead.**
-4. **OPENING / VERIFYING:** the recording's page is opened. Recording starts only when the player
+4. **OPENING / VERIFYING:** the recording's page is opened. It is opened only on the event page's own
+   site, with the same scheme and host, and only at that episode's own `/…/episodes/<id>` path. A path
+   starting with `//`, another host, another scheme, a backslash or control characters is never opened
+   (**FAILED**). Recording starts only when the player
    shows that episode id, either in its `mediaId` or in the path of the DASH / HLS manifest it
    loaded, and the video moves. Only the manifest's path is read, never its query string or
    tokens, and never the media itself.

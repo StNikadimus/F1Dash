@@ -28,7 +28,6 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import urljoin, urlsplit
 
 from server import voyo_episodes as ve
 
@@ -263,9 +262,8 @@ class SessionRecorder:
             self._issue(now, f"{self.target.label()}: the event page shows recording {sel.episode.id} but not the "
                              "address that opens it - not opened")
             return []
-        origin = str(page.get("origin") or "")
-        url = urljoin(origin + "/", sel.episode.path)
-        if urlsplit(url).scheme not in ("http", "https") or (origin and not url.startswith(origin)):
+        url = ve.episode_url(page.get("origin"), sel.episode.path, sel.episode.id, self.event_url)
+        if not url:
             self._goto("FAILED", now)
             self._next_try = now + self.limits.retry_after_fail_s
             self._issue(now, "the recording's link leads off the VOYO site - not opened")

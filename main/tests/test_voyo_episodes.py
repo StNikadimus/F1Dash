@@ -286,6 +286,43 @@ class StaleEventPageTest(unittest.TestCase):
         self.assertEqual(ve.select_episode(eps, "qualifying").episode.id, QUALI)
 
 
+class EpisodeUrlTest(unittest.TestCase):
+    """The address the player opens: the event page's own scheme + host + that episode's own path - nothing
+    else (a "//host" path, another host, another scheme, another episode's path)."""
+    SITE = "https://voyo.si"
+
+    def test_valid_voyo_paths(self):
+        self.assertEqual(ve.episode_url(self.SITE, EP + QUALI, QUALI), self.SITE + EP + QUALI)
+        self.assertEqual(ve.episode_url(self.SITE + "/", EP + QUALI, QUALI, EVENT), self.SITE + EP + QUALI)
+        self.assertEqual(ve.episode_url("https://www.voyo.si", EP + QUALI, QUALI, EVENT), "https://www.voyo.si" + EP + QUALI)
+        self.assertEqual(ve.episode_url("http://127.0.0.1:8080", "/episodes/" + QUALI, QUALI), "http://127.0.0.1:8080/episodes/" + QUALI)
+
+    def test_another_site_is_never_opened(self):
+        for path in ("//voyo.si.evil.com" + EP + QUALI, "//evil.example" + EP + QUALI, "///evil.example" + EP + QUALI,
+                     "https://evil.example" + EP + QUALI, "https://voyo.si" + EP + QUALI,     # absolute URLs are no paths
+                     "/\\evil.example" + EP + QUALI, "\\\\evil.example" + EP + QUALI, "/play/x\\..\\episodes/" + QUALI,
+                     " " + EP + QUALI, EP + QUALI + "\n", "javascript:alert(1)//" + EP + QUALI,
+                     "play/category/2102/episodes/" + QUALI, "", None):
+            self.assertIsNone(ve.episode_url(self.SITE, path, QUALI), repr(path))
+        self.assertIsNone(ve.episode_url(self.SITE, EP + SQ, QUALI))                       # another episode's path
+        self.assertIsNone(ve.episode_url(self.SITE, "/vsebina/vn-singapurja", QUALI))       # not an episode address
+        for origin in ("", None, "voyo.si", "ftp://voyo.si", "javascript:alert(1)", "file:///etc", "data:text/html,x",
+                       "https://user:pw@voyo.si", "https://voyo.si/vsebina", "https://voyo.si?x=1", "http://[::1"):
+            self.assertIsNone(ve.episode_url(origin, EP + QUALI, QUALI), repr(origin))
+        # the page is not on the event page's site (redirected / another site): nothing is opened there
+        self.assertIsNone(ve.episode_url("https://voyo.si.evil.com", EP + QUALI, QUALI, EVENT))
+        self.assertIsNone(ve.episode_url("https://evil.example", EP + QUALI, QUALI, EVENT))
+
+    def test_a_bad_card_address_is_dropped_and_its_twin_used(self):
+        bad = {"href": "https://voyo.si//voyo.si.evil.com" + EP + QUALI}
+        self.assertEqual(ve.item_episode(bad), (QUALI, None))
+        self.assertEqual(ve.item_episode({"data_uniq": QUALI, "onclick": f'playEpisode("{QUALI}","//voyo.si.evil.com{EP}{QUALI}")'}),
+                         (QUALI, EP + QUALI))                                      # urlsplit keeps only the path
+        good = card(QUALI, "F1 kvalifikacije", "", uniq="media", handler="playEpisode")
+        for items in ([dict(bad, text="F1 kvalifikacije"), good], [good, dict(bad, text="F1 kvalifikacije")]):
+            self.assertEqual([e.path for e in ve.episodes_from_page(items)], [EP + QUALI])
+
+
 class ManifestAndVerificationTest(unittest.TestCase):
     DASH = f"https://vod.cdn.example.net/vod/{FP1}/dash/manifest.mpd?token=SECRET123&exp=999"
     HLS = f"https://live.cdn.example.net/hls/{SPRINT}/master.m3u8?hdnts=exp=1~acl=/*~hmac=abcdef"

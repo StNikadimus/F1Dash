@@ -163,10 +163,47 @@ def item_episode(it: dict) -> tuple[Optional[str], Optional[str]]:
         return None, None
     eid = ids[0]
     if hid == eid:
-        path = urlsplit(str(it.get("href"))).path[:200]
-    elif h and h.group(4) and episode_id(h.group(4)) == eid:
-        path = urlsplit(h.group(4)).path[:200]
+        path = safe_path(urlsplit(str(it.get("href"))).path)
+    if not path and h and h.group(4) and episode_id(h.group(4)) == eid:
+        path = safe_path(urlsplit(h.group(4)).path)
     return eid, path
+
+
+UNSAFE_PATH_RE = re.compile(r"[\\\s\x00-\x1f\x7f]")
+
+
+def safe_path(path: Optional[str]) -> Optional[str]:
+    """A path on the same site: "/..." - never "//host/..." (another site to a browser), a backslash (a browser
+    reads it as "/"), whitespace or control characters."""
+    p = str(path or "")
+    if not p.startswith("/") or p.startswith("//") or UNSAFE_PATH_RE.search(p) or len(p) > 200:
+        return None
+    return p
+
+
+def _host(netloc: str) -> str:
+    return netloc.lower().removeprefix("www.")
+
+
+def episode_url(origin: Optional[str], path: Optional[str], eid: str, site: Optional[str] = None) -> Optional[str]:
+    """The address that opens episode ``eid``: the event page's origin (http / https, a host, nothing else) + that
+    episode's own path - or None. ``site`` (the configured event page): the origin must be its host (www. or not)."""
+    try:
+        o = urlsplit(str(origin or ""))
+        s = urlsplit(str(site or ""))
+    except ValueError:
+        return None
+    if o.scheme not in ("http", "https") or not o.netloc or "@" in o.netloc or o.path not in ("", "/") \
+            or o.query or o.fragment:
+        return None
+    if s.netloc and _host(s.netloc) != _host(o.netloc):
+        return None
+    p = safe_path(path)
+    if not p or episode_id(p) != eid:
+        return None
+    url = f"{o.scheme}://{o.netloc}{p}"
+    u = urlsplit(url)
+    return url if (u.scheme, u.netloc, u.path) == (o.scheme, o.netloc, p) else None
 
 
 DATE_RE = re.compile(r"\b(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{4})?")
