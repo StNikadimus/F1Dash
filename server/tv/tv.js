@@ -11,44 +11,79 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-/* ------------------------------------------------------------------ authorization of this page load */
+/* ------------------------------------------------------------------ authorization of this page load
+   One approval request at a time, and only while this page exists:
+   * every asynchronous step (request, status poll, retry timer) belongs to one flow; a step whose flow was
+     replaced, denied or abandoned does nothing - a late answer can neither restart polling nor log in;
+   * DENIED ends it for this page instance: nothing asks again (no button, no retry, no back/forward
+     restore) until the page is loaded again;
+   * leaving / closing the page (pagehide) stops every timer and call and withdraws its open request on the
+     server (best effort - sendBeacon with its own challenge; otherwise the request just expires). */
 let PAGE = null, challenge = null, authTimer = null, authTotal = 120, leaving = false;
+let flow = 0, denied = false, gone = false, inflight = null;
 const next = (() => { const n = new URLSearchParams(location.search).get("next") || "/tv";
   return /^\/[A-Za-z0-9_\-\/]*$/.test(n) && !n.startsWith("//") ? n : "/tv"; })();
 function authShow(title, msg, cls) { $("a-title").textContent = title; $("a-msg").textContent = msg; $("a-msg").className = "msg " + (cls || ""); }
+function stopFlow() {                                   // the current flow's timers and call end; its late answers are ignored
+  flow++; clearTimeout(authTimer); authTimer = null;
+  if (inflight) { inflight.abort(); inflight = null; }
+}
+function current(id) { return id === flow && !denied && !gone; }
+function authPost(url, headers) {
+  const ac = new AbortController(); inflight = ac;
+  return fetch(url, { method: "POST", credentials: "same-origin", cache: "no-store", headers: headers || {}, signal: ac.signal })
+    .finally(() => { if (inflight === ac) inflight = null; });
+}
+function withdraw(ch) {                                 // only this page can: its request cookie + its own challenge
+  if (!ch) return;
+  try { navigator.sendBeacon("/api/tv/logout", "challenge:" + ch); } catch (e) { /* it expires on its own */ }
+}
 async function ask() {
-  clearTimeout(authTimer); $("a-again").hidden = true; challenge = null;
+  if (denied || gone) return;                           // denied: only a new load of the page asks again
+  stopFlow(); const id = flow;
+  $("a-again").hidden = true; challenge = null;
   let r, b;
-  try { r = await fetch("/api/tv/auth/request", { method: "POST", credentials: "same-origin", cache: "no-store" }); b = await r.json(); }
-  catch (e) { authShow("NO CONNECTION", "the F1 server is not reachable - retrying", "bad"); authTimer = setTimeout(ask, 5000); return; }
+  try { r = await authPost("/api/tv/auth/request"); b = await r.json(); }
+  catch (e) {
+    if (!current(id)) return;
+    authShow("NO CONNECTION", "the F1 server is not reachable - retrying", "bad"); authTimer = setTimeout(ask, 5000); return;
+  }
+  if (!current(id)) { if (b && b.challenge) withdraw(b.challenge); return; }   // abandoned meanwhile: end it there too
   if (!r.ok || !b.challenge) { authShow("NOT NOW", b.error || "the request was refused", "bad"); $("a-again").hidden = false; return; }
   challenge = b.challenge; authTotal = b.expires_in || 120;
   $("a-code").textContent = b.code;
   if (!b.approver_set) authShow("APPROVAL NEEDED", "No phone is set up to approve /tv yet: in /disk → SECURITY choose your /remote device (USE FOR AUTH), then ask again.", "bad");
   else authShow("APPROVE ON YOUR PHONE", `Open /remote on the trusted phone${b.approver_online ? "" : " (it is not connected right now)"} and approve the request with this code.`);
-  authPoll();
+  authPoll(id);
 }
-async function authPoll() {
+async function authPoll(id) {
+  if (!current(id)) return;
+  const ch = challenge;
   let b;
-  try {
-    b = await (await fetch("/api/tv/auth/status", { method: "POST", cache: "no-store", credentials: "same-origin",
-      headers: { "X-F1-TV-Challenge": challenge } })).json();
-  } catch (e) { authTimer = setTimeout(authPoll, 3000); return; }
+  try { b = await (await authPost("/api/tv/auth/status", { "X-F1-TV-Challenge": ch })).json(); }
+  catch (e) { if (current(id)) authTimer = setTimeout(() => authPoll(id), 3000); return; }
+  if (!current(id) || ch !== challenge) return;         // a late answer of an ended flow
   if (b.status === "authenticated" && b.page) {
-    PAGE = b.page; challenge = null;
+    stopFlow(); PAGE = b.page; challenge = null;
     authShow("APPROVED", "opening…", "ok");
     if (next !== "/tv") { leaving = true; location.href = next; return; }      // the plain dashboard ([security] protect_dashboard)
     start(); return;
   }
   if (b.status === "pending") {
     $("a-bar").style.width = Math.max(0, b.expires_in / authTotal * 100) + "%";
-    authTimer = setTimeout(authPoll, 1500); return;
+    authTimer = setTimeout(() => authPoll(id), 1500); return;
   }
-  const why = { denied: ["DENIED", "the request was denied on the phone"], expired: ["EXPIRED", "nobody answered in time"],
+  challenge = null; $("a-bar").style.width = "0";
+  if (b.status === "denied") {
+    stopFlow(); denied = true;
+    authShow("DENIED", "the request was denied on the phone - this page will not ask again; reload it to start a new request", "bad");
+    return;
+  }
+  const why = { expired: ["EXPIRED", "nobody answered in time"],
     superseded: ["REPLACED", "/tv was opened again in this browser - this request ended"],
+    withdrawn: ["WITHDRAWN", "this request was withdrawn"],
     consumed: ["ALREADY USED", "this approval was already used"], none: ["NO REQUEST", "the request is gone"] }[b.status] || ["NO ACCESS", b.status];
-  challenge = null;
-  authShow(why[0], why[1], "bad"); $("a-bar").style.width = "0"; $("a-again").hidden = false;
+  authShow(why[0], why[1], "bad"); $("a-again").hidden = false;
 }
 $("a-again").addEventListener("click", ask);
 /* every protected request carries this page's secret; 401 = this page's authorization ended -> start again */
@@ -57,10 +92,15 @@ function tvFetch(url) {
 }
 function ended() { PAGE = null; leaving = true; detach(); location.reload(); }
 window.addEventListener("pagehide", () => {                 // leaving / closing / reloading: end it on the server too
+  gone = true;
+  const ch = challenge; challenge = null;
+  stopFlow();                                              // no timer, poll or retry outlives the page
+  withdraw(ch);                                            // an open request disappears from the phone
   if (PAGE && !leaving) { try { navigator.sendBeacon("/api/tv/logout", PAGE); } catch (e) { /* the next load ends it */ } }
   PAGE = null;
 });
-window.addEventListener("pageshow", (e) => { if (e.persisted) location.reload(); });   // back/forward cache: approve again
+// back/forward cache: approve again (a new load) - but a denied page stays denied until it is reloaded by hand
+window.addEventListener("pageshow", (e) => { if (e.persisted && !denied) location.reload(); });
 
 let layout = "RACE_VIEW", hls = null, loaded = false, status = null, serverOffset = 0, playing = false, streamErr = "";
 try { layout = localStorage.getItem("f1tv-layout") || layout; } catch (e) { /* ignore */ }
