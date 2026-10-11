@@ -576,15 +576,24 @@ slot**. You don't need a PC or a VOYO window.
   - transport (only while a replay plays): **◀ ▶** seek 10 s, **OK** play / pause;
   - volume: **◀ ▶** quieter / louder, **OK** mute;
   - **LIVE**: back to the live stream;
-  - the **recordings on the disk that have video**, newest first, with Grand Prix, session, date and
-    time, length and status (COMPLETE / RECORDING NOW / INTERRUPTED). **OK** plays one from the start.
+  - a **gallery of the recordings on the disk that have video**: one section per GP weekend (newest
+    weekend first), each session a card (FP1 … Race, in time order) with date and time, length and status
+    (COMPLETE / RECORDING NOW / INTERRUPTED). **OK** plays one from the start.
 
-  **▲ ▼** move, **BACK / Esc** (or ✕) closes the panel; the rows can also be clicked / tapped. While it is
+  **▲ ▼ ◀ ▶** move between the cards by their position on the screen, **BACK / Esc** (or ✕) closes the
+  panel; the cards can also be clicked / tapped. While it is
   open, the arrows, OK and BACK drive the player; once it is closed they drive the dashboard again. The
   video shows which source plays (`● LIVE` or `▶ REPLAY · <GP> · <session>`); the replay keeps playing
   behind the closed panel. The `/tv` page opens and drives the panel itself, so it works the same through
   Tailscale Funnel (whose dashboard connection only listens); the trusted phone's LIVE / REPLAYS and
   arrows drive the same panel through the server.
+
+- **Choosing on the phone:** `/remote` → **VIDEOS** lists the same recordings with a search box (GP,
+  session, year), session-type filters (practice, sprint qualifying, sprint, qualifying, race), a season
+  select and "complete only", grouped by GP weekend. A tap plays that recording on `/tv`; **LIVE** (red
+  while a stream is on air) switches it back to the live stream. The panel on the TV does not have to be
+  open. The phone only chooses: it gets names, dates and lengths over its own connection (the remote
+  token on the LAN, the trusted phone through Funnel), never a media address.
 
   Only recordings whose video the player can actually read are listed. When there is none, the panel
   says what the disk has instead: recordings without video (timing / sync data only), with video it

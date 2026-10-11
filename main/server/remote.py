@@ -48,6 +48,8 @@ COMMANDS = {
     "SET_MODE", "CYCLE_MODE", "MODE_AUTO", "MODE_LIVE", "MODE_VOD",
     # the /tv player's panel (LIVE / REPLAYS, transport, volume): open / close it and drive it
     "PLAYER_MENU", "PLAYER_NAV", "PLAYER_OK", "PLAYER_BACK", "PLAYER_PLAY_PAUSE", "PLAYER_SEEK",
+    # the phone's video picker: play this recording (its id) or "live" on the /tv page
+    "PLAYER_PLAY",
 }
 MODE_COMMANDS = {"SET_MODE": None, "CYCLE_MODE": "NEXT", "MODE_AUTO": "AUTO", "MODE_LIVE": "LIVE",
                  "MODE_VOD": "VOD"}
@@ -75,6 +77,7 @@ VIDEO_ACTIONS = {"VIDEO_PLAY_PAUSE": "play_pause", "VIDEO_MUTE": "mute", "VIDEO_
 KEY_RE = re.compile(r"^[A-Z0-9_]{1,32}$")
 DRIVER_RE = re.compile(r"^\d{1,3}$")
 SEEK_RE = re.compile(r"^[+-]?\d{1,3}$")
+PLAY_ARG_RE = re.compile(r"^(live|[A-Za-z0-9_-]{4,64})$")       # "live" or a recording id (server/replays.ID_RE)
 ADJUST_RE = re.compile(r"^[+-]?\d{1,3}(\.\d{1,3})?$")
 
 
@@ -215,7 +218,7 @@ class RemoteController:
             log.warning("Rejected unknown command %r from %s", name[:40], origin)
             return False
         if arg is not None:
-            arg = str(arg)[:32]
+            arg = str(arg)[:80 if name == "PLAYER_PLAY" else 32]       # a recording id: up to 64, longer is refused
         if log_it:
             log.info("Remote command %s%s (%s)", name, f":{arg}" if arg else "", origin)
         if name in MODE_COMMANDS:
@@ -406,6 +409,13 @@ class RemoteController:
             if arg is None or not SEEK_RE.match(arg):
                 return False
             self._player_cmd("seek", arg)
+        elif name == "PLAYER_PLAY":
+            # chosen on the phone: the /tv page plays it and closes its gallery
+            if arg is None or not PLAY_ARG_RE.match(arg):
+                return False
+            self.ui.player_menu = False
+            self._player_cmd("live" if arg == "live" else "play", None if arg == "live" else arg)
+            self._toast("LIVE on the TV" if arg == "live" else "Playing on the TV")
         elif name in VIDEO_ACTIONS:
             if not video_shown:
                 return False

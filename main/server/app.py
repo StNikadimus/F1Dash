@@ -1079,6 +1079,23 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         return JSONResponse({"ok": True, "recordings": items, "hidden": hidden, "recorder": {"ok": stream_rec.ok}},
                             headers={"Cache-Control": "no-store"})
 
+    # the phone's video picker (/remote, its "videos" message): what the /tv gallery offers - names, dates,
+    # lengths, never a media address (the phone only chooses; the /tv page plays, server/tv/tv.js)
+    VIDEO_FIELDS = ("id", "meeting", "session_name", "session_kind", "title", "start", "status", "duration_s",
+                    "check", "sound")
+
+    def remote_videos() -> dict:
+        hidden: dict = {}
+        items = replays.listing(stream_rec.list(also=(player_rec,)), _replay_pkg, _replay_seconds(), 300, hidden)
+        return {"type": "videos", "ok": True, "recordings": [{k: r.get(k) for k in VIDEO_FIELDS} for r in items],
+                "hidden": hidden, "recorder": {"ok": stream_rec.ok}}
+
+    def remote_live() -> dict:
+        cur = player_rec.cur if player_rec is not None else None
+        sess = (cur or {}).get("session") or {}
+        return {"on_air": bool(live_info().get("on_air")), "meeting": sess.get("meeting"),
+                "session_name": sess.get("session_name"), "session_kind": sess.get("kind")}
+
     async def tv_replay_file(request: Request) -> Response:
         """GET /tv/replay/<id>/index.m3u8 (the recording as one HLS playlist) or /tv/replay/<id>/<segment>.mp4
         (byte ranges of a listed segment, read as it is) - an approved /tv page only."""
@@ -1679,6 +1696,18 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                     push_remote_state()
                     continue
                 if not remote.enabled or not remote.rate_ok():
+                    continue
+                if kind == "videos":
+                    # the phone's video picker asks what it can choose (remote sockets only)
+                    if client.kind == "remote":
+                        try:
+                            payload = await run_in_threadpool(remote_videos)
+                        except OSError as exc:
+                            log.warning("/remote videos: the recordings folder could not be read: %s", exc)
+                            payload = {"type": "videos", "ok": False, "recordings": [],
+                                       "error": "the recording disk could not be read"}
+                        payload["live"] = remote_live()
+                        hub._send(client, json.dumps(payload))
                     continue
                 if kind == "key":
                     await remote.handle_key(str(msg.get("key", "")), f"ws:{addr}")

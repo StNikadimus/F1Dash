@@ -107,6 +107,36 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); c
 .pr.tr .pt { font-family: var(--mono); }
 .phd { margin: 10px 4px 2px; font-size: 13px; font-weight: 900; letter-spacing: .14em; color: var(--text-3); }
 .pe { padding: 10px 12px; font-size: 17px; font-weight: 700; color: var(--text-3); }
+/* the gallery: one section per GP weekend, its sessions as cards (arrows move by position, OK plays) */
+.pr.live { min-height: 64px; font-size: 22px; }
+.pr.live.on { background: rgba(255,45,61,.10); } .pr.live.on .pt { color: var(--red); }
+.pg { margin: 10px 2px 4px; }
+.pg-h { display: flex; align-items: baseline; gap: 10px; padding: 6px 4px 8px; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
+.pg-n { font-size: 21px; font-weight: 900; letter-spacing: .04em; color: var(--text); }
+.pg-y { font-size: 15px; font-weight: 800; color: var(--text-3); }
+.pg-c { margin-left: auto; font-size: 13px; font-weight: 800; letter-spacing: .08em; color: var(--text-3); text-transform: uppercase; }
+.pg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.vcard { position: relative; display: flex; flex-direction: column; gap: 6px; min-height: 128px; padding: 12px 14px;
+  border-radius: 8px; border: 2px solid var(--line-2); background: linear-gradient(160deg, var(--panel-2), var(--panel));
+  cursor: pointer; border-left-width: 6px; }
+.vcard.cur { border-color: var(--text); background: linear-gradient(160deg, #1d2733, #121922); }
+.vcard.act { box-shadow: 0 0 0 2px #4da3ff inset; }
+.vcard .c-kind { font-size: 13px; font-weight: 900; letter-spacing: .14em; color: var(--text-3); }
+.vcard .c-name { font-size: 20px; font-weight: 900; color: var(--text); line-height: 1.15; }
+.vcard .c-when { font-size: 15px; font-weight: 700; color: var(--text-2); }
+.vcard .c-foot { margin-top: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.vcard .c-dur { font-family: var(--mono); font-size: 15px; font-weight: 800; color: var(--text-2); margin-right: auto; }
+.vcard .ps { font-size: 11px; font-weight: 900; letter-spacing: .08em; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--line-2);
+  color: var(--text-3); white-space: nowrap; }
+.vcard .ps.s-recording { color: var(--red); border-color: var(--red); } .vcard .ps.s-interrupted { color: var(--amber); border-color: var(--amber); }
+.vcard .c-play { position: absolute; top: 10px; right: 12px; font-size: 12px; font-weight: 900; letter-spacing: .08em; color: #4da3ff; }
+.vcard.k-race { border-left-color: var(--red); } .vcard.k-qualifying { border-left-color: var(--amber); }
+.vcard.k-sprint { border-left-color: #ff7a1a; } .vcard.k-sprint_qualifying { border-left-color: #c78bff; }
+.vcard.k-practice1, .vcard.k-practice2, .vcard.k-practice3 { border-left-color: #4da3ff; }
+.vcard.k-race .c-kind { color: var(--red); } .vcard.k-qualifying .c-kind { color: var(--amber); }
+.vcard.k-sprint .c-kind { color: #ff7a1a; } .vcard.k-sprint_qualifying .c-kind { color: #c78bff; }
+.vcard.k-practice1 .c-kind, .vcard.k-practice2 .c-kind, .vcard.k-practice3 .c-kind { color: #4da3ff; }
+@media (max-width: 700px) { .pg-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); } .vcard .c-name { font-size: 17px; } }
 body.locked #pmenu { display: none !important; }
 /* the approval screen - shown on every load of /tv until the trusted phone approved THIS load */
 body.locked #dash, body.locked #vbox, body.locked #ctl { display: none !important; }

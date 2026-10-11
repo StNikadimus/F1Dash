@@ -543,6 +543,102 @@ class RemotePlayerLayerTest(unittest.TestCase):
         self.assertEqual(km["KEY_UP"], "MOVE_UP")                       # unchanged
 
 
+class PhonePickerCommandTest(unittest.TestCase):
+    """PLAYER_PLAY - the phone's video picker: play a recording (its id) or LIVE on the /tv page."""
+
+    def test_play_live_and_bad_arguments(self):
+        rc, sent = RemotePlayerLayerTest().make()
+
+        async def c(name, arg=None):
+            return await rc.handle_command(name, arg, "test")
+        asyncio.run(c("PLAYER_MENU", "open"))
+        server_id = "sprint_qualifying-63660945-20261009"                  # a server player key: 35 characters
+        asyncio.run(c("PLAYER_PLAY", server_id))
+        self.assertEqual((rc.ui.player_cmd["action"], rc.ui.player_cmd["arg"]), ("play", server_id))
+        self.assertFalse(rc.ui.player_menu)                                 # the gallery closes, the video plays
+        self.assertEqual(rc.ui.toast["text"], "Playing on the TV")
+        asyncio.run(c("PLAYER_PLAY", "live"))
+        self.assertEqual((rc.ui.player_cmd["action"], rc.ui.player_cmd["arg"]), ("live", None))
+        n = rc.ui.player_cmd["n"]
+        for bad in (None, "", "../etc", "a b", "x" * 65, "abc", "<script>", "aaaa1111;rm"):
+            asyncio.run(c("PLAYER_PLAY", bad))
+            self.assertEqual(rc.ui.player_cmd["n"], n, bad)
+        self.assertTrue(sent and sent[-1]["player_cmd"]["action"] == "live")
+
+
+class PhoneVideoListTest(unittest.TestCase):
+    """The "videos" message of /remote: what the /tv gallery offers - names, dates, lengths, never media."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        rec = self.d / "rec"
+        make_pkg(rec, "race-63661400-20261011")
+        make_pkg(rec, "qualifying-63661274-20261010", session="Qualifying", kind="qualifying",
+                 start="2026-10-10T13:00:05Z")
+        make_pkg(rec, "nvid11112222", segs=0)                                # no video: not offered
+        from test_security import Server
+        self.s = Server(self.d)
+
+    def tearDown(self):
+        self.s.close()
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def ask(self, ws):
+        ws.send_text(json.dumps({"type": "videos"}))
+        for _ in range(400):
+            m = ws.receive_json()
+            if m["type"] == "videos":
+                return m
+        raise AssertionError("no videos answer")
+
+    def test_list_for_the_phone(self):
+        with self.s.browser() as phone, phone.websocket_connect("/ws?client=remote") as ws:
+            m = self.ask(ws)
+        self.assertTrue(m["ok"])
+        self.assertEqual({r["id"] for r in m["recordings"]}, {"race-63661400-20261011", "qualifying-63661274-20261010"})
+        r = next(x for x in m["recordings"] if x["session_kind"] == "qualifying")
+        self.assertEqual(set(r), {"id", "meeting", "session_name", "session_kind", "title", "start", "status",
+                                  "duration_s", "check", "sound"})
+        self.assertEqual((r["meeting"], r["session_name"], r["duration_s"]), ("Singapore Grand Prix", "Qualifying", 30.0))
+        self.assertEqual(m["hidden"]["no_video"], 1)
+        self.assertEqual(m["live"]["on_air"], False)
+        text = json.dumps(m)
+        for leak in (".mp4", ".m3u8", "/tv/replay", "capture", str(self.d)):
+            self.assertNotIn(leak, text)                                   # the phone chooses; it gets no media
+
+    def test_only_remote_sockets_get_it(self):
+        from server.remote import RemoteController
+        calls = []
+        orig = RemoteController.handle_command
+
+        async def spy(self_, name, arg=None, origin="?", log_it=True):
+            calls.append((name, arg))
+            return await orig(self_, name, arg, origin, log_it)
+        with self.s.browser() as desk, desk.websocket_connect("/ws") as ws, \
+                mock.patch.object(RemoteController, "handle_command", spy):
+            ws.send_text(json.dumps({"type": "videos"}))
+            ws.send_text(json.dumps({"type": "command", "command": "PLAYER_PLAY", "arg": "race-63661400-20261011"}))
+            seen = []
+            for _ in range(400):                                           # the command's answer comes; no list
+                m = ws.receive_json()
+                seen.append(m["type"])
+                if m["type"] == "ui" and (m.get("player_cmd") or {}).get("action") == "play":
+                    break
+            self.assertNotIn("videos", seen)
+            self.assertEqual(calls, [("PLAYER_PLAY", "race-63661400-20261011")])
+
+    def test_wrong_remote_token_gets_nothing(self):
+        self.s.close()
+        self.s = __import__("test_security").Server(self.d, remote_token="s3cret")
+        from starlette.websockets import WebSocketDisconnect
+        with self.s.browser() as phone:
+            with self.assertRaises(WebSocketDisconnect):
+                with phone.websocket_connect("/ws?client=remote&token=wrong") as ws:
+                    ws.receive_json()
+            with phone.websocket_connect("/ws?client=remote&token=s3cret") as ws:
+                self.assertEqual(len(self.ask(ws)["recordings"]), 2)
+
+
 class ScheduleRetryTest(unittest.TestCase):
     """The server player's F1 schedule: a failed read is retried within a minute (a session may be due)."""
 
