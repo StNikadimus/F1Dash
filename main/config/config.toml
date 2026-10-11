@@ -399,7 +399,7 @@ enabled = false
 stream_url = ""
 when = "schedule"               # schedule = F1 sessions below | always | off
 record_sessions = ["practice1", "practice2", "practice3", "sprint_qualifying", "sprint", "qualifying", "race"]
-lead_minutes = 15               # open the stream this long before the scheduled start
+lead_minutes = 30               # open the stream this long before the scheduled start
 trail_minutes = 30              # ... and keep it until this long after the scheduled end
 keep_open_while_feed_live = true  # longer while the dashboard's live feed says the session still runs (red flags)
 record_video = true             # screen + sound recording into the package (capture/)
