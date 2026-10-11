@@ -16,8 +16,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from server import voyo_episodes as ve  # noqa: E402
 
-FP1, SQ, SPRINT = "63660752", "63660945", "63661233"
+FP1, SQ, SPRINT, QUALI = "63660752", "63660945", "63661233", "63661274"
 EP = "/play/category/2102/episodes/"
+EVENT = "https://voyo.si/vsebina/vn-singapurja"
+
+
+def card(eid, title, date, uniq="plain", handler="onPlayClick"):
+    """An item as EPISODES_JS reads VOYO's real event-page card: <a class="episode"> whose href is the EVENT page,
+    the id in data-uniq ("<id>" / "media/<id>") and in the inline play handler."""
+    onclick = (f'return onPlayClick("{eid}"),!1' if handler == "onPlayClick" else
+               f'return playEpisode("{eid}","{EP}{eid}"),!1' if handler == "playEpisode" else "")
+    return {"href": EVENT, "data_uniq": eid if uniq == "plain" else f"media/{eid}" if uniq == "media" else "",
+            "onclick": onclick, "text": f"{title} {date}", "label": "", "title": "", "alt": title,
+            "card": f"{title} {date}"}
+
+
+def singapore():
+    """The VN Singapurja page as seen in production (2026-10): every card twice - a plain onPlayClick card and a
+    media/<id> playEpisode one - next to links that are no recordings."""
+    shown = ((FP1, "F1 prosti trening", "9. 10. 2026"), (SQ, "F1 sprint kvalifikacije", "9. 10. 2026"),
+             (SPRINT, "F1 sprint dirka", "10. 10. 2026"), (QUALI, "F1 kvalifikacije", "10. 10. 2026"))
+    return ([card(i, t, d) for i, t, d in shown] + [card(i, t, d, uniq="media", handler="playEpisode") for i, t, d in shown] +
+            [{"href": EVENT, "text": "VN Singapurja", "card": "VN Singapurja"},                      # the page itself
+             {"href": "https://voyo.si/vsebina/f1", "data_uniq": "", "onclick": "", "text": "Formula 1"},
+             card("1234", "F1 napovednik", "8. 10. 2026"),                                       # too short an id
+             {**card(QUALI, "F1 kvalifikacije", ""), "data_uniq": "media/abc"},               # not digits
+             {**card("63669999", "F1 dirka", ""), "data_uniq": "63669998"}])                  # sources disagree
 
 
 def page(*cards):
@@ -132,6 +156,171 @@ class EventPageTest(unittest.TestCase):
         self.assertEqual(ve.select_episode(eps, "practice2").state, "NOT_FOUND")
         self.assertEqual(ve.select_episode([], "race").state, "NOT_FOUND")
         self.assertEqual(ve.select_episode(eps, "warmup").state, "NOT_FOUND")
+
+
+class ProductionEventPageTest(unittest.TestCase):
+    """The real VOYO DOM: cards link to the event page, the id is in data-uniq / onclick only. The old reading
+    (/episodes/<id> in the href) found NOTHING there - every session NOT_FOUND, zero recordings."""
+
+    def test_old_reading_found_nothing(self):
+        self.assertEqual({ve.episode_id(it.get("href")) for it in singapore()}, {None})
+
+    def test_ids_from_data_uniq_and_the_play_handler(self):
+        self.assertEqual(ve.item_episode(card(QUALI, "F1 kvalifikacije", "", handler="")), (QUALI, None))
+        self.assertEqual(ve.item_episode(card(QUALI, "F1 kvalifikacije", "", uniq="media", handler="")), (QUALI, None))
+        self.assertEqual(ve.item_episode(card(QUALI, "F1 kvalifikacije", "", uniq="", handler="onPlayClick")),
+                         (QUALI, None))
+        self.assertEqual(ve.item_episode(card(QUALI, "F1 kvalifikacije", "", uniq="", handler="playEpisode")),
+                         (QUALI, EP + QUALI))
+        self.assertEqual(ve.item_episode({"href": "https://voyo.si" + EP + QUALI}), (QUALI, EP + QUALI))  # old pages
+        for bad in ({"href": EVENT}, {"data_uniq": "media/"}, {"data_uniq": "1234"}, {"data_uniq": "1234567890123"},
+                    {"data_uniq": "media/6366127x"}, {"data_uniq": "63661274; x"}, {"onclick": "onPlayClick(63661274)"},
+                    {"onclick": 'evil("63661274")'}, {"data_uniq": "63661274", "onclick": 'onPlayClick("63661233")'},
+                    {"href": "https://voyo.si" + EP + SQ, "data_uniq": QUALI}, {"href": "http://[::1"}, {}):
+            self.assertEqual(ve.item_episode(bad), (None, None), bad)
+        # a playEpisode path that is not that recording's own episode address is not used
+        self.assertEqual(ve.item_episode({"onclick": f'playEpisode("{QUALI}","/play/category/2102/episodes/{SQ}")'}),
+                         (QUALI, None))
+        self.assertEqual(ve.item_episode({"onclick": f'playEpisode("{QUALI}","javascript:alert(1)")'}), (QUALI, None))
+
+    def test_the_singapore_page_yields_its_four_sessions(self):
+        eps = ve.episodes_from_page(singapore())
+        self.assertEqual(len(eps), 4)                                  # deduplicated by id, junk ignored
+        by = {e.id: e for e in eps}
+        self.assertEqual({i: (e.kind, e.confidence) for i, e in by.items()},
+                         {FP1: ("practice1", "high"), SQ: ("sprint_qualifying", "high"),
+                          SPRINT: ("sprint", "high"), QUALI: ("qualifying", "high")})
+        self.assertEqual({i: e.path for i, e in by.items()}, {i: EP + i for i in by})   # the playEpisode twin's path
+        self.assertEqual({i: e.date for i, e in by.items()},
+                         {FP1: "2026-10-09", SQ: "2026-10-09", SPRINT: "2026-10-10", QUALI: "2026-10-10"})
+        self.assertEqual(by[QUALI].title, "F1 kvalifikacije 10. 10. 2026")
+        for kind, want in (("practice1", FP1), ("sprint_qualifying", SQ), ("sprint", SPRINT), ("qualifying", QUALI)):
+            s = ve.select_episode(eps, kind, "Singapore Grand Prix VN Singapurja")
+            self.assertEqual((s.state, s.episode.id), ("SELECTED", want), kind)
+        self.assertEqual(ve.select_episode(eps, "race").state, "NOT_FOUND")   # not on the page yet
+
+    def test_the_twin_order_does_not_matter(self):
+        items = singapore()
+        for order in (items, list(reversed(items))):
+            eps = ve.episodes_from_page(order)
+            self.assertEqual(sorted((e.id, e.path) for e in eps), sorted((i, EP + i) for i in (FP1, SQ, SPRINT, QUALI)))
+
+    def test_cards_without_an_address_are_found_but_have_no_path(self):
+        eps = ve.episodes_from_page([card(QUALI, "F1 kvalifikacije", "10. 10. 2026")])
+        self.assertEqual([(e.id, e.kind, e.path) for e in eps], [(QUALI, "qualifying", None)])
+
+    def test_an_unnumbered_practice_is_practice_1_only_on_a_sprint_weekend(self):
+        normal = ve.episodes_from_page([card(FP1, "F1 prosti trening", ""), card(QUALI, "F1 kvalifikacije", "")])
+        self.assertEqual({e.id: e.kind for e in normal}, {FP1: None, QUALI: "qualifying"})
+        self.assertEqual(ve.select_episode(normal, "practice1").state, "NOT_FOUND")
+        two = ve.episodes_from_page([card(FP1, "F1 prosti trening", ""), card("63660753", "F1 prosti trening", ""),
+                                     card(SPRINT, "F1 sprint dirka", "")])
+        self.assertEqual(ve.select_episode(two, "practice1").state, "NOT_FOUND")          # which one? never guessed
+        numbered = ve.episodes_from_page([card(FP1, "F1 1. prosti trening", ""), card("63660753", "F1 prosti trening", ""),
+                                          card(SPRINT, "F1 sprint dirka", "")])
+        self.assertEqual({e.id: e.kind for e in numbered}["63660753"], None)
+
+
+def utc(*a):
+    return datetime(*a, tzinfo=timezone.utc).timestamp()
+
+
+class StaleEventPageTest(unittest.TestCase):
+    """A card dated more than a day from the SCHEDULED session is an older weekend's: never recorded instead.
+    (The Singapore page still set when the next weekend's sessions come: its recordings must not be taken.)"""
+
+    def test_stale_page_is_not_found_with_its_reason(self):
+        eps = ve.episodes_from_page(singapore())
+        for kind in ("practice1", "sprint_qualifying", "sprint", "qualifying"):
+            s = ve.select_episode(eps, kind, "United States Grand Prix", utc(2026, 10, 23, 17, 30))
+            self.assertEqual((s.state, s.episode), ("NOT_FOUND", None), kind)
+            self.assertIn("probably stale", s.reason)
+            self.assertIn("2026-10-23", s.reason)
+            self.assertEqual(len(s.candidates), 1)                     # shown on /disk, not taken
+
+    def test_the_right_weekend_is_taken(self):
+        eps = ve.episodes_from_page(singapore())
+        for kind, want, start in (("practice1", FP1, utc(2026, 10, 9, 9, 30)), ("sprint_qualifying", SQ, utc(2026, 10, 9, 13, 30)),
+                                  ("sprint", SPRINT, utc(2026, 10, 10, 9, 0)), ("qualifying", QUALI, utc(2026, 10, 10, 13, 0))):
+            s = ve.select_episode(eps, kind, "Singapore Grand Prix", start)
+            self.assertEqual((s.state, s.episode.id), ("SELECTED", want), kind)
+
+    def test_one_day_either_side_and_time_zones(self):
+        def pick(card_date, start):
+            eps = ve.episodes_from_page([card(QUALI, "F1 kvalifikacije", card_date)])
+            return ve.select_episode(eps, "qualifying", None, start).state
+        noon = utc(2026, 10, 10, 12, 0)
+        self.assertEqual(pick("9. 10. 2026", noon), "SELECTED")         # a day before
+        self.assertEqual(pick("11. 10. 2026", noon), "SELECTED")        # a day after
+        self.assertEqual(pick("8. 10. 2026", noon), "NOT_FOUND")        # two days: another weekend's
+        self.assertEqual(pick("12. 10. 2026", noon), "NOT_FOUND")
+        late = utc(2026, 10, 10, 23, 30)                                # 10 Oct UTC = 11 Oct 01:30 in Slovenia
+        self.assertEqual(pick("12. 10. 2026", late), "SELECTED")        # a day after the Slovenian date
+        self.assertEqual(pick("9. 10. 2026", late), "SELECTED")         # a day before the UTC date
+        self.assertEqual(pick("13. 10. 2026", late), "NOT_FOUND")
+        self.assertEqual(pick("8. 10. 2026", late), "NOT_FOUND")
+
+    def test_several_candidates(self):
+        old = card("63650001", "F1 kvalifikacije", "27. 9. 2026")
+        new = card(QUALI, "F1 kvalifikacije", "10. 10. 2026")
+        start = utc(2026, 10, 10, 13, 0)
+        s = ve.select_episode(ve.episodes_from_page([old, new]), "qualifying", None, start)
+        self.assertEqual((s.state, s.episode.id), ("SELECTED", QUALI))  # the stale one is dropped
+        s = ve.select_episode(ve.episodes_from_page([old, card("63650002", "F1 kvalifikacije", "26. 9. 2026")]),
+                              "qualifying", None, start)
+        self.assertEqual((s.state, len(s.candidates)), ("NOT_FOUND", 2))
+        twins = [new, card("63661275", "F1 kvalifikacije", "10. 10. 2026")]
+        self.assertEqual(ve.select_episode(ve.episodes_from_page(twins), "qualifying", None, start).state, "AMBIGUOUS")
+
+    def test_unknown_dates_keep_todays_behaviour(self):
+        start = utc(2026, 10, 23, 17, 30)
+        for text in ("", "pet, 9. okt", "V ŽIVO"):                       # no date it understands: not judged by date
+            eps = ve.episodes_from_page([card(QUALI, "F1 kvalifikacije", text)])
+            self.assertIsNone(eps[0].date, text)
+            s = ve.select_episode(eps, "qualifying", None, start)
+            self.assertEqual((s.state, s.episode.id), ("SELECTED", QUALI), text)
+        eps = ve.episodes_from_page([card(QUALI, "F1 kvalifikacije", ""), card("63650001", "F1 kvalifikacije", "27. 9. 2026")])
+        self.assertEqual(ve.select_episode(eps, "qualifying", None, start).episode.id, QUALI)
+        # no scheduled start (the "record" command): no date check, as before
+        eps = ve.episodes_from_page(singapore())
+        self.assertEqual(ve.select_episode(eps, "qualifying").episode.id, QUALI)
+
+
+class EpisodeUrlTest(unittest.TestCase):
+    """The address the player opens: the event page's own scheme + host + that episode's own path - nothing
+    else (a "//host" path, another host, another scheme, another episode's path)."""
+    SITE = "https://voyo.si"
+
+    def test_valid_voyo_paths(self):
+        self.assertEqual(ve.episode_url(self.SITE, EP + QUALI, QUALI), self.SITE + EP + QUALI)
+        self.assertEqual(ve.episode_url(self.SITE + "/", EP + QUALI, QUALI, EVENT), self.SITE + EP + QUALI)
+        self.assertEqual(ve.episode_url("https://www.voyo.si", EP + QUALI, QUALI, EVENT), "https://www.voyo.si" + EP + QUALI)
+        self.assertEqual(ve.episode_url("http://127.0.0.1:8080", "/episodes/" + QUALI, QUALI), "http://127.0.0.1:8080/episodes/" + QUALI)
+
+    def test_another_site_is_never_opened(self):
+        for path in ("//voyo.si.evil.com" + EP + QUALI, "//evil.example" + EP + QUALI, "///evil.example" + EP + QUALI,
+                     "https://evil.example" + EP + QUALI, "https://voyo.si" + EP + QUALI,     # absolute URLs are no paths
+                     "/\\evil.example" + EP + QUALI, "\\\\evil.example" + EP + QUALI, "/play/x\\..\\episodes/" + QUALI,
+                     " " + EP + QUALI, EP + QUALI + "\n", "javascript:alert(1)//" + EP + QUALI,
+                     "play/category/2102/episodes/" + QUALI, "", None):
+            self.assertIsNone(ve.episode_url(self.SITE, path, QUALI), repr(path))
+        self.assertIsNone(ve.episode_url(self.SITE, EP + SQ, QUALI))                       # another episode's path
+        self.assertIsNone(ve.episode_url(self.SITE, "/vsebina/vn-singapurja", QUALI))       # not an episode address
+        for origin in ("", None, "voyo.si", "ftp://voyo.si", "javascript:alert(1)", "file:///etc", "data:text/html,x",
+                       "https://user:pw@voyo.si", "https://voyo.si/vsebina", "https://voyo.si?x=1", "http://[::1"):
+            self.assertIsNone(ve.episode_url(origin, EP + QUALI, QUALI), repr(origin))
+        # the page is not on the event page's site (redirected / another site): nothing is opened there
+        self.assertIsNone(ve.episode_url("https://voyo.si.evil.com", EP + QUALI, QUALI, EVENT))
+        self.assertIsNone(ve.episode_url("https://evil.example", EP + QUALI, QUALI, EVENT))
+
+    def test_a_bad_card_address_is_dropped_and_its_twin_used(self):
+        bad = {"href": "https://voyo.si//voyo.si.evil.com" + EP + QUALI}
+        self.assertEqual(ve.item_episode(bad), (QUALI, None))
+        self.assertEqual(ve.item_episode({"data_uniq": QUALI, "onclick": f'playEpisode("{QUALI}","//voyo.si.evil.com{EP}{QUALI}")'}),
+                         (QUALI, EP + QUALI))                                      # urlsplit keeps only the path
+        good = card(QUALI, "F1 kvalifikacije", "", uniq="media", handler="playEpisode")
+        for items in ([dict(bad, text="F1 kvalifikacije"), good], [good, dict(bad, text="F1 kvalifikacije")]):
+            self.assertEqual([e.path for e in ve.episodes_from_page(items)], [EP + QUALI])
 
 
 class ManifestAndVerificationTest(unittest.TestCase):

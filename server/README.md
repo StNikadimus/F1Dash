@@ -325,9 +325,17 @@ These ids are examples only: nothing is configured per event. At each session of
 the player (`main/tools/voyo_session.py`, logic in `main/server/voyo_episodes.py`) goes through these
 states:
 
-1. **DISCOVERING:** opens `event_url` (signed in) and reads every link to a recording, with the words
-   a person sees on it: the link text, the image text and the card around it, plus the page's JSON-LD.
-   It scrolls once for lazy-loaded rows.
+1. **DISCOVERING:** opens `event_url` (signed in) and reads every recording card, with the words a
+   person sees on it: the link text, the image text and the card around it, plus the page's JSON-LD.
+   It scrolls once for lazy-loaded rows. VOYO's cards are `<a class="episode">` links whose `href` is
+   the event page itself; the episode id is in `data-uniq` (`63661274` or `media/63661274`) and in the
+   inline play handler (`onPlayClick("63661274")` or
+   `playEpisode("63661274","/play/category/2102/episodes/63661274")`). Older pages link
+   `/episodes/<id>` directly. These attributes are only read: nothing is clicked and no handler is
+   called. The id must be 5–12 digits, and a card whose sources name different ids is ignored. The
+   same card often appears twice and is merged by id. The address that opens a recording comes from
+   an episode link or from `playEpisode`'s path for that id. A recording with neither is **FAILED**
+   ("not the address that opens it") and is tried again later.
 2. **The title becomes a session kind.** Slovenian and English are understood: "1. prosti trening",
    "Prvi prosti trening", "FP1", "Sprint kvalifikacije", "Sprint", "Kvalifikacije", "Dirka", "Race"
    and similar. Shows *about* a session are excluded: povzetek / highlights, studio, napoved,
@@ -337,10 +345,23 @@ states:
    - none -> **NOT FOUND**; the page is read again every minute, because a live recording often
      appears only shortly before the start;
    - still several -> **AMBIGUOUS**; the candidates are listed on `/disk` and nothing is recorded;
-   - an unclear title, for example "Prosti trening" without a number, is not taken.
+   - an unclear title, for example "Prosti trening" without a number, is not taken. The exception
+     is a sprint weekend, which has one practice session. When the page shows a sprint or sprint
+     qualifying recording and exactly one unnumbered practice (and no numbered one), that practice
+     is Practice 1. VOYO names it "F1 prosti trening".
+
+   - a recording whose card date is more than one day from the session's **scheduled** day (not
+     today's date) belongs to another weekend -> not taken. When no other recording of that kind is
+     left, the result is **NOT FOUND** with "the event page is probably stale" (for example last
+     weekend's page is still set). The session day is taken in UTC and in Slovenian time (UTC+1 / +2),
+     because VOYO shows Slovenian dates. A card without a date the player understands is not judged by
+     date.
 
    **Another session is never recorded instead.**
-4. **OPENING / VERIFYING:** the recording's page is opened. Recording starts only when the player
+4. **OPENING / VERIFYING:** the recording's page is opened. It is opened only on the event page's own
+   site, with the same scheme and host, and only at that episode's own `/…/episodes/<id>` path. A path
+   starting with `//`, another host, another scheme, a backslash or control characters is never opened
+   (**FAILED**). Recording starts only when the player
    shows that episode id, either in its `mediaId` or in the path of the DASH / HLS manifest it
    loaded, and the video moves. Only the manifest's path is read, never its query string or
    tokens, and never the media itself.

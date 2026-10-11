@@ -112,7 +112,7 @@ def classify_title(title: Optional[str]) -> Classification:
 class Episode:
     id: str
     title: str
-    path: str                            # /play/category/<c>/episodes/<id> (path only)
+    path: Optional[str]                  # /play/category/<c>/episodes/<id> (path only; None = not on the page)
     kind: Optional[str]
     confidence: str
     excluded: bool = False
@@ -130,8 +130,80 @@ class Episode:
 
 
 def episode_id(href: Optional[str]) -> Optional[str]:
-    m = EPISODE_PATH_RE.search(urlsplit(str(href or "")).path or "")
+    try:
+        m = EPISODE_PATH_RE.search(urlsplit(str(href or "")).path or "")
+    except ValueError:
+        return None
     return m.group(1) if m else None
+
+
+# VOYO's own event page: the cards are <a class="episode"> whose href is the event page itself; the recording
+# is named by data-uniq ("63661274" or "media/63661274") and by the inline play handler
+# (onPlayClick("63661274") / playEpisode("63661274", "/play/category/2102/episodes/63661274")).
+UNIQ_RE = re.compile(r"^\s*(?:media/)?([0-9]{5,12})\s*$")
+HANDLER_RE = re.compile(r"\b(?:playEpisode|onPlayClick)\(\s*([\"'])([0-9]{5,12})\1(?:\s*,\s*([\"'])([^\"']{1,200})\3)?")
+
+
+def item_episode(it: dict) -> tuple[Optional[str], Optional[str]]:
+    """One discovered card -> (episode id, the path that opens it). The id comes from data-uniq, the inline play
+    handler or a genuine /episodes/<id> link - only digits of a sane length; sources that disagree make the
+    card unusable (None). The path is a genuine episode link of that id, else playEpisode's own path for that
+    id, else None (the card names the recording but not where to open it). Nothing is clicked or called."""
+    ids, path = [], None
+    m = UNIQ_RE.match(str(it.get("data_uniq") or ""))
+    if m:
+        ids.append(m.group(1))
+    h = HANDLER_RE.search(str(it.get("onclick") or "")[:400])
+    if h:
+        ids.append(h.group(2))
+    hid = episode_id(it.get("href"))
+    if hid:
+        ids.append(hid)
+    if not ids or len(set(ids)) != 1:
+        return None, None
+    eid = ids[0]
+    if hid == eid:
+        path = safe_path(urlsplit(str(it.get("href"))).path)
+    if not path and h and h.group(4) and episode_id(h.group(4)) == eid:
+        path = safe_path(urlsplit(h.group(4)).path)
+    return eid, path
+
+
+UNSAFE_PATH_RE = re.compile(r"[\\\s\x00-\x1f\x7f]")
+
+
+def safe_path(path: Optional[str]) -> Optional[str]:
+    """A path on the same site: "/..." - never "//host/..." (another site to a browser), a backslash (a browser
+    reads it as "/"), whitespace or control characters."""
+    p = str(path or "")
+    if not p.startswith("/") or p.startswith("//") or UNSAFE_PATH_RE.search(p) or len(p) > 200:
+        return None
+    return p
+
+
+def _host(netloc: str) -> str:
+    return netloc.lower().removeprefix("www.")
+
+
+def episode_url(origin: Optional[str], path: Optional[str], eid: str, site: Optional[str] = None) -> Optional[str]:
+    """The address that opens episode ``eid``: the event page's origin (http / https, a host, nothing else) + that
+    episode's own path - or None. ``site`` (the configured event page): the origin must be its host (www. or not)."""
+    try:
+        o = urlsplit(str(origin or ""))
+        s = urlsplit(str(site or ""))
+    except ValueError:
+        return None
+    if o.scheme not in ("http", "https") or not o.netloc or "@" in o.netloc or o.path not in ("", "/") \
+            or o.query or o.fragment:
+        return None
+    if s.netloc and _host(s.netloc) != _host(o.netloc):
+        return None
+    p = safe_path(path)
+    if not p or episode_id(p) != eid:
+        return None
+    url = f"{o.scheme}://{o.netloc}{p}"
+    u = urlsplit(url)
+    return url if (u.scheme, u.netloc, u.path) == (o.scheme, o.netloc, p) else None
 
 
 DATE_RE = re.compile(r"\b(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{4})?")
@@ -156,10 +228,11 @@ def episodes_from_page(items: Iterable[dict], year: Optional[int] = None) -> lis
     for it in items or []:
         if not isinstance(it, dict):
             continue
-        eid = episode_id(it.get("href"))
+        eid, path = item_episode(it)
         if not eid:
             continue
-        d = by_id.setdefault(eid, {"path": urlsplit(str(it.get("href"))).path[:200], "texts": [], "card": ""})
+        d = by_id.setdefault(eid, {"path": None, "texts": [], "card": ""})
+        d["path"] = d["path"] or path                  # the same card is often on the page twice
         for k in ("ld_name", "label", "text", "alt", "title"):
             v = str(it.get(k) or "").strip()
             if v and v not in d["texts"]:
@@ -189,7 +262,22 @@ def episodes_from_page(items: Iterable[dict], year: Optional[int] = None) -> lis
         out.append(Episode(id=eid, title=title[:160], path=d["path"], kind=c.kind, confidence=c.confidence,
                            excluded=c.excluded, why=c.why, date=_card_date(d["card"], year),
                            live=True if LIVE_RE.search(card_n) else None, texts=d["texts"], card=d["card"]))
+    _sprint_weekend_practice(out)
     return out
+
+
+def _sprint_weekend_practice(eps: list) -> None:
+    """VOYO names it "F1 prosti trening" without a number. A sprint weekend has ONE practice session, so on a
+    page with a sprint / sprint qualifying recording the only unnumbered practice (and no numbered one) is
+    Practice 1. Anything else (two unnumbered, a normal weekend) stays unclear - never guessed."""
+    if not any(e.kind in ("sprint", "sprint_qualifying") for e in eps):
+        return
+    if any(e.kind in ("practice1", "practice2", "practice3") for e in eps):
+        return
+    bare = [e for e in eps if e.kind is None and not e.excluded and e.why == "a practice session without its number"]
+    if len(bare) == 1:
+        bare[0].kind, bare[0].confidence = "practice1", "high"
+        bare[0].why = "the only practice session of a sprint weekend"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -213,6 +301,27 @@ def _tokens(s: Optional[str]) -> set:
     return {w for w in normalize(s).split() if len(w) > 2 and w not in stop}
 
 
+DATE_SLACK_DAYS = 1                      # a card may say the day before / after the session (time zones)
+
+
+def session_day(session_start: float) -> str:
+    return datetime.fromtimestamp(session_start, timezone.utc).date().isoformat()
+
+
+def off_session_day(e: Episode, session_start: float) -> bool:
+    """True when the card's date is more than DATE_SLACK_DAYS from the SCHEDULED session's day (never from today:
+    a recording window opens before the session and closes after it). The session day is taken in UTC and in
+    Slovenian time (UTC+1 / +2: VOYO's cards show the Slovenian date). A card without a recognised date: False."""
+    if not e.date:
+        return False
+    try:
+        card = datetime.fromisoformat(e.date).date()
+    except ValueError:
+        return False
+    days = {datetime.fromtimestamp(session_start + off, timezone.utc).date() for off in (0, 2 * 3600)}
+    return min(abs((card - d).days) for d in days) > DATE_SLACK_DAYS
+
+
 def select_episode(episodes: list[Episode], kind: str, meeting: Optional[str] = None,
                    session_start: Optional[float] = None) -> Selection:
     """The one recording of ``kind`` - or why there is none. Never another kind, never a guess."""
@@ -220,6 +329,15 @@ def select_episode(episodes: list[Episode], kind: str, meeting: Optional[str] = 
         return Selection("NOT_FOUND", None, f"unknown session kind {kind!r}")
     same = [e for e in episodes if e.kind == kind and not e.excluded]
     unsure = [e for e in episodes if e.kind is None and e.confidence == "low" and not e.excluded]
+    if session_start and same:                # a card dated another day is an older weekend's (a stale page)
+        stale = [e for e in same if off_session_day(e, session_start)]
+        same = [e for e in same if e not in stale]
+        if not same:
+            days = ", ".join(sorted({e.date for e in stale}))
+            return Selection("NOT_FOUND", None, f"no {KIND_LABELS[kind]} recording of this session's date on the "
+                                                f"page: the {KIND_LABELS[kind]} recording there is from {days}, the "
+                                                f"session is on {session_day(session_start)} - the event page is "
+                                                "probably stale (an older weekend's)", stale)
     if not same:
         seen = sorted({KIND_LABELS.get(e.kind, e.kind) for e in episodes if e.kind and not e.excluded})
         note = f"; {len(unsure)} title(s) too unclear to tell" if unsure else ""

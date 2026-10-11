@@ -5,13 +5,20 @@ second recording, and the report the package is closed with.
 
 Run (from main/):  python -m unittest tests.test_voyo_session
 """
+import html
+import json
+import os
+import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.voyo_session import KEY_RE, Limits, Obs, SessionRecorder, Target  # noqa: E402
+from server import voyo_episodes as ve  # noqa: E402
+from tools.voyo_session import EPISODES_JS, KEY_RE, Limits, Obs, SessionRecorder, Target  # noqa: E402
 
 FP1, SQ, SPRINT = "63660752", "63660945", "63661233"
 ORIGIN = "https://voyo.si"
@@ -39,8 +46,8 @@ def player(t, media_id=SPRINT, paused=False, duration=None, live=None, **kw):
 class Driver:
     """Runs a SessionRecorder like the player does: discover when asked, then one step per tick."""
 
-    def __init__(self, kind="sprint", until=None, limits=None, page=WEEKEND):
-        self.s = SessionRecorder(Target(kind, "Chinese Grand Prix", ve_label(kind), T0, until), ORIGIN + "/f1/vn-kitajske",
+    def __init__(self, kind="sprint", until=None, limits=None, page=WEEKEND, start=T0):
+        self.s = SessionRecorder(Target(kind, "Chinese Grand Prix", ve_label(kind), start, until), ORIGIN + "/f1/vn-kitajske",
                                  limits or Limits())
         self.page = page
         self.now = T0
@@ -183,11 +190,128 @@ class SelectionTest(unittest.TestCase):
         self.assertIn(("play",), acts)
         self.assertIn(("unmute",), acts)
 
+    def test_a_double_slash_link_never_leaves_voyo(self):
+        # https://voyo.si//voyo.si.evil.com/... used to open https://voyo.si.evil.com/... (a prefix check)
+        page = {"origin": ORIGIN, "items": [{"href": ORIGIN + "//voyo.si.evil.com" + EP + SPRINT, "text": "Sprint"}]}
+        d = Driver("sprint", page=page)
+        acts = d.tick()
+        self.assertEqual(d.s.state, "FAILED")
+        self.assertIsNone(d.s.episode_url)
+        self.assertFalse(any(a[0] == "navigate" for a in acts))
+
+    def test_an_event_page_on_another_site_is_not_used(self):
+        page = {"origin": "https://voyo.si.evil.com", "items": [{"href": "https://voyo.si.evil.com" + EP + SPRINT, "text": "Sprint"}]}
+        d = Driver("sprint", page=page)
+        d.tick()
+        self.assertEqual(d.s.state, "FAILED")
+        self.assertIn("leads off the VOYO site", d.s.problem)
+        self.assertIsNone(d.s.episode_url)
+
     def test_a_link_to_another_site_is_opened_on_voyo_only(self):
         page = {"origin": ORIGIN, "items": [{"href": "https://evil.example" + EP + SPRINT, "text": "Sprint"}]}
         d = Driver("sprint", page=page)
         d.tick()
         self.assertEqual(d.s.episode_url, ORIGIN + EP + SPRINT)          # only its path is used, on the VOYO page's site
+
+
+QUALI = "63661274"
+SINGAPORE = ((FP1, "F1 prosti trening", "9. 10. 2026"), (SQ, "F1 sprint kvalifikacije", "9. 10. 2026"),
+             (SPRINT, "F1 sprint dirka", "10. 10. 2026"), (QUALI, "F1 kvalifikacije", "10. 10. 2026"))
+
+
+def singapore_page(twins=True):
+    """VOYO's real event page (as EPISODES_JS reads it): <a class="episode"> cards whose href is the event page,
+    the id only in data-uniq / onclick; the playEpisode twin carries the address that opens the recording."""
+    ev = ORIGIN + "/vsebina/vn-singapurja"
+    items = [{"href": ev, "data_uniq": i, "onclick": f'return onPlayClick("{i}"),!1', "text": f"{t} {d}", "card": f"{t} {d}"}
+             for i, t, d in SINGAPORE]
+    if twins:
+        items += [{"href": ev, "data_uniq": f"media/{i}", "onclick": f'return playEpisode("{i}","{EP}{i}"),!1',
+                   "text": t, "card": f"{t} {d}"} for i, t, d in SINGAPORE]
+    return {"origin": ORIGIN, "url_path": "/vsebina/vn-singapurja", "items": items}
+
+
+class ProductionEventPageTest(unittest.TestCase):
+    def test_every_session_of_the_singapore_page_is_recorded(self):
+        for kind, want in (("practice1", FP1), ("sprint_qualifying", SQ), ("sprint", SPRINT), ("qualifying", QUALI)):
+            d = Driver(kind, page=singapore_page())
+            d.to_recording(media_id=want)                          # opens EP + id, verified by mediaId, records
+            self.assertEqual((d.s.episode["id"], d.s.episode_url), (want, ORIGIN + EP + want), kind)
+            self.assertEqual(d.s.key, f"{kind}-{want}-20261010")
+
+    def test_a_card_without_an_address_is_not_opened(self):
+        d = Driver("qualifying", page=singapore_page(twins=False), limits=Limits(retry_after_fail_s=120))
+        acts = d.tick()
+        self.assertEqual(d.s.state, "FAILED")
+        self.assertIn(f"recording {QUALI} but not the address", d.s.problem)
+        self.assertFalse(any(a[0] == "navigate" for a in acts))
+        self.assertIsNone(d.s.key)
+        d.page = singapore_page()                                   # the page shows the address later: retried
+        d.tick(dt=121)
+        self.assertEqual((d.s.state, d.s.episode_url), ("OPENING", ORIGIN + EP + QUALI))
+
+
+    def test_last_weekends_page_is_not_recorded_for_the_next_weekend(self):
+        nxt = T0 + 13 * 86400                                        # the next weekend's qualifying, page not changed
+        d = Driver("qualifying", page=singapore_page(), start=nxt, limits=Limits(discover_retry_s=60))
+        d.now = nxt - 900                                            # the window opens before the session
+        acts = d.tick()
+        self.assertEqual(d.s.state, "NOT_FOUND")
+        self.assertIn("probably stale", d.s.problem)
+        self.assertFalse(any(a[0] == "navigate" for a in acts))
+        self.assertIsNone(d.s.key)
+        self.assertEqual(d.tick(dt=30), [])                          # looked at again after discover_retry_s
+        self.assertEqual(d.tick(dt=31), [])
+        self.assertEqual(d.s.state, "NOT_FOUND")
+
+
+CHROME = next((c for c in (os.environ.get("CHROME_BIN"), "/opt/pw-browsers/chromium-1194/chrome-linux/chrome")
+               if c and os.access(c, os.X_OK)), None)
+
+# a local copy of the event page's shape (no network: <base> only resolves hrefs); the handlers record any call
+FIXTURE_HTML = """<!doctype html><html><head><meta charset="utf-8"><base href="https://voyo.si/vsebina/vn-singapurja">
+<script>window.__calls = []; function onPlayClick() { __calls.push('onPlayClick'); }
+function playEpisode() { __calls.push('playEpisode'); }</script></head><body>
+<nav><a href="/vsebina/f1">Formula 1</a> <a href="/vsebina/vn-singapurja">VN Singapurja</a></nav>
+<div class="slider">%(slider)s</div><div class="list">%(list)s</div>
+<div class="row"><a class="episode" href="/vsebina/vn-singapurja" data-uniq="media/abc">F1 napovednik</a></div>
+<pre id="out"></pre>
+<script>(%(js)s).then((r) => { document.getElementById('out').textContent = JSON.stringify({r: r, calls: __calls}); });
+</script></body></html>"""
+
+
+def fixture_html():
+    one = ('<div class="item"><a class="episode" href="/vsebina/vn-singapurja" data-uniq="%s" onclick="%s">'
+           '<img alt="%s"><h3>%s</h3><p>%s</p></a></div>')
+    q = lambda x: html.escape(x, quote=True)  # noqa: E731
+    slider = "".join(one % (i, q(f'return onPlayClick("{i}"),!1'), t, t, d) for i, t, d in SINGAPORE)
+    lst = "".join(one % ("media/" + i, q(f'return playEpisode("{i}","{EP}{i}"),!1'), t, t, d) for i, t, d in SINGAPORE)
+    return FIXTURE_HTML % {"slider": slider, "list": lst, "js": EPISODES_JS}
+
+
+@unittest.skipUnless(CHROME, "headless Chromium not installed")
+class EpisodesJsInChromiumTest(unittest.TestCase):
+    """EPISODES_JS itself, in a real (headless) Chromium, on a local fixture of the production DOM."""
+
+    def test_reads_the_real_cards_without_clicking(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "event.html"
+            f.write_text(fixture_html())
+            dom = subprocess.run([CHROME, "--headless", "--no-sandbox", "--disable-gpu", f"--user-data-dir={d}/profile",
+                                  "--virtual-time-budget=10000", "--dump-dom", f.as_uri()],
+                                 capture_output=True, text=True, timeout=60).stdout
+        m = re.search(r'<pre id="out">(.*?)</pre>', dom, re.S)
+        self.assertTrue(m and m.group(1), dom[-500:])
+        got = json.loads(html.unescape(m.group(1)))
+        self.assertEqual(got["calls"], [])                          # nothing clicked, no handler called
+        items = got["r"]["items"]
+        self.assertEqual(len(items), 9)                              # 4 cards twice + the malformed one; no nav links
+        for it in items:                                             # each card's own text, never its neighbours'
+            self.assertLessEqual(sum(t in it["card"] for _, t, _ in SINGAPORE), 1, it)
+        eps = ve.episodes_from_page(items)
+        self.assertEqual({e.id: (e.kind, e.path, e.date) for e in eps},
+                         {FP1: ("practice1", EP + FP1, "2026-10-09"), SQ: ("sprint_qualifying", EP + SQ, "2026-10-09"),
+                          SPRINT: ("sprint", EP + SPRINT, "2026-10-10"), QUALI: ("qualifying", EP + QUALI, "2026-10-10")})
 
 
 class HealthTest(unittest.TestCase):
