@@ -140,10 +140,10 @@ The phone's VIDEOS section lists the same recordings: a search box (GP, session,
 | ↑ ↓ ← →, Enter, Esc, Backspace, browser Back, **panel open** | ↑ ↓ move, ← → seek / volume / page, Enter plays the row, Esc / Backspace / Back close the panel | locally |
 | ↑ ↓ ← →, Enter, Esc, Backspace, browser Back, panel closed | sent to the server as the remote keys (`KEY_UP`, …, `KEY_ENTER`, `KEY_ESC`, `KEY_BACK`): the dashboard | through the dashboard frame's connection (LAN only - see below) |
 
-Mouse or touch on `/tv` shows the controls for 4 seconds:
-- **row 1:** RACE VIEW `1`, VIDEO `2`, DASHBOARD `3`;
-- **row 2:** LIVE / REPLAYS `B`, SOUND `M`, FULLSCREEN `F`, LOG OUT, RECORDER;
-- **row 3:** a status label (ON AIR / OFF AIR / REPLAY / NO CONNECTION) that cannot be clicked.
+The `/tv` controls are one bar along the bottom of the video window (along the bottom of the screen in the DASHBOARD layout). It shows while the mouse is in the video's lower part or on the bar, for a moment after `1` `2` `3` `M` `F`, on a touch, and once when the page opens:
+- **left:** a status label (ON AIR / OFF AIR / REPLAY / NO CONNECTION) that cannot be clicked;
+- RACE VIEW `1`, VIDEO `2`, DASHBOARD `3`;
+- LIVE / REPLAYS `B`, SOUND `M`, FULLSCREEN `F`, LOG OUT, RECORDER.
 
 `B` pressed inside the dashboard frame of `/tv` also opens the `/tv` page's panel. The panel's rows can be clicked or tapped, and its ✕ closes it.
 
@@ -272,4 +272,5 @@ scancodes there: ▲ ▼ ◀ ▶ OK BACK. Every other remote button works only a
 - **Help overlay:** now also lists `B` (LIVE / REPLAYS panel).
 - **Changed (gallery):** the `/tv` panel shows the recordings as a gallery (one section per GP weekend). ← / → on a recording move to the previous / next card instead of a page of 5 rows; ↑ / ↓ move to the card above / below.
 - **New:** `/remote` VIDEOS - choose LIVE or a recording on the phone (search, filters); command `PLAYER_PLAY`.
+- **Changed:** the `/tv` controls are a bar at the bottom of the video window. A mouse move over the video or the dashboard no longer shows them; only the video's lower part (or the bar) does.
 - No existing shortcut was removed.

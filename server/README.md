@@ -563,11 +563,14 @@ slot**. You don't need a PC or a VOYO window.
 - **When nothing is being recorded:** `/tv` shows "NO LIVE STREAM · next: <GP> <session> - the
   stream starts in …", and the dashboard still works.
 - **Layouts:** **1** RACE VIEW (dashboard + video), **2** VIDEO (big video), **3** DASHBOARD only,
-  **M** sound, **F** fullscreen, **Space / P** play / pause this TV's video. Move the mouse to see the
-  controls, one panel with three rows:
+  **M** sound, **F** fullscreen, **Space / P** play / pause this TV's video. The controls are one thin
+  bar along the bottom of the video window, like a video player's. It shows only while the mouse is in
+  the video's lower part (15 %, at least 70 px) or on the bar, and hides 1.2 s after the mouse leaves.
+  It also shows for a moment after `1` `2` `3` `M` `F`, on a touch, and once when the page opens. Without
+  a video window (DASHBOARD layout) it lies along the bottom of the screen. On the bar:
+  - the stream status (ON AIR / OFF AIR / REPLAY) on the left, a label rather than a button;
   - layouts;
-  - LIVE / REPLAYS, SOUND, FULLSCREEN, LOG OUT, RECORDER;
-  - the stream status (ON AIR / OFF AIR / REPLAY), a label rather than a button.
+  - LIVE / REPLAYS, SOUND, FULLSCREEN, LOG OUT, RECORDER.
 
   Sound starts muted (browsers block autoplay with sound); click once. Every key of `/tv`, the
   dashboard and the remote: [`main/keybinds.md`](../main/keybinds.md).
