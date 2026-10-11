@@ -137,20 +137,22 @@ function place() {
   placePanel();
   placeCtl();
 }
-// the controls sit in the video window's top-right corner when there is one (they cover no timing data
-// there); without it (DASHBOARD layout, a small window) in the screen's top-right corner; phones: CSS
-function placeCtl() {
-  const c = $("ctl");
-  c.classList.remove("narrow"); c.style.top = c.style.right = c.style.maxWidth = "";
-  if (window.innerWidth <= 700) return;
+// the controls: one thin bar along the BOTTOM of the video window (like a video player's), shown only while
+// the mouse is in the window's lower part or on the bar; without a video window (DASHBOARD layout, a small
+// window) along the bottom of the screen
+function ctlArea() {
   const r = vbox.classList.contains("shown") ? vbox.getBoundingClientRect() : null;
-  if (!r || r.width < 340) return;
-  if (r.width < c.offsetWidth + 24) {                              // a small video window: the rows wrap to fit it
-    c.classList.add("narrow"); c.style.maxWidth = Math.floor(r.width - 24) + "px";
-  }
-  if (r.height < c.offsetHeight + 24) { c.classList.remove("narrow"); c.style.maxWidth = ""; return; }
-  c.style.top = Math.round(r.top + 12) + "px";
-  c.style.right = Math.round(Math.max(12, window.innerWidth - r.right + 12)) + "px";
+  return r && r.width >= 340 && r.height >= 120 ? { left: r.left, width: r.width, height: r.height, bottom: r.bottom }
+    : { left: 0, width: window.innerWidth, height: window.innerHeight, bottom: window.innerHeight };
+}
+function placeCtl() {
+  const a = ctlArea(), c = $("ctl");
+  Object.assign(c.style, { left: Math.round(a.left) + "px", width: Math.round(a.width) + "px",
+    bottom: Math.round(window.innerHeight - a.bottom) + "px" });
+}
+function inCtlZone(x, y) {                         // the lower part of the video window: 15 %, at least 70 px
+  const a = ctlArea(), zone = Math.max(70, a.height * 0.15);
+  return x >= a.left && x <= a.left + a.width && y >= a.bottom - zone && y <= a.bottom;
 }
 dash.addEventListener("load", () => { setTimeout(place, 300); setTimeout(place, 1500); });
 window.addEventListener("resize", () => setTimeout(place, 100));
@@ -621,10 +623,33 @@ function setCtl(badge, cls, detail) {
 }
 
 /* ------------------------------------------------------------------ controls */
-let hideTimer = null;
-function showCtl() { if (P.open) return; placeCtl(); $("ctl").classList.remove("hide"); clearTimeout(hideTimer); hideTimer = setTimeout(() => $("ctl").classList.add("hide"), 4000); }
-document.addEventListener("mousemove", () => { if (PAGE) showCtl(); });
-document.addEventListener("touchstart", () => { if (PAGE) showCtl(); }, { passive: true });
+// shown: while the mouse is in the video window's lower part or on the bar (hidden 1.2 s after it leaves),
+// for a moment after a key (1 2 3 M F) and on a touch (phones have no mouse to point with)
+let hideTimer = null, overBar = false;
+function showCtl(ms) {
+  if (P.open) return;
+  placeCtl(); $("ctl").classList.remove("hide");
+  clearTimeout(hideTimer); hideTimer = ms ? setTimeout(hideCtl, ms) : null;
+}
+function hideCtl() { hideTimer = null; if (!overBar) $("ctl").classList.add("hide"); }
+function laterHide() { if (!hideTimer && !$("ctl").classList.contains("hide")) hideTimer = setTimeout(hideCtl, 1200); }
+function pointer(x, y) {
+  if (!PAGE) return;
+  if (inCtlZone(x, y)) showCtl(0); else if (!overBar) laterHide();
+}
+document.addEventListener("mousemove", (e) => pointer(e.clientX, e.clientY));
+document.addEventListener("mouseout", (e) => { if (!e.relatedTarget) laterHide(); });          // left the window
+// the dashboard frame (same origin) takes the mouse over most of the screen: its moves count too
+dash.addEventListener("load", () => {
+  try {
+    dash.contentDocument.addEventListener("mousemove", (e) => {
+      const f = dash.getBoundingClientRect(); pointer(f.left + e.clientX, f.top + e.clientY);
+    });
+  } catch (e) { /* not readable: the bar then follows the moves over the video only */ }
+});
+$("ctl").addEventListener("mouseenter", () => { overBar = true; showCtl(0); });
+$("ctl").addEventListener("mouseleave", () => { overBar = false; laterHide(); });
+document.addEventListener("touchstart", () => { if (PAGE) showCtl(4000); }, { passive: true });
 document.querySelectorAll("#layouts button").forEach((b) => b.addEventListener("click", () => setLayout(b.dataset.l)));
 function toggleSound() { video.muted = !video.muted; if (!video.muted) video.play().catch(() => {}); $("unmute").hidden = !video.muted; }
 $("b-sound").addEventListener("click", toggleSound);
@@ -663,7 +688,7 @@ document.addEventListener("keydown", (e) => {
   const k = e.key.toLowerCase();
   if (k === "1") setLayout("RACE_VIEW"); else if (k === "2") setLayout("VIDEO_FOCUS"); else if (k === "3") setLayout("FULL_DASHBOARD");
   else if (k === "m") toggleSound(); else if (k === "f") toggleFull(); else return;
-  showCtl();
+  showCtl(2500);
 });
 $("b-player").addEventListener("click", () => setPanel(!P.open));
 
@@ -671,7 +696,7 @@ $("b-player").addEventListener("click", () => setPanel(!P.open));
 function start() {
   document.body.classList.remove("locked");
   $("auth").hidden = true;
-  setLayout(layout); showCtl();
+  setLayout(layout); showCtl(3000);                       // once, so it is seen where the controls are
   setInterval(poll, 3000); poll();
   setInterval(place, 1000);                               // the dashboard re-lays itself out (TV mode, banners)
 }
