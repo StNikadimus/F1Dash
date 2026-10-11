@@ -95,6 +95,8 @@ The `VIDEO_*` commands control only the dashboard's **own** video element. In wi
 
 ## 3. PLAYER layer: the `/tv` LIVE / REPLAYS panel
 
+The panel is a gallery: the LIVE row at the top, then the recordings on the disk, one section per GP weekend (newest weekend first), each session a card in time order (FP1 … Race).
+
 You can open the panel with:
 - `B` on the dashboard or the `/tv` page;
 - **LIST** or **EPG** on the IR remote (`KEY_LIST`, `KEY_EPG`);
@@ -104,7 +106,7 @@ While it is open, these keys drive the panel on every input device:
 
 | Key | Command | In the panel |
 |---|---|---|
-| ↑ / ↓ | `PLAYER_NAV:up` / `:down` | move the cursor |
+| ↑ / ↓ | `PLAYER_NAV:up` / `:down` | move to the card / row above or below (by position on the screen; from the LIVE row down to the first card) |
 | ← / → | `PLAYER_NAV:left` / `:right` | depends on the row (see below) |
 | OK, Enter, SELECT | `PLAYER_OK` | on LIVE: switch to live; on a recording: play it; on transport: play / pause; on volume: mute / unmute |
 | BACK, Esc, EXIT, Backspace | `PLAYER_BACK` | close the panel |
@@ -117,7 +119,12 @@ What ← / → do depends on the row the cursor is on:
 |---|---|
 | transport | seek −10 s / +10 s |
 | volume | −10 % / +10 % |
-| recordings list | move a page (5 rows) at a time |
+| a recording card | the previous / next card (at the end of a row: the next card in order) |
+| LIVE | the previous / next row in order |
+
+### Choosing on the phone (`/remote` → VIDEOS)
+
+The phone's VIDEOS section lists the same recordings: a search box (GP, session, year), session-type chips (ALL, PRACTICE, SPRINT Q, SPRINT, QUALIFYING, RACE), a season select and "complete only". A tap sends `PLAYER_PLAY:<recording id>`, the LIVE button `PLAYER_PLAY:live`. The `/tv` page plays it and closes its panel; it does not have to be open. A recording no longer on the disk is said in the panel. The phone gets names, dates and lengths only, never a media address.
 
 ## 4. The `/tv` page itself (outside the dashboard frame)
 
@@ -204,6 +211,7 @@ scancodes there: ▲ ▼ ◀ ▶ OK BACK. Every other remote button works only a
 | Views | MAP / DATA / TYRES / RACE / WEATHER (= `1`–`5`) |
 | Weather | WEATHER REPORT |
 | TV layout | STATS / VOYO / VIDEO (`SET_TV_MODE`) and LIVE / REPLAYS (`PLAYER_MENU`) |
+| VIDEOS | LIVE, search, filters, a card per recording (`PLAYER_PLAY`, §3) |
 | Mode | AUTO / LIVE / VOD |
 | VOYO sync | SYNC −, MARK, SYNC +, START, RESYNC, MENU |
 | Advanced sync | MARK STREAM START, RESET STREAM START, EVENT SYNC |
@@ -262,4 +270,6 @@ scancodes there: ▲ ▼ ◀ ▶ OK BACK. Every other remote button works only a
 - **Changed:** on the `/tv` page, Space, `P` and media Play/Pause play / pause **that page's** video. They are not sent to the server, so Space on the TV no longer switches the TV mode of every other screen. In the dashboard, Space and `P` are unchanged.
 - **Changed:** on the `/tv` page, `B`, ContextMenu and the LIVE / REPLAYS button open the panel on the page itself. While the panel is open, the arrows, Enter, Esc, Backspace and browser Back drive it there. Before, they went through the server and did nothing through the public gateway, so recordings could not be chosen on a `/tv` opened through Funnel.
 - **Help overlay:** now also lists `B` (LIVE / REPLAYS panel).
+- **Changed (gallery):** the `/tv` panel shows the recordings as a gallery (one section per GP weekend). ← / → on a recording move to the previous / next card instead of a page of 5 rows; ↑ / ↓ move to the card above / below.
+- **New:** `/remote` VIDEOS - choose LIVE or a recording on the phone (search, filters); command `PLAYER_PLAY`.
 - No existing shortcut was removed.

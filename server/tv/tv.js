@@ -211,7 +211,8 @@ for (const ev of ["waiting", "emptied", "error", "pause"]) video.addEventListene
    * by the remote (phone, IR): keys -> server (remote.py, its PLAYER layer) -> the dashboard in the iframe ->
      postMessage here. */
 const P = { replay: null, rhls: null, open: false, cursor: 0, recs: [], recsAt: 0, recsErr: "", recsLoading: false,
-  hidden: null, lastCmd: null, srvMenu: false, osdTimer: null, err: "", loading: false, scrolled: -1, recovered: false };
+  hidden: null, lastCmd: null, srvMenu: false, osdTimer: null, err: "", loading: false, scrolled: -1, recovered: false,
+  recsPromise: null };
 const pmenu = $("pmenu"), posd = $("posd");
 function hms(s) {
   if (!isFinite(s) || s < 0) return "--:--";
@@ -228,7 +229,24 @@ function recWhen(r) {
   return d && !isNaN(d) ? d.toLocaleString([], { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false }) : "";
 }
 const STATUS_TXT = { closed: "COMPLETE", recording: "RECORDING NOW", interrupted: "INTERRUPTED" };
+const KIND_SHORT = { practice1: "FP1", practice2: "FP2", practice3: "FP3", sprint_qualifying: "SPRINT QUALIFYING",
+  sprint: "SPRINT", qualifying: "QUALIFYING", race: "RACE", other: "RECORDING" };
 
+// the gallery: the recordings grouped by GP weekend (newest weekend first), each weekend's sessions in time order
+function recTime(r) { const t = r && r.start ? Date.parse(r.start) : NaN; return isNaN(t) ? null : t; }
+function groups() {
+  const g = new Map();
+  for (const r of P.recs) {
+    const t = recTime(r), year = t === null ? "" : new Date(t).getFullYear();
+    const name = r.meeting || r.title || "Other recordings", key = name + "|" + year;
+    if (!g.has(key)) g.set(key, { name, year, recs: [], last: -Infinity });
+    const x = g.get(key);
+    x.recs.push(r); if (t !== null) x.last = Math.max(x.last, t);
+  }
+  const out = [...g.values()].sort((a, b) => b.last - a.last);
+  for (const x of out) x.recs.sort((a, b) => (recTime(a) || 0) - (recTime(b) || 0));
+  return out;
+}
 function rows() {                                   // what the panel shows, in order; sel = can be highlighted
   const out = [];
   if (P.replay) out.push({ kind: "transport", sel: true });
@@ -236,11 +254,19 @@ function rows() {                                   // what the panel shows, in 
   out.push({ kind: "live", sel: true });
   out.push({ kind: "head" });
   if (!P.recs.length) out.push({ kind: P.recsLoading ? "loading" : P.recsErr ? "error" : "empty" });
-  for (const r of P.recs) out.push({ kind: "rec", sel: true, rec: r });
+  for (const g of groups()) {
+    out.push({ kind: "group", group: g });
+    for (const r of g.recs) out.push({ kind: "rec", sel: true, rec: r });
+  }
   return out;
 }
-async function loadRecs(force) {
-  if (P.recsLoading || (!force && Date.now() - P.recsAt < 30000)) return;
+function loadRecs(force) {
+  if (P.recsLoading) return P.recsPromise;
+  if (!force && Date.now() - P.recsAt < 30000) return Promise.resolve();
+  P.recsPromise = fetchRecs();
+  return P.recsPromise;
+}
+async function fetchRecs() {
   P.recsAt = Date.now(); P.recsLoading = true;
   renderPanel();
   try {
@@ -285,7 +311,18 @@ function renderPanel() {
   const rs = rows();
   if (!rs[P.cursor] || !rs[P.cursor].sel) moveCursor(0);
   const lv = (status && status.live) || {};
+  let inGroup = false;
   const html = rs.map((r, i) => {
+    const close = inGroup && r.kind === "group" ? "</div></section>" : "";      // the previous weekend ends
+    if (r.kind === "group") {
+      inGroup = true;
+      const n = r.group.recs.length;
+      return close + `<section class="pg"><div class="pg-h"><span class="pg-n">${esc(r.group.name)}</span>` +
+        `<span class="pg-y">${esc(r.group.year)}</span><span class="pg-c">${n} ${n === 1 ? "video" : "videos"}</span></div><div class="pg-grid">`;
+    }
+    return close + item(r, i);
+  }).join("") + (inGroup ? "</div></section>" : "");
+  function item(r, i) {
     const cur = i === P.cursor ? " cur" : "";
     if (r.kind === "transport") {
       const d = video.duration, t = video.currentTime, pct = isFinite(d) && d > 0 ? Math.min(100, t / d * 100) : 0;
@@ -302,22 +339,27 @@ function renderPanel() {
     if (r.kind === "live") {
       const on = !!lv.on_air, act = !P.replay ? " act" : "";
       const sess = status && status.session ? [status.session.meeting, status.session.session_name].filter(Boolean).join(" · ") : "";
-      return `<div class="pr live${cur}${act}" data-i="${i}"><span class="pi ${on ? "on" : ""}">●</span>` +
-        `<span class="pt">LIVE</span><span class="pd">${on ? "on air" + (sess ? " · " + esc(sess) : "") : "no live stream now"}</span>` +
+      const nxt = status && status.next && status.next.meeting ? "next: " + [status.next.meeting, status.next.session_name].filter(Boolean).join(" · ") : "";
+      return `<div class="pr live${on ? " on" : ""}${cur}${act}" data-i="${i}"><span class="pi ${on ? "on" : ""}">●</span>` +
+        `<span class="pt">LIVE</span><span class="pd">${on ? "on air" + (sess ? " · " + esc(sess) : "") : "no live stream now" + (nxt ? " · " + esc(nxt) : "")}</span>` +
         `${act ? '<span class="pa">PLAYING</span>' : ""}</div>`;
     }
-    if (r.kind === "head") return `<div class="phd">REPLAYS · RECORDINGS ON THE DISK${P.recsLoading ? " · LOADING…" : ""}` +
+    if (r.kind === "head") return `<div class="phd">REPLAYS · ${P.recs.length} ${P.recs.length === 1 ? "VIDEO" : "VIDEOS"} ON THE DISK${P.recsLoading ? " · LOADING…" : ""}` +
       `${P.recsErr && P.recs.length ? ` · <span class="pe-err">${esc(P.recsErr)}</span>` : ""}</div>`;
     if (r.kind === "loading") return `<div class="pe">Loading the recordings…</div>`;
     if (r.kind === "error") return `<div class="pe pe-err">${esc(P.recsErr)}</div>`;
     if (r.kind === "empty") return `<div class="pe">${esc(emptyText())}</div>`;
     const x = r.rec, act = P.replay && P.replay.id === x.id ? " act" : "";
-    return `<div class="pr rec${cur}${act}" data-i="${i}"><span class="pi">▶</span>` +
-      `<span class="pt">${esc(recLabel(x))}</span><span class="pd">${esc(recWhen(x))}${x.duration_s ? " · " + esc(hms(x.duration_s)) : ""}</span>` +
+    const kind = KIND_SHORT[x.session_kind] ? x.session_kind : "other";
+    return `<div class="vcard k-${esc(kind)}${cur}${act}" data-i="${i}">` +
+      `<div class="c-kind">${esc(KIND_SHORT[kind] || "RECORDING")}</div>` +
+      `<div class="c-name">${esc(x.session_name || KIND[x.session_kind] || x.title || "Recording")}</div>` +
+      `<div class="c-when">${esc(recWhen(x))}</div>` +
+      `<div class="c-foot"><span class="c-dur">${x.duration_s ? esc(hms(x.duration_s)) : ""}</span>` +
       `<span class="ps s-${esc(x.status || "")}">${esc(STATUS_TXT[x.status] || (x.status || "").toUpperCase())}</span>` +
       (x.check && x.check !== "COMPLETE" ? `<span class="ps s-interrupted" title="the recorded video does not cover the whole session">${esc(x.check)}</span>` : "") +
-      `${act ? '<span class="pa">PLAYING</span>' : ""}</div>`;
-  }).join("");
+      `</div>${act ? '<div class="c-play">▶ PLAYING</div>' : ""}</div>`;
+  }
   $("pm-list").innerHTML = html;
   $("pm-src").textContent = P.replay ? "REPLAY · " + recLabel(P.replay) : "LIVE";
   $("pm-src").className = P.replay ? "rp" : "lv";
@@ -330,12 +372,12 @@ function renderPanel() {
 function placePanel() {
   if (!P.open) return;
   const shown = vbox.classList.contains("shown"), r = vbox.getBoundingClientRect();
-  if (shown && r.width > 520 && r.height > 300) {
-    const w = Math.min(r.width - 32, 860);
+  if (shown && r.width > 700 && r.height > 420) {
+    const w = Math.min(r.width - 32, 1280);
     Object.assign(pmenu.style, { left: r.left + 16 + "px", top: r.top + 16 + "px", width: w + "px", maxHeight: r.height - 32 + "px",
       transform: "none" });
   } else {
-    Object.assign(pmenu.style, { left: "50%", top: "50%", width: "min(860px, 94vw)", maxHeight: "86vh", transform: "translate(-50%, -50%)" });
+    Object.assign(pmenu.style, { left: "50%", top: "50%", width: "min(1280px, 96vw)", maxHeight: "90vh", transform: "translate(-50%, -50%)" });
   }
 }
 function renderOsd() {
@@ -438,16 +480,51 @@ function playerCmd(c) {                                // one command of the PLA
       try { pmenu.focus({ preventScroll: true }); } catch (e) { /* keys then still reach this page */ }
     }
   } else if (a === "nav" && P.open) {
-    const r = rs[P.cursor] || {};
-    if (c.arg === "up") moveCursor(-1);
-    else if (c.arg === "down") moveCursor(1);
-    else if (r.kind === "transport") seekBy(c.arg === "left" ? -10 : 10);
-    else if (r.kind === "volume") volumeBy(c.arg === "left" ? -0.1 : 0.1);
-    else moveCursor(c.arg === "left" ? -5 : 5);                    // the list: a page at a time
+    const r = rs[P.cursor] || {}, side = c.arg === "left" || c.arg === "right";
+    if (side && r.kind === "transport") seekBy(c.arg === "left" ? -10 : 10);
+    else if (side && r.kind === "volume") volumeBy(c.arg === "left" ? -0.1 : 0.1);
+    else if (!spatial(c.arg)) moveCursor(c.arg === "up" || c.arg === "left" ? -1 : 1);   // no layout: in order
   } else if (a === "ok" && P.open) activate(rs[P.cursor]);
+  else if (a === "live") { P.open = false; goLive(); }                 // chosen on the phone (PLAYER_PLAY)
+  else if (a === "play") { playById(c.arg); }
   else if (a === "play_pause") { if (P.replay || loaded) playPause(); }
   else if (a === "seek") seekBy(parseInt(c.arg, 10) || 0);
   renderPanel();
+}
+// the arrows move to the nearest card in that direction as it is laid out on the screen: down = the next row
+// (the card below), right = the next card in the row; false when there is nothing laid out (no layout yet)
+function spatial(dir) {
+  const els = [...$("pm-list").querySelectorAll("[data-i]")];
+  const cur = els.find((e) => Number(e.dataset.i) === P.cursor);
+  if (!cur || !["up", "down", "left", "right"].includes(dir)) return false;
+  const c = cur.getBoundingClientRect();
+  if (!c.width || !c.height) return false;
+  // from a full-width row (LIVE, transport, volume) down / up lands on the first card of the row, not the middle one
+  const cx = c.width > 400 ? c.left + 1 : c.left + c.width / 2, cy = c.top + c.height / 2, cand = [];
+  for (const e of els) {
+    if (e === cur) continue;
+    const b = e.getBoundingClientRect();
+    if (!b.width || !b.height) continue;
+    const bx = c.width > 400 ? b.left + 1 : b.left + b.width / 2, by = b.top + b.height / 2;
+    const row = b.bottom > c.top + 2 && b.top < c.bottom - 2;
+    if (dir === "down" && b.top >= c.bottom - 2) cand.push([b.top - c.bottom, Math.abs(bx - cx), e]);
+    else if (dir === "up" && b.bottom <= c.top + 2) cand.push([c.top - b.bottom, Math.abs(bx - cx), e]);
+    else if (dir === "right" && row && b.left >= c.right - 2) cand.push([b.left - c.right, Math.abs(by - cy), e]);
+    else if (dir === "left" && row && b.right <= c.left + 2) cand.push([c.left - b.right, Math.abs(by - cy), e]);
+  }
+  if (!cand.length) return false;
+  const near = Math.min(...cand.map((x) => x[0]));                 // the nearest row / column first, then the closest
+  const best = cand.filter((x) => x[0] <= near + 8).sort((x, y) => x[1] - y[1])[0];
+  P.cursor = Number(best[2].dataset.i);
+  return true;
+}
+// a recording chosen on the phone: from the list (loaded first when needed); gone from the disk: said in the panel
+async function playById(id) {
+  let rec = P.recs.find((r) => r.id === id);
+  if (!rec) { await loadRecs(true); rec = P.recs.find((r) => r.id === id); }
+  if (rec) { P.open = false; playReplay(rec); return; }
+  P.err = "the recording chosen on the phone is not on the disk any more";
+  setPanel(true); renderPanel();
 }
 function tellDash(msg) {
   try { dash.contentWindow.postMessage(msg, location.origin); } catch (e) { /* not loaded yet */ }

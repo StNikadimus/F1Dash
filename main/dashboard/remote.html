@@ -105,6 +105,30 @@
   #locked { display: none; margin: 18px 12px; padding: 16px; border: 1px solid var(--line-2, #2a3847); border-radius: 8px; line-height: 1.5; }
   #locked b { color: var(--amber, #ffb000); }
   body.locked #locked { display: block; } body.locked main, body.locked #tvreq, body.locked .now { display: none !important; }
+  /* VIDEOS: choose what the /tv page plays - LIVE or a recording (search, filters, one block per GP weekend) */
+  #videos { min-width: 0; } #videos .chips, #videos .row, #v-list { max-width: 100%; min-width: 0; }
+  #v-live { width: 100%; text-align: left; padding: 10px 14px; display: flex; align-items: center; gap: 10px; }
+  #v-live .dot { font-size: 20px; color: var(--text-3); } #v-live .lt { font-size: 17px; }
+  #v-live .ld { font-size: 12px; color: var(--text-2); letter-spacing: .04em; font-weight: 700; margin-left: auto; text-align: right;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 62%; }
+  #v-live.on { background: #3a0a10; border-color: var(--red); box-shadow: inset 0 0 0 1px var(--red); }
+  #v-live.on .dot { color: var(--red); animation: blink 1.2s ease-in-out infinite alternate; }
+  #v-q { font: 700 16px system-ui, sans-serif; }
+  .chips { display: flex; gap: 6px; overflow-x: auto; margin-top: 8px; padding-bottom: 2px; scrollbar-width: none; }
+  .chips button { flex: none; min-height: 36px; padding: 4px 12px; font-size: 12px; border-radius: 18px; }
+  #v-list { margin-top: 10px; display: grid; gap: 12px; }
+  .vg-h { display: flex; align-items: baseline; gap: 8px; font-size: 14px; font-weight: 900; letter-spacing: .03em; margin-bottom: 6px; }
+  .vg-h span { font-size: 11px; color: var(--text-3); letter-spacing: .1em; } .vg-h .n { margin-left: auto; }
+  .vg-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+  .vc { text-align: left; min-height: 84px; padding: 8px 10px; display: flex; flex-direction: column; gap: 3px; border-left: 5px solid var(--line);
+    letter-spacing: .02em; }
+  .vc .k { font-size: 10px; letter-spacing: .14em; color: var(--text-3); } .vc .t { font-size: 15px; line-height: 1.15; }
+  .vc .w { font-size: 11px; color: var(--text-2); font-weight: 700; } .vc .f { margin-top: auto; font: 800 12px var(--mono); color: var(--text-2); }
+  .vc .f em { font: 900 9px system-ui, sans-serif; letter-spacing: .1em; font-style: normal; color: var(--amber); margin-left: 6px; }
+  .vc.sent { box-shadow: inset 0 0 0 2px var(--acc); } .vc.sent .k::after { content: " · ON THE TV"; color: #8fbaff; }
+  .vc.k-race { border-left-color: var(--red); } .vc.k-qualifying { border-left-color: var(--amber); } .vc.k-sprint { border-left-color: #ff7a1a; }
+  .vc.k-sprint_qualifying { border-left-color: var(--purple); }
+  .vc.k-practice1, .vc.k-practice2, .vc.k-practice3 { border-left-color: var(--acc); }
 </style>
 </head>
 <body class="off">
@@ -168,6 +192,20 @@
       <div class="g" style="margin-top:8px">
         <button data-c="PLAYER_MENU" id="b-player">LIVE / REPLAYS<small>/tv PLAYER · ARROWS · OK · BACK</small></button>
       </div>
+    </section>
+    <section id="videos">
+      <h2>VIDEOS · CHOOSE WHAT THE TV PLAYS</h2>
+      <button id="v-live"><span class="dot">●</span><span class="lt">LIVE</span><span class="ld" id="v-lived">…</span></button>
+      <div class="row"><input id="v-q" type="search" placeholder="Search: GP, session, year…" autocomplete="off" enterkeyhint="search">
+        <button id="v-ref" class="always" style="flex:0 0 56px" aria-label="Refresh the list">↻</button></div>
+      <div class="chips" id="v-kind">
+        <button data-vk="" class="active">ALL</button><button data-vk="practice">PRACTICE</button><button data-vk="sprint_qualifying">SPRINT Q</button>
+        <button data-vk="sprint">SPRINT</button><button data-vk="qualifying">QUALIFYING</button><button data-vk="race">RACE</button>
+      </div>
+      <div class="row"><select id="v-year"><option value="">All seasons</option></select>
+        <select id="v-stat"><option value="">Complete + incomplete</option><option value="complete">Complete only</option></select></div>
+      <div id="v-list"></div>
+      <div class="info" id="v-info">Loading the videos…</div>
     </section>
     <section>
       <h2>MODE</h2>
@@ -270,7 +308,7 @@
     const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws?client=remote" +
       (token ? "&token=" + encodeURIComponent(token) : "");
     ws = new WebSocket(url);
-    ws.onopen = () => { retry = 0; setConn(true); };
+    ws.onopen = () => { retry = 0; setConn(true); askVideos(); };
     ws.onclose = (ev) => {
       setConn(false, ev.code === 4401 ? "WRONG TOKEN" : null);
       const d = Math.min(10000, 600 * 2 ** Math.min(retry++, 4));
@@ -327,6 +365,85 @@
     if (n && n.trim()) send({ type: "device_name", name: n.trim().slice(0, 40) });
   });
 
+  // ------------------------------------------------------------ VIDEOS: LIVE or a recording on the /tv page
+  // The list comes from the server ("videos": names, dates, lengths - no media address); a choice is the command
+  // PLAYER_PLAY <id | live>, which the /tv page carries out (it plays the video; the phone only chooses).
+  const V = { recs: [], live: {}, kind: "", sent: null, at: 0, err: "" };
+  const KSHORT = { practice1: "FP1", practice2: "FP2", practice3: "FP3", sprint_qualifying: "SPRINT QUALIFYING", sprint: "SPRINT",
+    qualifying: "QUALIFYING", race: "RACE" };
+  const KNAME = { practice1: "Practice 1", practice2: "Practice 2", practice3: "Practice 3", sprint_qualifying: "Sprint Qualifying",
+    sprint: "Sprint", qualifying: "Qualifying", race: "Race" };
+  const norm = (t) => String(t ?? "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const vtime = (r) => { const t = r && r.start ? Date.parse(r.start) : NaN; return isNaN(t) ? null : t; };
+  function askVideos() { if (ws && ws.readyState === 1) { V.at = Date.now(); ws.send(JSON.stringify({ type: "videos" })); } }
+  setInterval(() => { if (!document.hidden) askVideos(); }, 30000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && Date.now() - V.at > 10000) askVideos(); });
+  function onVideos(m) {
+    V.recs = Array.isArray(m.recordings) ? m.recordings : []; V.live = m.live || {};
+    V.err = m.ok === false ? (m.error || "the list could not be read") : m.recorder && m.recorder.ok === false ? "the recording disk is not available" : "";
+    const years = [...new Set(V.recs.map((r) => vtime(r)).filter((t) => t !== null).map((t) => new Date(t).getFullYear()))].sort((a, b) => b - a);
+    const ys = $("v-year"), keep = ys.value;
+    ys.innerHTML = '<option value="">All seasons</option>' + years.map((y) => `<option value="${y}">${y}</option>`).join("");
+    ys.value = years.map(String).includes(keep) ? keep : "";
+    renderVideos();
+  }
+  function shown() {
+    const q = norm($("v-q").value).split(/\s+/).filter(Boolean), year = $("v-year").value, complete = $("v-stat").value === "complete";
+    return V.recs.filter((r) => {
+      const k = r.session_kind || "other", t = vtime(r);
+      if (V.kind === "practice" ? !/^practice[123]$/.test(k) : V.kind && k !== V.kind) return false;
+      if (year && (t === null || String(new Date(t).getFullYear()) !== year)) return false;
+      if (complete && !(r.check === "COMPLETE" || (!r.check && r.status === "closed"))) return false;
+      const hay = norm([r.meeting, r.session_name, r.title, KNAME[k], KSHORT[k], t === null ? "" : new Date(t).getFullYear()].join(" "));
+      return q.every((w) => hay.includes(w));
+    });
+  }
+  function renderVideos() {
+    const lv = V.live || {}, on = !!lv.on_air;
+    $("v-live").classList.toggle("on", on);
+    $("v-lived").textContent = on ? [lv.meeting, lv.session_name].filter(Boolean).join(" · ") || "on air" : "no live stream now";
+    const list = shown(), g = new Map();
+    for (const r of list) {
+      const t = vtime(r), year = t === null ? "" : new Date(t).getFullYear(), name = r.meeting || r.title || "Other recordings";
+      const key = name + "|" + year;
+      if (!g.has(key)) g.set(key, { name, year, recs: [], last: -Infinity });
+      const x = g.get(key); x.recs.push(r); if (t !== null) x.last = Math.max(x.last, t);
+    }
+    const groups = [...g.values()].sort((a, b) => b.last - a.last);
+    $("v-list").innerHTML = groups.map((x) => {
+      x.recs.sort((a, b) => (vtime(a) || 0) - (vtime(b) || 0));
+      return `<div class="vg"><div class="vg-h">${esc(x.name)} <span>${esc(x.year)}</span><span class="n">${x.recs.length}</span></div><div class="vg-cards">` +
+        x.recs.map((r) => {
+          const k = KSHORT[r.session_kind] ? r.session_kind : "other", t = vtime(r);
+          const when = t === null ? "" : new Date(t).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+          const bad = r.status === "recording" ? "RECORDING" : r.check && r.check !== "COMPLETE" ? r.check : r.status === "interrupted" ? "INTERRUPTED" : "";
+          return `<button class="vc k-${esc(k)}${V.sent === r.id ? " sent" : ""}" data-id="${esc(r.id)}">` +
+            `<span class="k">${esc(KSHORT[k] || "RECORDING")}</span><span class="t">${esc(r.session_name || KNAME[k] || r.title || "Recording")}</span>` +
+            `<span class="w">${esc(when)}</span><span class="f">${r.duration_s ? esc(mmss(r.duration_s)) : ""}${bad ? `<em>${esc(bad)}</em>` : ""}</span></button>`;
+        }).join("") + "</div></div>";
+    }).join("");
+    $("v-info").textContent = V.err ? V.err : !V.recs.length ? "No videos on the disk yet." :
+      !list.length ? "Nothing matches the search / filters." : `${list.length} of ${V.recs.length} videos · tap one to play it on the TV`;
+  }
+  $("v-list").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-id]");
+    if (!b) return;
+    if (send({ type: "command", command: "PLAYER_PLAY", arg: b.dataset.id })) { V.sent = b.dataset.id; renderVideos(); }
+  });
+  $("v-live").addEventListener("click", () => { if (send({ type: "command", command: "PLAYER_PLAY", arg: "live" })) { V.sent = null; renderVideos(); } });
+  $("v-ref").addEventListener("click", askVideos);
+  $("v-q").addEventListener("input", renderVideos);
+  $("v-q").addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
+  $("v-year").addEventListener("change", renderVideos);
+  $("v-stat").addEventListener("change", renderVideos);
+  $("v-kind").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-vk]");
+    if (!b) return;
+    V.kind = b.dataset.vk;
+    for (const x of $("v-kind").querySelectorAll("[data-vk]")) x.classList.toggle("active", x === b);
+    renderVideos();
+  });
+
   // ------------------------------------------------------------ state from the server
   function handle(m) {
     switch (m.type) {
@@ -346,6 +463,7 @@
       case "reload": location.reload(); return;                                            // trust changed
       case "tv_requests": showTvRequests(m.requests || []); return;
       case "tv_decided": toast(m.ok ? "TV " + String(m.status || "").toUpperCase() : "Not done: " + (m.error || "?")); return;
+      case "videos": onVideos(m); return;
       default: return;
     }
     render();
@@ -372,7 +490,7 @@
     const sel = R.remote.selected;
     $("selinfo").innerHTML = sel ? `SELECTED <b style="border-left:4px solid ${esc(sel.team_color || "#444")};padding-left:6px">${esc(sel.tla || sel.num)}</b>` +
       (sel.position ? ` · P${esc(sel.position)}` : "") : "No driver selected";
-    if (ui.player_menu) $("selinfo").innerHTML = '<b>/tv PLAYER</b> · ▲▼ choose · ◀▶ seek / volume · OK select · BACK close';
+    if (ui.player_menu) $("selinfo").innerHTML = '<b>/tv PLAYER</b> · ▲▼◀▶ choose · OK play · BACK close · or tap a video below';
     const y = R.sync || {};
     $("syncinfo").innerHTML = y.mode ? `SYNC <b>${esc(y.confidence || "—")}</b> · ${esc(y.mode)}` +
       (y.offsetDisplay !== undefined && y.offsetDisplay !== null ? ` · ${esc((y.offsetDisplayLabel || "offset").toLowerCase())} <b>${Number.isFinite(+y.offsetDisplay) ? (+y.offsetDisplay).toFixed(1) + " s" : esc(y.offsetDisplay)}</b>` : "") +
