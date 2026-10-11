@@ -206,6 +206,31 @@ def episode_url(origin: Optional[str], path: Optional[str], eid: str, site: Opti
     return url if (u.scheme, u.netloc, u.path) == (o.scheme, o.netloc, p) else None
 
 
+# VOYO's card text: "<duration> <title> <D. M. YYYY> - <description>" ("1:18:24 F1 kvalifikacije 10. 10. 2026 -
+# Sobotno dogajanje ..."). The session is named by the title alone: the description talks about other sessions
+# ("... po kvalifikacijah", "prvi prosti trening") and must not decide which one this is.
+DURATION_RE = re.compile(r"^\s*\d{1,2}:\d{2}(?::\d{2})?\s+")
+CARD_DATE_RE = re.compile(r"\s\d{1,2}\s*\.\s*\d{1,2}\s*\.\s*\d{4}\b")
+DESC_SEP_RE = re.compile(r"\s[-\u2013\u2014]\s")
+
+
+def classify_card_text(text: str) -> tuple[str, Classification]:
+    """(the title part of a card's text, its classification). Before the card's date when it has one; else
+    before " - " when that part names a session (or a show about one); else the whole text, as before."""
+    t = DURATION_RE.sub("", str(text or "")).strip()
+    m = CARD_DATE_RE.search(t)
+    if m:
+        head = t[:m.start()].strip()
+        return head, classify_title(head)
+    m = DESC_SEP_RE.search(t)
+    if m:
+        head = t[:m.start()].strip()
+        c = classify_title(head)
+        if c.kind or c.excluded or c.confidence == "low":
+            return head, c
+    return t, classify_title(t)
+
+
 DATE_RE = re.compile(r"\b(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{4})?")
 LIVE_RE = re.compile(r"\b(v\s*zivo|live|neposredn\w*)\b")
 
@@ -246,7 +271,7 @@ def episodes_from_page(items: Iterable[dict], year: Optional[int] = None) -> lis
         # (meeting, date, description) only when they name no session
         best = None
         for text in d["texts"]:
-            c = classify_title(text)
+            text, c = classify_card_text(text)
             if c.excluded:                       # one of its own texts says "preview / highlights": not the session
                 best = (text, c)
                 break
@@ -254,9 +279,9 @@ def episodes_from_page(items: Iterable[dict], year: Optional[int] = None) -> lis
                                                                                  best[1].kind is not None):
                 best = (text, c)
         if (best is None or (best[1].kind is None and not best[1].excluded)) and d["card"]:
-            c = classify_title(d["card"])
+            card_title, c = classify_card_text(d["card"])
             if c.kind or c.excluded or best is None:
-                best = (d["card"], c)
+                best = (card_title, c)
         title, c = best if best else ("", Classification(None, "none", why="no text"))
         card_n = normalize(d["card"])
         out.append(Episode(id=eid, title=title[:160], path=d["path"], kind=c.kind, confidence=c.confidence,

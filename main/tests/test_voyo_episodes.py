@@ -193,7 +193,7 @@ class ProductionEventPageTest(unittest.TestCase):
         self.assertEqual({i: e.path for i, e in by.items()}, {i: EP + i for i in by})   # the playEpisode twin's path
         self.assertEqual({i: e.date for i, e in by.items()},
                          {FP1: "2026-10-09", SQ: "2026-10-09", SPRINT: "2026-10-10", QUALI: "2026-10-10"})
-        self.assertEqual(by[QUALI].title, "F1 kvalifikacije 10. 10. 2026")
+        self.assertEqual(by[QUALI].title, "F1 kvalifikacije")
         for kind, want in (("practice1", FP1), ("sprint_qualifying", SQ), ("sprint", SPRINT), ("qualifying", QUALI)):
             s = ve.select_episode(eps, kind, "Singapore Grand Prix VN Singapurja")
             self.assertEqual((s.state, s.episode.id), ("SELECTED", want), kind)
@@ -219,6 +219,73 @@ class ProductionEventPageTest(unittest.TestCase):
         numbered = ve.episodes_from_page([card(FP1, "F1 1. prosti trening", ""), card("63660753", "F1 prosti trening", ""),
                                           card(SPRINT, "F1 sprint dirka", "")])
         self.assertEqual({e.id: e.kind for e in numbered}["63660753"], None)
+
+
+def live_card(eid, duration, title, date, desc, handler="playEpisode"):
+    """A card as the production page returned it on 11. 10. 2026 (`voyo-player.sh discover`): the link text is
+    "<duration> <title> <date> - <description>", and the description talks about OTHER sessions."""
+    text = f"{duration} {title} {date} - {desc}"
+    onclick = f'return playEpisode("{eid}","{EP}{eid}"),!1' if handler == "playEpisode" else f'return onPlayClick("{eid}"),!1'
+    return {"href": EVENT, "data_uniq": f"media/{eid}", "onclick": onclick, "text": text[:300], "card": text[:300]}
+
+
+SINGAPORE_LIVE = [
+    live_card(QUALI, "1:18:24", "F1 kvalifikacije", "10. 10. 2026",
+              "Sobotno dogajanje na VN Singapurja se je končalo s kvalifikacijami. Po kvalifikacijah intervjuji in "
+              "analiza, pred nedeljsko dirko."),
+    live_card(SPRINT, "1:33:20", "F1 sprint dirka", "10. 10. 2026",
+              "Sobota je na VN Singapurja prinesla tudi razburljivo Sprint dirko Formule 1. Po sprintu analiza."),
+    live_card(SQ, "1:18:03", "F1 sprint kvalifikacije", "9. 10. 2026",
+              "Petkovo dogajanje se je končalo s sprint kvalifikacijami. Pogovor s dirkači po kvalifikacijah."),
+    live_card(FP1, "1:09:55", "F1 prosti trening", "9. 10. 2026",
+              "Petek je prinesel začetek dirkaškega vikenda Formule 1 in prve kilometre na stezi. Dirkači so se podali "
+              "na prvi prosti trening, drugi in tretji prosti trening sta odpadla zaradi dežja."),
+]
+
+
+class ProductionCardTextTest(unittest.TestCase):
+    """What `discover` showed on the production page: the qualifying and sprint qualifying cards were read as
+    "not a session" because their DESCRIPTION says "po kvalifikacijah" / "analiza"; FP1 was right only because its
+    description says "prvi prosti trening". The session is named by the card's title, before its date."""
+
+    def test_title_part_of_a_card(self):
+        for text, title, kind in (("1:18:24 F1 kvalifikacije 10. 10. 2026 - Sobotno dogajanje na", "F1 kvalifikacije", "qualifying"),
+                                  ("1:33:20 F1 sprint dirka 10. 10. 2026 - Sobota je na VN Singa", "F1 sprint dirka", "sprint"),
+                                  ("1:18:03 F1 sprint kvalifikacije 9. 10. 2026 - Petkovo dogaja", "F1 sprint kvalifikacije", "sprint_qualifying"),
+                                  ("V ŽIVO F1 dirka - Po dirki intervjuji", "V ŽIVO F1 dirka", "race"),       # no date: before " - "
+                                  ("VN Monaka – dirka", "VN Monaka – dirka", "race")):                       # " – " in a title: kept
+            got, c = ve.classify_card_text(text)
+            self.assertEqual((got, c.kind), (title, kind), text)
+        got, c = ve.classify_card_text("0:52:10 Povzetek kvalifikacij 10. 10. 2026 - F1 kvalifikacije v 50 minutah")
+        self.assertEqual((got, c.excluded), ("Povzetek kvalifikacij", True))          # a show stays a show
+        got, c = ve.classify_card_text("1:00:00 VN Singapurja 10. 10. 2026 - prvi prosti trening")
+        self.assertEqual((c.kind, c.excluded), (None, False))                          # the description never decides
+
+    def test_the_four_sessions_of_the_production_page(self):
+        eps = ve.episodes_from_page(SINGAPORE_LIVE)
+        by = {e.id: (e.kind, e.excluded, e.title, e.date) for e in eps}
+        self.assertEqual(by, {QUALI: ("qualifying", False, "F1 kvalifikacije", "2026-10-10"),
+                              SPRINT: ("sprint", False, "F1 sprint dirka", "2026-10-10"),
+                              SQ: ("sprint_qualifying", False, "F1 sprint kvalifikacije", "2026-10-09"),
+                              FP1: ("practice1", False, "F1 prosti trening", "2026-10-09")})
+        starts = {"practice1": utc(2026, 10, 9, 9, 30), "sprint_qualifying": utc(2026, 10, 9, 13, 30),
+                  "sprint": utc(2026, 10, 10, 9, 0), "qualifying": utc(2026, 10, 10, 13, 0), "race": utc(2026, 10, 11, 12, 0),
+                  "practice2": utc(2026, 10, 9, 13, 0), "practice3": utc(2026, 10, 10, 9, 30)}
+        want = {"practice1": FP1, "sprint_qualifying": SQ, "sprint": SPRINT, "qualifying": QUALI}
+        for kind, start in starts.items():
+            s = ve.select_episode(eps, kind, "Singapore Grand Prix", start)
+            if kind in want:
+                self.assertEqual((s.state, s.episode.id), ("SELECTED", want[kind]), kind)
+            else:                                     # the race is still to come; FP2 / FP3 were not held
+                self.assertEqual((s.state, s.episode), ("NOT_FOUND", None), kind)
+
+    def test_the_race_card_when_it_appears(self):
+        race = live_card("63661400", "", "F1 dirka", "11. 10. 2026",
+                         "Nedeljska dirka za VN Singapurja. Po dirki intervjuji in analiza.").copy()
+        race["text"] = race["card"] = race["text"].strip()
+        eps = ve.episodes_from_page(SINGAPORE_LIVE + [race])
+        s = ve.select_episode(eps, "race", "Singapore Grand Prix", utc(2026, 10, 11, 12, 0))
+        self.assertEqual((s.state, s.episode.id, s.episode.path), ("SELECTED", "63661400", EP + "63661400"))
 
 
 def utc(*a):

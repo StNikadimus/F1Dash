@@ -336,7 +336,10 @@ states:
    same card often appears twice and is merged by id. The address that opens a recording comes from
    an episode link or from `playEpisode`'s path for that id. A recording with neither is **FAILED**
    ("not the address that opens it") and is tried again later.
-2. **The title becomes a session kind.** Slovenian and English are understood: "1. prosti trening",
+2. **The title becomes a session kind.** On VOYO's cards the text is `<duration> <title> <date> - <description>`,
+   for example `1:18:24 F1 kvalifikacije 10. 10. 2026 - Sobotno dogajanje …`. Only the title before the
+   date is read. The description talks about other sessions ("po kvalifikacijah", "prvi prosti
+   trening") and never decides. Slovenian and English are understood: "1. prosti trening",
    "Prvi prosti trening", "FP1", "Sprint kvalifikacije", "Sprint", "Kvalifikacije", "Dirka", "Race"
    and similar. Shows *about* a session are excluded: povzetek / highlights, studio, napoved,
    pred / po dirki, intervju, novinarska konferenca and similar.
