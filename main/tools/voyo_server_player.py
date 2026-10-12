@@ -60,7 +60,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent                       # main/
 sys.path.insert(0, str(ROOT))
@@ -959,6 +959,15 @@ class Schedule:
     def current(self, now: float) -> Optional[dict]:
         return next((w for w in self.windows(now) if w["open_from"] <= now <= w["open_until"]), None)
 
+    def all_windows(self, now: float) -> list[dict]:
+        """Every session of every kind (not only record_sessions) - the backfill's list of a weekend."""
+        self.windows(now)                                  # (re)reads the schedule when due
+        sp = dict(self.sp, record_sessions=list(ve.KINDS))
+        out = []
+        for y in sorted(self._index):
+            out += session_windows(self._index.get(y), sp)
+        return sorted(out, key=lambda w: w["open_from"])
+
 
 # ---------------------------------------------------------------------------------------------
 # the dashboard server, read from this machine (status / test)
@@ -1004,10 +1013,23 @@ def recorder_line(server: str) -> str:
 # ---------------------------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------------------------
+def package_info(server: str, key: str) -> Optional[dict]:
+    """A package on the disk as the dashboard server stored and checked it: None = no such package,
+    else {"status", "check", "issues", ...}. OSError: the server could not be asked (then nothing is decided)."""
+    code, body, problem = get_json(f"{server}/api/voyo/player/package/{quote(key, safe='')}", 5)
+    if code == 404:
+        return None
+    if code != 200 or not isinstance(body, dict):
+        raise OSError(f"package check: {problem or code}")
+    return body
+
+
 def heartbeat(player: Player, nxt: Optional[dict], problem: str = "") -> list:
     """Tell the dashboard server what the player is doing (the /disk page's status); -> its commands
-    for the player (e.g. "login" from the /disk page)."""
+    for the player (e.g. "login" from the /disk page). The /disk page's backfill switch comes back with it."""
+    bf = getattr(player, "backfill", None)
     ans = _post("/api/voyo/player/status", {
+        "backfill": bf.report() if bf is not None else None,
         "login": player.login_result,
         "state": "open" if player.is_open else "idle", "pid": os.getpid(), "at": time.time(),
         "recording": player.session.status() if player.session is not None else getattr(player, "last_session", None),
@@ -1020,6 +1042,8 @@ def heartbeat(player: Player, nxt: Optional[dict], problem: str = "") -> list:
         "widevine": has_widevine(find_browser(player.sp)),
         "next": None if not nxt else {k: nxt.get(k) for k in ("meeting", "session_name", "kind", "start", "end",
                                                               "open_from", "open_until")}})
+    if bf is not None and isinstance(ans, dict):
+        bf.control(ans.get("backfill"))
     return list((ans or {}).get("commands") or [])
 
 
@@ -1034,6 +1058,16 @@ def cmd_run(player: Player) -> None:
     sched = Schedule(sp)
     stop = {"now": False}
     signal.signal(signal.SIGTERM, lambda *a: stop.update(now=True))
+    from tools.voyo_backfill import Backfill
+
+    def save_job(job):
+        st = load_state()
+        st["backfill_job"] = job
+        save_state(st)
+    # BACKFILL (the /disk switch): the weekend's missing sessions from VOYO's recordings, one at a time, with
+    # this same player - only while no live session is on (tools/voyo_backfill.py)
+    bf = player.backfill = Backfill(player, sched.all_windows, lambda key: package_info(player.server, key),
+                                    lambda: load_state().get("backfill_job"), save_job, Target, log)
     log(f"server VOYO player: {sp.get('when')} - recording {', '.join(sp.get('record_sessions') or [])}")
     nxt = [w for w in sched.windows(time.time()) if w["open_until"] > time.time()][:1]
     if nxt:
@@ -1045,9 +1079,12 @@ def cmd_run(player: Player) -> None:
             when = str(sp.get("when") or "schedule")
             win = {"session_name": "always"} if when == "always" else sched.current(now) if when == "schedule" else None
             episodes = player.episode_mode() and when == "schedule"
+            upcoming = [w for w in sched.windows(now) if w["open_until"] > now] if when == "schedule" else []
             if episodes:
                 ss = player.session
-                if win and ss is None and win.get("kind") in ve.KINDS and \
+                if bf.owns(ss):
+                    bf.step(now, win, upcoming)               # the backfill's recording (it stops for a live window)
+                elif win and ss is None and win.get("kind") in ve.KINDS and \
                         getattr(player, "done_window", None) != (win["kind"], win["start"]):
                     url = player.event_url()
                     if not url:
@@ -1065,6 +1102,8 @@ def cmd_run(player: Player) -> None:
                     if player.session is not None and player.session.state == "DONE":
                         player.done_window = (win or {}).get("kind"), (win or {}).get("start")
                         player.close_session(player.session.end_reason or "done")
+                else:
+                    bf.step(now, win, upcoming)                # no live session: the backfill may go on
             elif win and not player.is_open:
                 url = player.stream_url()
                 if not url:
@@ -1078,7 +1117,8 @@ def cmd_run(player: Player) -> None:
                     player.close("session window over")
             if player.is_open and not episodes:
                 player.tick()
-            upcoming = [w for w in sched.windows(now) if w["open_until"] > now] if when == "schedule" else []
+            if not episodes:
+                bf.job_note_unsupported()
             problem = "" if player.stream_url() else "VOYO not set up: no stream page yet (voyo-player.sh login)"
             if not find_browser(sp):
                 problem = "Google Chrome is not installed (setup-voyo-player.sh)"
