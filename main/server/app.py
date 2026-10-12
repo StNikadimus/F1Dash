@@ -42,6 +42,7 @@ from . import security as secmod
 from .security import RateLimiter, Security
 from .public_gateway import PublicGateway, config_problem as public_config_problem
 from . import team_radio
+from .backfill import BackfillControl
 
 log = logging.getLogger("app")
 
@@ -219,6 +220,8 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
     rec_cfg = rec_settings.apply((cfg.get("voyo") or {}).get("recording") or {})
     rec_sizes = admin.Sizes()
     player_hb: dict = {"data": None, "at": None}
+    # the /disk BACKFILL switch and the player's last report of its job (server/backfill.py)
+    backfill = BackfillControl(DATA_DIR / "backfill.json")
     # server-side authentication: /disk password, trusted /remote device, approved /tv browsers
     sec_cfg = cfg.get("security") or {}
     security = Security(DATA_DIR / "auth", sec_cfg)
@@ -842,7 +845,55 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
             player_hb.update(data=body, at=time.monotonic())
             if isinstance(body.get("login"), dict):
                 voyo_account.last_login = body["login"]
-        return JSONResponse({"ok": True, "commands": voyo_account.take_commands()})
+            backfill.report(body.get("backfill"))
+        return JSONResponse({"ok": True, "commands": voyo_account.take_commands(), "backfill": backfill.control()})
+
+    async def api_player_package(request: Request) -> Response:
+        """A package on the disk as stored and checked here (the backfill: is it there already, is it
+        COMPLETE after its close) - local only, no media, no paths."""
+        if not _loopback(request):
+            return JSONResponse({"ok": False, "error": "local only"}, status_code=403)
+        key = request.path_params["key"]
+        pkg = stream_rec.package_dir(key) if stream_rec.ok else None
+        if not stream_rec.ok:
+            return JSONResponse({"ok": False, "error": "the recording disk is not available"}, status_code=503)
+        if pkg is None:
+            return JSONResponse({"ok": False, "error": "no such package"}, status_code=404)
+        try:
+            m = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return JSONResponse({"ok": False, "error": "the package cannot be read"}, status_code=503)
+        chk = (m.get("capture") or {}).get("check") or {}
+        return JSONResponse({"ok": True, "key": key, "status": m.get("status"), "check": chk.get("state"),
+                             "issues": [str(i)[:200] for i in (chk.get("issues") or [])][:6],
+                             "recorded_s": chk.get("recorded_s"), "segments": chk.get("segments")})
+
+    async def api_disk_backfill(request: Request) -> Response:
+        """GET: the backfill's switch and its job. POST {"enabled": true|false} or {"action": "stop"} (STOP NOW:
+        the current session is ended, its partial recording kept and said)."""
+        if request.method == "GET":
+            _s, deny = require_disk(request)
+            return deny or JSONResponse(backfill.public(_hb_age()))
+        _s, deny = require_disk(request, write=True)
+        if deny:
+            return deny
+        if player_rec is None:
+            return JSONResponse({"ok": False, "error": "the server VOYO player is not enabled"}, status_code=409)
+        try:
+            body = json.loads((await request.body())[:1024] or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "json"}, status_code=400)
+        if body.get("action") == "stop":
+            backfill.stop_now()
+            logging.getLogger("disk").info("BACKFILL stop now requested on the /disk page")
+        elif isinstance(body.get("enabled"), bool):
+            backfill.set(body["enabled"])
+            logging.getLogger("disk").info("BACKFILL turned %s on the /disk page", "ON" if body["enabled"] else "OFF")
+        else:
+            return JSONResponse({"ok": False, "error": "send {enabled: true|false} or {action: stop}"}, status_code=400)
+        return JSONResponse({"ok": True, **backfill.public(_hb_age())})
 
     async def api_disk_voyo(request: Request) -> Response:
         """GET: the VOYO account (never the password). POST {email, password, stream_url}: save (token)."""
@@ -919,6 +970,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
                        "heartbeat_age_s": None if _hb_age() is None else round(_hb_age(), 1)},
             "retention": admin.retention_table(rc, rec_settings.values),
             "voyo": voyo_account.public(),
+            "backfill": backfill.public(_hb_age()) if player_rec is not None else None,
             "live": live_info(),
             "config": {"path": rc.get("path"), "require_mount": rc.get("require_mount"),
                        "mount_marker": rc.get("mount_marker"), "capture_encoder": rc.get("capture_encoder"),
@@ -1769,6 +1821,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/api/voyo/recordings", api_voyo_recordings),
         Route("/api/voyo/player/status", api_player_status, methods=["POST"]),
         Route("/api/voyo/player/log", api_player_log, methods=["POST"]),
+        Route("/api/voyo/player/package/{key}", api_player_package),
         Route("/tv", tv_page),
         Route("/tv/", tv_page),
         Route("/tv/live/{name}", tv_live_file),
@@ -1793,6 +1846,7 @@ def create_app(cfg: dict[str, Any]) -> Starlette:
         Route("/api/disk/recordings", api_disk_recordings),
         Route("/api/disk/settings", api_disk_settings, methods=["POST"]),
         Route("/api/disk/voyo", api_disk_voyo, methods=["GET", "POST"]),
+        Route("/api/disk/backfill", api_disk_backfill, methods=["GET", "POST"]),
         Route("/api/disk/voyo/{action}", api_disk_voyo_action, methods=["POST"]),
         Route("/api/disk/recordings/{iid}/delete", api_disk_delete, methods=["POST"]),
         Route("/api/voyo/recordings/{iid}", api_voyo_recording),

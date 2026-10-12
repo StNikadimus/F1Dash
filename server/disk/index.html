@@ -88,6 +88,26 @@
     </div>
   </section>
 
+  <section class="panel wide" id="p-bf">
+    <div class="panel-title">BACKFILL · RECORD WHAT WAS MISSED <span class="panel-hint" id="bf-hint"></span></div>
+    <div class="pad">
+      <div class="bf-top">
+        <button class="btn bf-toggle" id="bf-toggle" aria-pressed="false">BACKFILL OFF</button>
+        <button class="btn danger" id="bf-stop" hidden title="end the session being recorded now (its partial recording is kept)">STOP NOW</button>
+        <span class="bf-state" id="bf-state">–</span>
+        <span class="bf-prog mono" id="bf-prog"></span>
+        <span class="msg" id="bf-msg"></span>
+      </div>
+      <div class="bf-note" id="bf-note">When ON, the server VOYO player records the sessions of the current / last Grand Prix that are not on the disk yet, from VOYO's recordings - one at a time (Practice 1 → Race), never while a live session is on. Sessions already on the disk are not recorded again.</div>
+      <div class="table-wrap">
+        <table class="rec bf-table" id="bf-table">
+          <thead><tr><th>SESSION</th><th>STATUS</th><th>DETAIL</th><th>STARTED</th><th>FINISHED</th><th class="r">TRIES</th></tr></thead>
+          <tbody id="bf-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
   <section class="panel wide" id="p-sec">
     <div class="panel-title">SECURITY <span class="panel-hint" id="sec-hint"></span></div>
     <div class="pad sec-grid">

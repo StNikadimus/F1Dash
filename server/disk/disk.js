@@ -69,6 +69,53 @@ function reauth() {
 }
 function renderTokenBtn() { /* no token any more: the /disk session */ }
 
+/* ------------------------------------------------------------------ BACKFILL: the switch + the job (server/backfill.py) */
+const BF_STATE = { disabled: "OFF", enabled: "ON · waiting", starting: "ON · starting", processing: "ON · RECORDING",
+  stopping: "OFF · finishing the current session", finished: "FINISHED", unsupported: "ON · not possible",
+  "waiting for the player": "ON · waiting for the player (not running?)" };
+const BF_STATUS = { pending: "PENDING", recording: "RECORDING", verifying: "CHECKING", completed: "COMPLETED",
+  skipped: "SKIPPED", unavailable: "UNAVAILABLE", failed: "FAILED" };
+let bfBusy = false;
+function renderBackfill(b) {
+  $("p-bf").hidden = !b;
+  if (!b) return;
+  const job = b.job, on = !!b.enabled;
+  const t = $("bf-toggle");
+  t.textContent = on ? "BACKFILL ON" : "BACKFILL OFF"; t.classList.toggle("on", on); t.setAttribute("aria-pressed", on);
+  t.disabled = bfBusy;
+  $("bf-stop").hidden = !(job && job.current);
+  const st = $("bf-state");
+  st.textContent = BF_STATE[b.state] || String(b.state || "").toUpperCase();
+  st.className = "bf-state " + (b.state === "processing" ? "processing" : b.state === "finished" ? "finished" :
+    ["waiting for the player", "unsupported", "stopping"].includes(b.state) ? "warn" : "");
+  $("bf-prog").textContent = job && job.total ? `${job.done}/${job.total} done` + (job.current ? ` · now: ${job.current}` : "") : "";
+  $("bf-hint").textContent = job && job.meeting ? job.meeting + (job.updated_at ? " · updated " + when(job.updated_at) : "") : "";
+  if (!$("bf-note").dataset.help) $("bf-note").dataset.help = $("bf-note").textContent;
+  $("bf-note").textContent = job && job.note ? job.note : $("bf-note").dataset.help;
+  const rows = job ? job.sessions || [] : [];
+  $("bf-rows").innerHTML = rows.length ? rows.map((x) => `<tr class="${x.status === "recording" || x.status === "verifying" ? "bf-cur" : ""}">` +
+    `<td><b>${esc(x.label)}</b>${x.session_name && x.session_name !== x.label ? `<div class="msg">${esc(x.session_name)}</div>` : ""}</td>` +
+    `<td><span class="bfs ${esc(x.status)}">${esc(BF_STATUS[x.status] || x.status)}</span></td>` +
+    `<td class="det">${esc(x.reason || "")}${x.key ? `<div class="msg mono">${esc(x.key)}</div>` : ""}</td>` +
+    `<td class="mono">${esc(x.started_at ? when(x.started_at) : "–")}</td><td class="mono">${esc(x.finished_at ? when(x.finished_at) : "–")}</td>` +
+    `<td class="r mono">${esc(x.attempts || 0)}</td></tr>`).join("")
+    : `<tr><td colspan="6" class="msg">No backfill run yet.</td></tr>`;
+}
+async function backfill(body, msg) {
+  bfBusy = true; $("bf-toggle").disabled = true; $("bf-msg").textContent = "…";
+  try { const r = await api("/api/disk/backfill", { method: "POST", body: JSON.stringify(body) }); $("bf-msg").textContent = msg; renderBackfill(r); }
+  catch (e) { $("bf-msg").textContent = e.message; }
+  bfBusy = false; $("bf-toggle").disabled = false;
+}
+$("bf-toggle").addEventListener("click", () => {
+  const on = $("bf-toggle").classList.contains("on");
+  backfill({ enabled: !on }, on ? "turned off - no new session is started" : "turned on - the player starts within ~15 s");
+});
+$("bf-stop").addEventListener("click", () => {
+  if (!confirm("End the session being recorded now? Its partial recording stays on the disk (not counted as done).")) return;
+  backfill({ action: "stop" }, "stopping the current session");
+});
+
 /* ------------------------------------------------------------------ status: top bar, disk, now, retention */
 async function loadStatus() {
   try { status = await api("/api/disk/status"); }
@@ -77,7 +124,7 @@ async function loadStatus() {
   const st = status.state;
   setState(st.state, st.detail, st.level);
   renderDisk(status.disk); renderNow(st, status.player); renderRetention(status.retention, status.config);
-  renderVoyo(status.voyo); renderLive(status.live);
+  renderVoyo(status.voyo); renderLive(status.live); renderBackfill(status.backfill);
   renderTokenBtn();
 }
 function setState(main, sub, level) {

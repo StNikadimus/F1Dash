@@ -417,6 +417,40 @@ REPLAYS list:
 Segments that arrive later (left in the spool while the server was away) are checked again. A
 one-minute file can no longer pass as a full session.
 
+### Backfill: recording what was missed (`/disk` → BACKFILL)
+
+When the live recording missed a session (VOYO error, the recording not on the page in time, a player
+failure), **BACKFILL ON** on `/disk` records it afterwards from VOYO's recording. It is not a second
+recorder. The server VOYO player does it in its own loop, with the same steps as a live session: find the
+session on the event page, verify the right episode plays, record it from 0:00 to its end, close the package
+and have it checked. The package key is the same one the live recording would have used.
+
+- **Which Grand Prix:** the latest one in the F1 schedule whose first session has begun (this weekend or the
+  last one). The event page is the one the live recording uses (`event_url` / the `/disk` VOYO page).
+- **Order, one at a time:** Practice 1, Practice 2, Practice 3, Sprint Qualifying, Sprint, Qualifying,
+  Race. The next session is started only after the one before is finished, saved and checked.
+- **Completed** only when the dashboard server closed the package and its own check said **COMPLETE**.
+- **Already on the disk:** not recorded again and never overwritten. A COMPLETE one is "completed
+  (already on the disk)". A partial one is "skipped". Delete it in RECORDINGS to record it again.
+- **Not there:** a session that is not in the weekend's schedule, or is still to come (the live recording
+  records it), is "skipped". A session VOYO does not have (not found, ambiguous, or an older weekend's
+  page) is "unavailable". Both are said with the reason, and the job goes on.
+- **Errors:** the wrong video, a recording that cannot be confirmed (twice), an unreadable event page, or a
+  check that says INCOMPLETE is "failed" with the reason. The job goes on with the next session.
+- **The live recording comes first:** nothing starts while a live session window is open, or when the next
+  one would open before this recording is over (it waits). A live window that opens anyway stops the
+  backfill recording at once. Its partial recording is kept and said, and the live session is recorded.
+- **OFF** starts no new session. The current one is finished first, so its recording stays whole.
+  **STOP NOW** ends it at once; its partial recording is kept, marked failed, never "completed".
+- **Restarts:** the switch and the last results are kept (`<data>/backfill.json` on the server; the job in
+  `<data>/voyo_server_player.json` on the player side). A session that was being recorded when the
+  player stopped is "failed: interrupted". Clicking ON again continues the same run. When a run is
+  finished, the switch goes back to OFF; ON then starts a new run, where sessions already on the disk are
+  just "completed".
+- The `/disk` panel shows the state (OFF / ON · waiting / ON · RECORDING / FINISHED), the session being
+  done, progress (n/7), and every session with its status, reason, start and finish times, and tries. Only
+  `/disk` (password + CSRF) can switch it. Through Tailscale Funnel it is closed (404).
+
 ### Why recordings used to be short (found and fixed)
 
 Each file in `capture/` is one segment of `capture_segment_seconds` (60 s). A recording is many of

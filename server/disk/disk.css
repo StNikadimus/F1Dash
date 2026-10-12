@@ -207,3 +207,22 @@ dialog#viewer::backdrop { background: rgba(0, 0, 0, .75); }
   .log .ln { grid-template-columns: 1fr; gap: 0; }
   .fld { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 }
+
+/* BACKFILL: the switch, its state, every session of the job */
+.bf-top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.btn.bf-toggle { font-size: 15px; padding: 8px 16px; min-width: 160px; }
+.btn.bf-toggle.on { background: var(--green); border-color: var(--green); color: #04150c; }
+.bf-state { font-size: 15px; font-weight: 900; letter-spacing: .08em; color: var(--text-2); }
+.bf-state.processing { color: var(--red); } .bf-state.finished { color: var(--green); }
+.bf-state.warn { color: var(--amber); }
+.bf-prog { font-size: 15px; font-weight: 800; color: var(--text-2); }
+.bf-note { font-size: 13px; color: var(--text-3); font-weight: 600; margin: 10px 0 6px; line-height: 1.45; }
+table.bf-table { min-width: 720px; }
+table.bf-table td.det { color: var(--text-2); max-width: 520px; overflow-wrap: anywhere; }
+.bfs { font-size: 11px; font-weight: 900; letter-spacing: .1em; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--line-2);
+  color: var(--text-3); white-space: nowrap; }
+.bfs.completed { color: var(--green); border-color: var(--green); }
+.bfs.recording, .bfs.verifying { color: var(--red); border-color: var(--red); }
+.bfs.failed { color: var(--red); border-color: var(--red); background: rgba(255,45,61,.1); }
+.bfs.skipped, .bfs.unavailable { color: var(--amber); border-color: var(--amber); }
+tr.bf-cur td { background: var(--panel-2); }
